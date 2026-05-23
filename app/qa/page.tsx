@@ -6,7 +6,6 @@ type AdUnit = {
   id: string;
   name: string;
   link: string;
-  copy: string;
 };
 
 type CheckResult = {
@@ -91,8 +90,8 @@ function CheckRow({ label, result }: { label: string; result: CheckResult }) {
 export default function QAPage() {
   const [wo, setWo] = useState("");
   const [units, setUnits] = useState<AdUnit[]>([
-    { id: "1", name: "", link: "", copy: "" },
-    { id: "2", name: "", link: "", copy: "" },
+    { id: "1", name: "", link: "" },
+    { id: "2", name: "", link: "" },
   ]);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<QAResult | null>(null);
@@ -101,7 +100,7 @@ export default function QAPage() {
   function addUnit() {
     setUnits((prev) => [
       ...prev,
-      { id: String(Date.now()), name: "", link: "", copy: "" },
+      { id: String(Date.now()), name: "", link: "" },
     ]);
   }
 
@@ -110,7 +109,7 @@ export default function QAPage() {
     setUnits((prev) => prev.filter((u) => u.id !== id));
   }
 
-  function updateUnit(id: string, field: "name" | "link" | "copy", value: string) {
+  function updateUnit(id: string, field: "name" | "link", value: string) {
     setUnits((prev) =>
       prev.map((u) => (u.id === id ? { ...u, [field]: value } : u))
     );
@@ -118,7 +117,7 @@ export default function QAPage() {
 
   async function runQA() {
     if (!wo.trim()) return;
-    const filledUnits = units.filter((u) => u.link.trim() || u.copy.trim());
+    const filledUnits = units.filter((u) => u.link.trim());
     if (filledUnits.length === 0) return;
 
     setLoading(true);
@@ -204,58 +203,56 @@ export default function QAPage() {
                   Step 2
                 </p>
                 <h2 className="text-base font-semibold text-gray-900">
-                  Ad units
+                  Ad preview links
                 </h2>
                 <p className="text-sm text-gray-500 mt-0.5">
-                  One row per ad unit. Paste the ad copy — that&apos;s what gets reviewed. The preview link is optional reference only.
+                  One row per ad unit. Paste the Meta preview link — creative content is pulled automatically via the API.
                 </p>
               </div>
 
-              <div className="space-y-3">
+              {/* Column headers */}
+              <div className="grid grid-cols-[1fr_2fr_32px] gap-3 mb-2 px-1">
+                <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
+                  Ad unit name
+                </span>
+                <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
+                  Preview link
+                </span>
+                <span />
+              </div>
+
+              <div className="space-y-2">
                 {units.map((unit) => (
                   <div
                     key={unit.id}
-                    className="rounded-xl border border-gray-200 bg-gray-50 p-3 space-y-2"
+                    className="grid grid-cols-[1fr_2fr_32px] gap-3 items-center"
                   >
-                    {/* Name + link row */}
-                    <div className="grid grid-cols-[1fr_2fr_32px] gap-2 items-center">
-                      <input
-                        type="text"
-                        value={unit.name}
-                        onChange={(e) =>
-                          updateUnit(unit.id, "name", e.target.value)
-                        }
-                        placeholder="Unit name (e.g. Static)"
-                        className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
-                      />
-                      <input
-                        type="text"
-                        value={unit.link}
-                        onChange={(e) =>
-                          updateUnit(unit.id, "link", e.target.value)
-                        }
-                        placeholder="Preview link (optional, for reference)"
-                        className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
-                      />
-                      <button
-                        onClick={() => removeUnit(unit.id)}
-                        disabled={units.length <= 1}
-                        className="flex items-center justify-center w-8 h-8 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                        title="Remove"
-                      >
-                        ×
-                      </button>
-                    </div>
-                    {/* Ad copy textarea */}
-                    <textarea
-                      value={unit.copy}
+                    <input
+                      type="text"
+                      value={unit.name}
                       onChange={(e) =>
-                        updateUnit(unit.id, "copy", e.target.value)
+                        updateUnit(unit.id, "name", e.target.value)
                       }
-                      rows={3}
-                      placeholder="Paste ad copy here — headline, body text, CTA, any visible copy from the ad. This is what gets QA'd."
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent resize-none"
+                      placeholder="e.g. Static"
+                      className="px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
                     />
+                    <input
+                      type="text"
+                      value={unit.link}
+                      onChange={(e) =>
+                        updateUnit(unit.id, "link", e.target.value)
+                      }
+                      placeholder="https://..."
+                      className="px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                    />
+                    <button
+                      onClick={() => removeUnit(unit.id)}
+                      disabled={units.length <= 1}
+                      className="flex items-center justify-center w-8 h-8 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                      title="Remove"
+                    >
+                      ×
+                    </button>
                   </div>
                 ))}
               </div>
@@ -279,7 +276,7 @@ export default function QAPage() {
               disabled={
                 loading ||
                 !wo.trim() ||
-                units.every((u) => !u.link.trim() && !u.copy.trim())
+                units.every((u) => !u.link.trim())
               }
               className="w-full py-3.5 rounded-2xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >

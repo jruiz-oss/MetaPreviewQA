@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { fetchPageText } from "@/lib/scraper";
+import { extractAdId, fetchAdContent } from "@/lib/meta-api";
 
 const client = new Anthropic();
 
@@ -8,7 +8,7 @@ const SYSTEM_PROMPT = `You are a QA reviewer for social media ads at a digital m
 
 For each ad unit you will receive:
 - The ad unit name and preview link URL
-- The extracted page text from the preview link (if it could be fetched)
+- The ad creative content pulled directly from the Meta API (copy, headline, CTA, destination URL)
 
 Review each ad unit against the work order on four criteria:
 1. copy_creative_alignment — Does the copy and described creative match what the WO specifies? Look for mismatched imagery descriptions, wrong product/offer references, wrong campaign theme.
@@ -45,7 +45,6 @@ IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exac
 type AdUnit = {
   name: string;
   link: string;
-  copy?: string;
 };
 
 export async function POST(request: Request) {
@@ -61,29 +60,43 @@ export async function POST(request: Request) {
     );
   }
 
-  // For each unit: use pasted copy if provided, fall back to scraping the URL
+  const accessToken = process.env.META_ACCESS_TOKEN;
+  if (!accessToken) {
+    return NextResponse.json(
+      { error: "META_ACCESS_TOKEN environment variable is not set." },
+      { status: 500 }
+    );
+  }
+
+  // Resolve each unit: extract ad ID → fetch from Meta API
   const unitContents = await Promise.all(
     units.map(async (unit) => {
-      if (unit.copy?.trim()) {
-        return { ...unit, fetchedContent: unit.copy.trim(), source: "pasted" };
+      const adId = extractAdId(unit.link);
+      if (!adId) {
+        return {
+          ...unit,
+          content: null,
+          note: "Could not extract an ad ID from this URL.",
+        };
       }
-      const text = unit.link ? await fetchPageText(unit.link) : null;
-      return { ...unit, fetchedContent: text, source: "scraped" };
+
+      const content = await fetchAdContent(adId, accessToken);
+      return {
+        ...unit,
+        content,
+        note: content ? null : "Meta API returned no content — ad may not be accessible with this token.",
+      };
     })
   );
 
   // Build the user message
   const unitSections = unitContents
     .map((unit) => {
-      let content: string;
-      if (unit.fetchedContent) {
-        const label = unit.source === "pasted" ? "Ad copy (pasted by reviewer)" : "Fetched content";
-        content = `${label}:\n${unit.fetchedContent}`;
-      } else {
-        content = "Note: No ad copy was provided and the URL could not be fetched (likely requires login). Review based on WO only — mark copy_creative_alignment and grammar_typos as warning due to missing content.";
-      }
+      const contentBlock = unit.content
+        ? `Ad creative content (from Meta API):\n${unit.content}`
+        : `Note: ${unit.note ?? "Could not retrieve ad content."} Mark all checks as warning.`;
       const urlLine = unit.link ? `\nURL: ${unit.link}` : "";
-      return `---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${content}`;
+      return `---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${contentBlock}`;
     })
     .join("\n\n");
 
@@ -100,8 +113,10 @@ export async function POST(request: Request) {
     const raw =
       message.content[0].type === "text" ? message.content[0].text : "";
 
-    // Parse JSON — strip any accidental markdown fences
-    const cleaned = raw.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+    const cleaned = raw
+      .replace(/^```json\s*/i, "")
+      .replace(/```\s*$/i, "")
+      .trim();
     const result = JSON.parse(cleaned);
 
     return NextResponse.json(result);
