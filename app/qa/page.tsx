@@ -203,10 +203,10 @@ export default function QAPage() {
                   Step 2
                 </p>
                 <h2 className="text-base font-semibold text-gray-900">
-                  Ad preview links
+                  Ad units
                 </h2>
                 <p className="text-sm text-gray-500 mt-0.5">
-                  One row per ad unit. Paste the Meta preview link — creative content is pulled automatically via the API.
+                  Paste the numeric <strong>Ad ID</strong> from Ads Manager — not the <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">fb.me/adspreview/</code> client link. Find it in Ads Manager by clicking on the ad row; the ID appears at the bottom of the panel.
                 </p>
               </div>
 
@@ -216,7 +216,7 @@ export default function QAPage() {
                   Ad unit name
                 </span>
                 <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
-                  Preview link
+                  Ad ID
                 </span>
                 <span />
               </div>
@@ -242,7 +242,7 @@ export default function QAPage() {
                       onChange={(e) =>
                         updateUnit(unit.id, "link", e.target.value)
                       }
-                      placeholder="https://..."
+                      placeholder="e.g. 120210001234567"
                       className="px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
                     />
                     <button

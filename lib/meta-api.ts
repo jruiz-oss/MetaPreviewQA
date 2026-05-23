@@ -10,35 +10,27 @@ const GRAPH_API = "https://graph.facebook.com/v19.0";
 export async function resolveAdId(input: string): Promise<string | null> {
   const trimmed = input.trim();
 
-  // Already a numeric ID
-  if (/^\d+$/.test(trimmed)) return trimmed;
+  // Already a numeric ID (most reliable — paste straight from Ads Manager)
+  if (/^\d{10,}$/.test(trimmed)) return trimmed;
 
-  let urlStr = trimmed.startsWith("http") ? trimmed : `https://${trimmed}`;
-
-  // For fb.me short links, follow the redirect to get the real URL first
   try {
-    const parsed = new URL(urlStr);
-    if (parsed.hostname === "fb.me" || parsed.hostname.endsWith(".fb.me")) {
-      const resolved = await followRedirect(urlStr);
-      if (resolved) urlStr = resolved;
-    }
-  } catch {
-    return null;
-  }
-
-  return extractIdFromUrl(urlStr);
-}
-
-function extractIdFromUrl(urlStr: string): string | null {
-  try {
+    const urlStr = trimmed.startsWith("http") ? trimmed : `https://${trimmed}`;
     const url = new URL(urlStr);
-    return (
+
+    // fb.me/adspreview/ — opaque token, no ad ID extractable
+    if (url.hostname === "fb.me" || url.hostname.endsWith(".fb.me")) {
+      return null;
+    }
+
+    // Standard query params: ?id=, ?ad_id=, ?selected_ad_ids=
+    const fromParams =
       url.searchParams.get("id") ||
       url.searchParams.get("ad_id") ||
       url.searchParams.get("creative_id") ||
-      url.searchParams.get("preview_id") ||
-      null
-    );
+      url.searchParams.get("selected_ad_ids");
+    if (fromParams) return fromParams.split(",")[0].trim();
+
+    return null;
   } catch {
     return null;
   }
