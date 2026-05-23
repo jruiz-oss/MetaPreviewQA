@@ -45,6 +45,7 @@ IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exac
 type AdUnit = {
   name: string;
   link: string;
+  copy?: string;
 };
 
 export async function POST(request: Request) {
@@ -60,21 +61,29 @@ export async function POST(request: Request) {
     );
   }
 
-  // Fetch page content for each unit in parallel
+  // For each unit: use pasted copy if provided, fall back to scraping the URL
   const unitContents = await Promise.all(
     units.map(async (unit) => {
-      const text = await fetchPageText(unit.link);
-      return { ...unit, fetchedContent: text };
+      if (unit.copy?.trim()) {
+        return { ...unit, fetchedContent: unit.copy.trim(), source: "pasted" };
+      }
+      const text = unit.link ? await fetchPageText(unit.link) : null;
+      return { ...unit, fetchedContent: text, source: "scraped" };
     })
   );
 
   // Build the user message
   const unitSections = unitContents
     .map((unit) => {
-      const content = unit.fetchedContent
-        ? `Fetched content:\n${unit.fetchedContent}`
-        : "Note: Could not fetch this URL. It may require a Meta login. Review based on WO only and mark url_cta as warning.";
-      return `---\nAd unit: ${unit.name || "Unnamed"}\nURL: ${unit.link}\n${content}`;
+      let content: string;
+      if (unit.fetchedContent) {
+        const label = unit.source === "pasted" ? "Ad copy (pasted by reviewer)" : "Fetched content";
+        content = `${label}:\n${unit.fetchedContent}`;
+      } else {
+        content = "Note: No ad copy was provided and the URL could not be fetched (likely requires login). Review based on WO only — mark copy_creative_alignment and grammar_typos as warning due to missing content.";
+      }
+      const urlLine = unit.link ? `\nURL: ${unit.link}` : "";
+      return `---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${content}`;
     })
     .join("\n\n");
 
