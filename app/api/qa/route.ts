@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { extractAdId, fetchAdContent } from "@/lib/meta-api";
+import { resolveAdId, fetchAdContent } from "@/lib/meta-api";
 
 const client = new Anthropic();
 
@@ -71,7 +71,7 @@ export async function POST(request: Request) {
   // Resolve each unit: extract ad ID → fetch from Meta API
   const unitContents = await Promise.all(
     units.map(async (unit) => {
-      const adId = extractAdId(unit.link);
+      const adId = await resolveAdId(unit.link);
       if (!adId) {
         return {
           ...unit,

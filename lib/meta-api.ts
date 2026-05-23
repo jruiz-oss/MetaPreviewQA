@@ -1,27 +1,61 @@
 const GRAPH_API = "https://graph.facebook.com/v19.0";
 
 /**
- * Extracts an ad ID from a Meta preview URL or returns the raw value if it's already a numeric ID.
- * Handles formats like:
- *   https://www.facebook.com/ads/preview/?id=120210001234567
- *   https://business.facebook.com/ads/preview/?id=120210001234567&creative_id=...
- *   https://www.facebook.com/ads/api/preview/?id=120210001234567
- *   120210001234567  (raw ID pasted directly)
+ * Resolves a Meta preview URL to an ad/creative ID.
+ * Handles:
+ *   - Numeric IDs pasted directly: 120210001234567
+ *   - Ads Manager URLs with ?id= param: facebook.com/ads/preview/?id=XXXXX
+ *   - fb.me short links: fb.me/adspreview/facebook/1Z3drgvvv0VRnUA  (follows redirect)
  */
-export function extractAdId(input: string): string | null {
+export async function resolveAdId(input: string): Promise<string | null> {
   const trimmed = input.trim();
 
   // Already a numeric ID
   if (/^\d+$/.test(trimmed)) return trimmed;
 
+  let urlStr = trimmed.startsWith("http") ? trimmed : `https://${trimmed}`;
+
+  // For fb.me short links, follow the redirect to get the real URL first
   try {
-    const url = new URL(trimmed.startsWith("http") ? trimmed : `https://${trimmed}`);
+    const parsed = new URL(urlStr);
+    if (parsed.hostname === "fb.me" || parsed.hostname.endsWith(".fb.me")) {
+      const resolved = await followRedirect(urlStr);
+      if (resolved) urlStr = resolved;
+    }
+  } catch {
+    return null;
+  }
+
+  return extractIdFromUrl(urlStr);
+}
+
+function extractIdFromUrl(urlStr: string): string | null {
+  try {
+    const url = new URL(urlStr);
     return (
       url.searchParams.get("id") ||
       url.searchParams.get("ad_id") ||
       url.searchParams.get("creative_id") ||
+      url.searchParams.get("preview_id") ||
       null
     );
+  } catch {
+    return null;
+  }
+}
+
+async function followRedirect(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(8000),
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+    });
+    // res.url is the final URL after all redirects
+    return res.url !== url ? res.url : null;
   } catch {
     return null;
   }
@@ -78,8 +112,7 @@ type AdResponse = {
 
 /**
  * Fetches ad creative content from the Meta Graph API.
- * Returns a plain-text summary of the ad copy, headline, CTA, and URL
- * suitable for Claude to review against a work order.
+ * Returns a plain-text summary suitable for Claude to review against a work order.
  */
 export async function fetchAdContent(
   adId: string,
@@ -131,7 +164,8 @@ function formatCreative(data: AdResponse): string | null {
     if (ld.link) lines.push(`Link URL: ${ld.link}`);
     if (ld.caption) lines.push(`Caption: ${ld.caption}`);
     if (ld.call_to_action?.type) lines.push(`CTA: ${ld.call_to_action.type}`);
-    if (ld.call_to_action?.value?.link) lines.push(`CTA URL: ${ld.call_to_action.value.link}`);
+    if (ld.call_to_action?.value?.link)
+      lines.push(`CTA URL: ${ld.call_to_action.value.link}`);
 
     // Carousel cards
     if (ld.child_attachments?.length) {
@@ -141,7 +175,8 @@ function formatCreative(data: AdResponse): string | null {
         if (card.name) cardLines.push(`headline: ${card.name}`);
         if (card.description) cardLines.push(`desc: ${card.description}`);
         if (card.link) cardLines.push(`url: ${card.link}`);
-        if (card.call_to_action?.type) cardLines.push(`cta: ${card.call_to_action.type}`);
+        if (card.call_to_action?.type)
+          cardLines.push(`cta: ${card.call_to_action.type}`);
         lines.push(`  Card ${i + 1}: ${cardLines.join(" | ")}`);
       });
     }
@@ -152,7 +187,8 @@ function formatCreative(data: AdResponse): string | null {
     if (vd.message) lines.push(`Video copy: ${vd.message}`);
     if (vd.title) lines.push(`Video title: ${vd.title}`);
     if (vd.call_to_action?.type) lines.push(`CTA: ${vd.call_to_action.type}`);
-    if (vd.call_to_action?.value?.link) lines.push(`CTA URL: ${vd.call_to_action.value.link}`);
+    if (vd.call_to_action?.value?.link)
+      lines.push(`CTA URL: ${vd.call_to_action.value.link}`);
   }
 
   // asset_feed_spec — dynamic/flexible ads
@@ -164,14 +200,18 @@ function formatCreative(data: AdResponse): string | null {
     }
     if (feed.titles?.length) {
       lines.push(`Ad titles:`);
-      feed.titles.forEach((t, i) => t.text && lines.push(`  ${i + 1}. ${t.text}`));
+      feed.titles.forEach(
+        (t, i) => t.text && lines.push(`  ${i + 1}. ${t.text}`)
+      );
     }
     if (feed.call_to_action_types?.length) {
       lines.push(`CTA types: ${feed.call_to_action_types.join(", ")}`);
     }
     if (feed.link_urls?.length) {
       lines.push(`Landing URLs:`);
-      feed.link_urls.forEach((l, i) => l.website_url && lines.push(`  ${i + 1}. ${l.website_url}`));
+      feed.link_urls.forEach(
+        (l, i) => l.website_url && lines.push(`  ${i + 1}. ${l.website_url}`)
+      );
     }
   }
 
