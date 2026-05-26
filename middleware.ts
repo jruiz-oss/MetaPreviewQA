@@ -4,8 +4,8 @@ import type { NextRequest } from "next/server";
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Allow auth API and the login page through
-  if (pathname === "/" || pathname.startsWith("/api/auth")) {
+  // Allow auth API, login page, and temp debug route through
+  if (pathname === "/" || pathname.startsWith("/api/auth") || pathname.startsWith("/api/debug-drive")) {
     return NextResponse.next();
   }
 
