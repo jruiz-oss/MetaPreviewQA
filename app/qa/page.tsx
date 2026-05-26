@@ -146,7 +146,7 @@ export default function QAPage() {
     const regex = /https:\/\/docs\.google\.com\/document\/d\/[a-zA-Z0-9_-]+(?:\/[^\s"')]*)?/g;
     const matches = text.match(regex) ?? [];
     // Deduplicate
-    return [...new Set(matches)];
+    return Array.from(new Set(matches));
   }
 
   async function handleWoChange(value: string) {
