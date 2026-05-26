@@ -384,7 +384,7 @@ export default function QAPage() {
             Commit Agency
           </span>
           <span className="text-gray-200">|</span>
-          <h1 className="text-sm font-semibold text-gray-900">Ad QA Tool</h1>
+          <h1 className="text-sm font-semibold text-gray-900">Vera</h1>
         </div>
         {result && (
           <button

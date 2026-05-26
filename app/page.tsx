@@ -36,7 +36,7 @@ export default function LoginPage() {
           <p className="text-xs font-medium tracking-widest text-gray-400 uppercase mb-2">
             Commit Agency
           </p>
-          <h1 className="text-2xl font-semibold text-gray-900">Ad QA Tool</h1>
+          <h1 className="text-2xl font-semibold text-gray-900">Vera</h1>
           <p className="text-sm text-gray-500 mt-1">
             Enter the team password to continue
           </p>
