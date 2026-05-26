@@ -209,7 +209,7 @@ export async function fetchAdContent(
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     data = await res.json();
   } catch (err) {
-    return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}` };
+    return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null };
   }
 
   if (data.error) {
