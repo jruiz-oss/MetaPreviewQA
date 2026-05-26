@@ -107,22 +107,23 @@ export default function QAPage() {
     campaignId: string;
     filter: string;
     loading: boolean;
+    loaded: boolean;
     error: string;
   };
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([
-    { id: "c1", campaignId: "", filter: "", loading: false, error: "" },
+    { id: "c1", campaignId: "", filter: "", loading: false, loaded: false, error: "" },
   ]);
 
   function addCampaignRow() {
     setCampaigns((prev) => [
       ...prev,
-      { id: String(Date.now()), campaignId: "", filter: "", loading: false, error: "" },
+      { id: String(Date.now()), campaignId: "", filter: "", loading: false, loaded: false, error: "" },
     ]);
   }
 
   function removeCampaignRow(id: string) {
     if (campaigns.length <= 1) {
-      setCampaigns([{ id: "c1", campaignId: "", filter: "", loading: false, error: "" }]);
+      setCampaigns([{ id: "c1", campaignId: "", filter: "", loading: false, loaded: false, error: "" }]);
     } else {
       setCampaigns((prev) => prev.filter((c) => c.id !== id));
     }
@@ -130,7 +131,7 @@ export default function QAPage() {
 
   function updateCampaignRow(id: string, field: "campaignId" | "filter", value: string) {
     setCampaigns((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, [field]: value, error: "" } : c))
+      prev.map((c) => (c.id === id ? { ...c, [field]: value, error: "", loaded: false } : c))
     );
   }
 
@@ -318,7 +319,7 @@ export default function QAPage() {
       });
 
       setCampaigns((prev) =>
-        prev.map((c) => (c.id === rowId ? { ...c, loading: false } : c))
+        prev.map((c) => (c.id === rowId ? { ...c, loading: false, loaded: true } : c))
       );
     } catch (err) {
       setCampaigns((prev) =>
@@ -523,13 +524,22 @@ export default function QAPage() {
                       />
                       <button
                         onClick={() => loadFromCampaign(row.id)}
-                        disabled={row.loading || !row.campaignId.trim()}
-                        className="px-4 py-2.5 rounded-xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap flex items-center gap-2"
+                        disabled={row.loading || row.loaded || !row.campaignId.trim()}
+                        className={`px-4 py-2.5 rounded-xl text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-2 ${
+                          row.loaded
+                            ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+                            : "bg-gray-900 text-white hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                        }`}
                       >
                         {row.loading ? (
                           <>
                             <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                             Loading...
+                          </>
+                        ) : row.loaded ? (
+                          <>
+                            <span className="text-emerald-500">✓</span>
+                            Loaded
                           </>
                         ) : (
                           "Load ads"
