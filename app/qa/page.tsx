@@ -89,6 +89,7 @@ function CheckRow({ label, result }: { label: string; result: CheckResult }) {
 
 export default function QAPage() {
   const [wo, setWo] = useState("");
+  const [detectedDocs, setDetectedDocs] = useState<{ url: string; content: string | null; error: string | null; loading: boolean }[]>([]);
   const [units, setUnits] = useState<AdUnit[]>([
     { id: "1", name: "", link: "" },
     { id: "2", name: "", link: "" },
@@ -99,6 +100,7 @@ export default function QAPage() {
 
   // Campaign import state
   const [campaignId, setCampaignId] = useState("");
+  const [campaignFilter, setCampaignFilter] = useState("");
   const [campaignLoading, setCampaignLoading] = useState(false);
   const [campaignError, setCampaignError] = useState("");
 
@@ -140,6 +142,60 @@ export default function QAPage() {
     );
   }
 
+  function extractGoogleDocUrls(text: string): string[] {
+    const regex = /https:\/\/docs\.google\.com\/document\/d\/[a-zA-Z0-9_-]+(?:\/[^\s"')]*)?/g;
+    const matches = text.match(regex) ?? [];
+    // Deduplicate
+    return [...new Set(matches)];
+  }
+
+  async function handleWoChange(value: string) {
+    setWo(value);
+    const urls = extractGoogleDocUrls(value);
+    if (urls.length === 0) {
+      setDetectedDocs([]);
+      return;
+    }
+    // Add new docs, keep already-loaded ones
+    setDetectedDocs((prev) => {
+      const existingUrls = new Set(prev.map((d) => d.url));
+      const toAdd = urls.filter((u) => !existingUrls.has(u));
+      const toKeep = prev.filter((d) => urls.includes(d.url));
+      return [
+        ...toKeep,
+        ...toAdd.map((url) => ({ url, content: null, error: null, loading: false })),
+      ];
+    });
+  }
+
+  async function loadDoc(url: string) {
+    setDetectedDocs((prev) =>
+      prev.map((d) => (d.url === url ? { ...d, loading: true, error: null } : d))
+    );
+    try {
+      const res = await fetch("/api/fetch-doc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to fetch doc");
+      setDetectedDocs((prev) =>
+        prev.map((d) =>
+          d.url === url ? { ...d, loading: false, content: data.content } : d
+        )
+      );
+    } catch (err) {
+      setDetectedDocs((prev) =>
+        prev.map((d) =>
+          d.url === url
+            ? { ...d, loading: false, error: err instanceof Error ? err.message : "Failed" }
+            : d
+        )
+      );
+    }
+  }
+
   async function loadFromCampaign() {
     const id = campaignId.trim();
     if (!id) return;
@@ -153,7 +209,18 @@ export default function QAPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to load campaign ads");
-      const imported: AdUnit[] = data.ads.map((ad: { id: string; name: string }) => ({
+      const keyword = campaignFilter.trim().toLowerCase();
+      const filtered = keyword
+        ? data.ads.filter((ad: { id: string; name: string }) =>
+            ad.name.toLowerCase().includes(keyword)
+          )
+        : data.ads;
+
+      if (filtered.length === 0) {
+        throw new Error(`No ads matched "${campaignFilter.trim()}" — try a different keyword.`);
+      }
+
+      const imported: AdUnit[] = filtered.map((ad: { id: string; name: string }) => ({
         id: String(Date.now()) + ad.id,
         name: ad.name,
         link: ad.id,
@@ -179,7 +246,14 @@ export default function QAPage() {
       const res = await fetch("/api/qa", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ wo, units: filledUnits }),
+        body: JSON.stringify({
+          wo,
+          units: filledUnits,
+          docContent: detectedDocs
+            .filter((d) => d.content)
+            .map((d) => d.content)
+            .join("\n\n---\n\n") || null,
+        }),
       });
 
       if (!res.ok) {
@@ -240,11 +314,58 @@ export default function QAPage() {
               </div>
               <textarea
                 value={wo}
-                onChange={(e) => setWo(e.target.value)}
+                onChange={(e) => handleWoChange(e.target.value)}
                 rows={6}
-                placeholder="e.g. June Gift Giveaway — carousel + static ads. Fan giveaway imagery (beach theme). Promo runs June 1–30. CTA links to brand.com/june-giveaway. Copy should reference the fan sweepstakes, not cooking products."
+                placeholder="Paste your full work order here — campaign name, offer, creative direction, expected URLs, launch/end dates."
                 className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent resize-none"
               />
+
+              {/* Auto-detected Google Docs */}
+              {detectedDocs.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  <p className="text-xs font-medium text-gray-400 uppercase tracking-wide">
+                    Google Docs detected in WO
+                  </p>
+                  {detectedDocs.map((doc) => (
+                    <div
+                      key={doc.url}
+                      className={`flex items-start gap-3 px-4 py-3 rounded-xl border text-sm ${
+                        doc.content
+                          ? "bg-emerald-50 border-emerald-200"
+                          : doc.error
+                          ? "bg-red-50 border-red-200"
+                          : "bg-gray-50 border-gray-200"
+                      }`}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs text-gray-500 truncate">{doc.url}</p>
+                        {doc.content && (
+                          <p className="text-xs text-emerald-700 mt-0.5">
+                            ✓ Loaded — {doc.content.length.toLocaleString()} chars
+                          </p>
+                        )}
+                        {doc.error && (
+                          <p className="text-xs text-red-600 mt-0.5">{doc.error}</p>
+                        )}
+                      </div>
+                      {!doc.content && !doc.loading && (
+                        <button
+                          onClick={() => loadDoc(doc.url)}
+                          className="shrink-0 px-3 py-1 rounded-lg bg-gray-900 text-white text-xs font-medium hover:bg-gray-800 transition-colors"
+                        >
+                          Load
+                        </button>
+                      )}
+                      {doc.loading && (
+                        <span className="shrink-0 inline-block w-4 h-4 border-2 border-gray-300 border-t-gray-700 rounded-full animate-spin mt-0.5" />
+                      )}
+                    </div>
+                  ))}
+                  <p className="text-xs text-gray-400">
+                    Docs must be shared as "anyone with the link can view". Drive folder links are not supported — only direct Doc links.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Step 2 — Ad Units */}
@@ -262,28 +383,37 @@ export default function QAPage() {
               </div>
 
               {/* Campaign import */}
-              <div className="flex gap-2 mb-5 pb-5 border-b border-gray-100">
-                <input
-                  type="text"
-                  value={campaignId}
-                  onChange={(e) => setCampaignId(e.target.value)}
-                  placeholder="Paste campaign ID to auto-load all ads"
-                  className="flex-1 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
-                />
-                <button
-                  onClick={loadFromCampaign}
-                  disabled={campaignLoading || !campaignId.trim()}
-                  className="px-4 py-2.5 rounded-xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap flex items-center gap-2"
-                >
-                  {campaignLoading ? (
-                    <>
-                      <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      Loading...
-                    </>
-                  ) : (
-                    "Load ads"
-                  )}
-                </button>
+              <div className="flex flex-col gap-2 mb-5 pb-5 border-b border-gray-100">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={campaignId}
+                    onChange={(e) => setCampaignId(e.target.value)}
+                    placeholder="Paste campaign ID to auto-load all ads"
+                    className="flex-1 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                  />
+                  <input
+                    type="text"
+                    value={campaignFilter}
+                    onChange={(e) => setCampaignFilter(e.target.value)}
+                    placeholder="Filter by name (e.g. june)"
+                    className="w-48 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                  />
+                  <button
+                    onClick={loadFromCampaign}
+                    disabled={campaignLoading || !campaignId.trim()}
+                    className="px-4 py-2.5 rounded-xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap flex items-center gap-2"
+                  >
+                    {campaignLoading ? (
+                      <>
+                        <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        Loading...
+                      </>
+                    ) : (
+                      "Load ads"
+                    )}
+                  </button>
+                </div>
               </div>
               {campaignError && (
                 <div className="mb-4 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
