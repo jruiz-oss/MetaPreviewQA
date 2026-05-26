@@ -21,7 +21,8 @@ export type ImageDimensions = {
 
 export type FormatInfo = {
   placements: PlacementInfo | null;
-  imageDimensions: ImageDimensions | null;
+  creativeDimensions: ImageDimensions[]; // all unique dimensions found across creative assets
+  adFormats: string[]; // e.g. ["AUTOMATIC_FORMAT"] or ["SINGLE_IMAGE", "CAROUSEL"]
 };
 
 /**
@@ -195,6 +196,9 @@ type CreativeFields = {
     titles?: Array<{ text?: string }>;
     call_to_action_types?: string[];
     link_urls?: Array<{ website_url?: string }>;
+    images?: Array<{ hash?: string; url?: string; width?: number; height?: number }>;
+    videos?: Array<{ video_id?: string; url?: string; thumbnail_url?: string }>;
+    ad_formats?: string[];
   };
 };
 
@@ -211,7 +215,7 @@ export type FetchResult = {
   content: string | null;
   error: string | null;
   aiEnhancements: AiEnhancement[] | null;
-  formatInfo: FormatInfo | null;
+  formatInfo: FormatInfo | null; // null only on hard API error
 };
 
 /**
@@ -299,7 +303,7 @@ export async function fetchAdContent(
     "adset_id",
     "account_id",
     "name",
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec,degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url,width,height},videos{video_id,thumbnail_url},ad_formats},degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -336,32 +340,51 @@ export async function fetchAdContent(
   const formatted = formatCreative(data);
   const aiEnhancements = parseAiEnhancements(data.creative?.degrees_of_freedom_spec);
 
-  console.log("[dim-debug] creative keys:", JSON.stringify(Object.keys(data.creative ?? {})));
-  console.log("[dim-debug] object_story_spec:", JSON.stringify(data.creative?.object_story_spec ?? null));
-  console.log("[dim-debug] asset_feed_spec keys:", JSON.stringify(Object.keys(data.creative?.asset_feed_spec ?? {})));
-
-  // Fetch placement and creative dimension data in parallel
+  // Fetch placement data
   const adsetId = data.adset_id;
   const accountId = data.account_id;
+  const placements = adsetId ? await fetchAdsetPlacements(adsetId, accessToken) : null;
 
-  // Image hash: check top-level creative field first, then link_data
-  const imageHash =
-    data.creative?.image_hash ??
-    data.creative?.object_story_spec?.link_data?.image_hash;
+  // --- Collect creative dimensions ---
+  // Deduplicate by "WxH" string so we don't list the same size twice
+  const seenSizes = new Set<string>();
+  const creativeDimensions: ImageDimensions[] = [];
 
-  // Video ID: lives inside object_story_spec.video_data
-  const videoId = data.creative?.object_story_spec?.video_data?.video_id;
+  function addDim(w: number | undefined, h: number | undefined) {
+    if (!w || !h) return;
+    const key = `${w}x${h}`;
+    if (!seenSizes.has(key)) { seenSizes.add(key); creativeDimensions.push({ width: w, height: h }); }
+  }
 
-  const [placements, imageDimensions] = await Promise.all([
-    adsetId ? fetchAdsetPlacements(adsetId, accessToken) : Promise.resolve(null),
-    accountId && imageHash
-      ? fetchImageDimensions(accountId, imageHash, accessToken)
-      : videoId
-      ? fetchVideoDimensions(videoId, accessToken)
-      : Promise.resolve(null),
-  ]);
+  // 1. asset_feed_spec.images — most common; dimensions come back directly
+  for (const img of data.creative?.asset_feed_spec?.images ?? []) {
+    addDim(img.width, img.height);
+  }
 
-  const formatInfo: FormatInfo = { placements, imageDimensions };
+  // 2. asset_feed_spec.videos — fetch video dimensions if needed
+  const feedVideoIds = (data.creative?.asset_feed_spec?.videos ?? [])
+    .map((v) => v.video_id)
+    .filter(Boolean) as string[];
+  if (feedVideoIds.length > 0 && creativeDimensions.length === 0) {
+    const videoDims = await Promise.all(feedVideoIds.map((id) => fetchVideoDimensions(id, accessToken)));
+    videoDims.forEach((d) => d && addDim(d.width, d.height));
+  }
+
+  // 3. object_story_spec fallbacks (older ad types)
+  if (creativeDimensions.length === 0) {
+    const imageHash = data.creative?.image_hash ?? data.creative?.object_story_spec?.link_data?.image_hash;
+    const videoId = data.creative?.object_story_spec?.video_data?.video_id;
+    if (accountId && imageHash) {
+      const d = await fetchImageDimensions(accountId, imageHash, accessToken);
+      if (d) addDim(d.width, d.height);
+    } else if (videoId) {
+      const d = await fetchVideoDimensions(videoId, accessToken);
+      if (d) addDim(d.width, d.height);
+    }
+  }
+
+  const adFormats = data.creative?.asset_feed_spec?.ad_formats ?? [];
+  const formatInfo: FormatInfo = { placements, creativeDimensions, adFormats };
 
   return {
     content: formatted,

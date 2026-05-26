@@ -26,20 +26,22 @@ Review each ad unit on six criteria:
    - If the list is absent or empty: status = "unknown", note = "Enhancement data not available for this ad."
    - If ALL enhancements are OFF: status = "pass", note = "All AI enhancements are off."
    - If ANY enhancements are ON: status = "warning", note = list which ones are on (e.g. "Image brightness & contrast, Music are enabled.")
-6. format_size — Does the creative format and dimensions match the placement(s) this ad is running on?
-   You will receive placement targeting (platforms and positions) and image dimensions (width × height) when available.
-   Also use the ad unit name as a hint — names often include "Story", "Feed", "Reel", "Static", "Video", etc.
+6. format_size — Do the creative asset dimensions match the intended format(s) for this ad?
+   You will receive "Creative asset sizes" listing every unique width×height found across the ad's creative assets, plus placement info and ad format type.
+   Also use the ad unit name as a strong hint — names typically include "Story", "Feed", "Reel", "Static", "Video", "1x1", "9x16", "4x5", etc.
    Key Meta format requirements:
-   - Feed (facebook: feed, instagram: stream): ideal 1:1 (ratio ~1.0) or 4:5 (ratio ~0.8); acceptable range 0.8–1.91
-   - Stories (facebook: story, instagram: story): 9:16 (ratio ~0.5625) — a 1:1 or 4:5 image will have safe-zone bars and content may be cut off
-   - Reels (instagram: reels): 9:16 (ratio ~0.5625) — same as Stories
+   - Feed (facebook: feed, instagram: stream): 1:1 (1080×1080, ratio 1.00) or 4:5 (1080×1350, ratio 0.80)
+   - Stories (facebook: story, instagram: story): 9:16 (1080×1920, ratio 0.5625) — a 1:1 or 4:5 asset here means content will be cut off or letterboxed
+   - Reels (instagram: reels): 9:16 (1080×1920, ratio 0.5625)
    - Right column (facebook: right_hand_column): 1.91:1
-   Flag if:
-   - The ad name implies a format (e.g. "Story") that contradicts the placement positions (e.g. only feed positions), or vice versa
-   - Image dimensions don't suit the placement (e.g. 1:1 image in story/reels = letterboxed, content cut off; 9:16 in feed-only = cropped)
-   - If placement data is absent: status = "unknown", note = "Placement data not available."
-   - If placement shows "Advantage+ automatic": Meta selects placements dynamically across feed, stories, reels, etc. Flag as "warning" only if the ad name strongly implies a specific format (e.g. "Story" or "Feed") that may conflict with another placement receiving the wrong size creative. Otherwise mark "pass" with a note that placements are automatic.
-   - If placement is known but dimensions unavailable: use ad name and placement together to assess risk; warn if likely mismatch, pass if consistent
+   Evaluation rules:
+   - If the ad name says "Story" or "Reel" but creative dimensions are 1:1 or 4:5 → FAIL (wrong size, content will be cut off)
+   - If the ad name says "Feed" or "Static" but creative dimensions are 9:16 → FAIL (wrong size, will appear cropped in feed)
+   - If multiple sizes are present (e.g. both 1080×1080 and 1080×1920), check that each size is appropriate for its intended placement
+   - If placement shows "Advantage+ automatic" and multiple sizes exist, pass if the sizes cover both feed and story formats
+   - If placement shows "Advantage+ automatic" and only one size exists, warn if that size would be wrong for some placements
+   - If creative dimensions are absent: status = "unknown", note = "Creative dimensions not available."
+   - If placement data is absent but dimensions exist: evaluate based on ad name vs dimensions alone
 
 For each check, assign one of:
 - "pass" — looks correct
@@ -188,11 +190,15 @@ export async function POST(request: Request) {
             if (p.audience_network_positions.length) lines.push(`  Audience Network positions: ${p.audience_network_positions.join(", ")}`);
           }
         }
-        if (fi.imageDimensions) {
-          const { width, height } = fi.imageDimensions;
-          const ratio = (width / height).toFixed(3);
-          // Label as video or image based on aspect ratio heuristic (videos tend to be non-square)
-          lines.push(`  Creative dimensions: ${width} × ${height} (aspect ratio ${ratio})`);
+        if (fi.creativeDimensions.length > 0) {
+          const dimStrings = fi.creativeDimensions.map(({ width, height }) => {
+            const ratio = (width / height).toFixed(2);
+            return `${width}×${height} (ratio ${ratio})`;
+          });
+          lines.push(`  Creative asset sizes: ${dimStrings.join(", ")}`);
+        }
+        if (fi.adFormats.length > 0) {
+          lines.push(`  Ad formats: ${fi.adFormats.join(", ")}`);
         }
         formatBlock = lines.length > 0
           ? `\nFormat & placement info (from Meta API):\n${lines.join("\n")}`
