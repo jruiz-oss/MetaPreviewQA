@@ -6,6 +6,7 @@ export type CampaignAd = {
 };
 
 export type PlacementInfo = {
+  automatic: boolean; // true = Advantage+ automatic placements — no explicit positions stored
   publisher_platforms: string[];
   facebook_positions: string[];
   instagram_positions: string[];
@@ -223,26 +224,24 @@ async function fetchAdsetPlacements(adsetId: string, accessToken: string): Promi
     const url = `${GRAPH_API}/${adsetId}?fields=targeting&access_token=${accessToken}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
     const data = await res.json();
-    console.log("[format-debug] adset response:", JSON.stringify(data, null, 2));
-    if (data.error) {
-      console.log("[format-debug] adset fetch error:", data.error);
-      return null;
-    }
-    if (!data.targeting) {
-      console.log("[format-debug] adset has no targeting field");
-      return null;
-    }
+    if (data.error || !data.targeting) return null;
     const t = data.targeting;
-    console.log("[format-debug] targeting fields:", JSON.stringify(t, null, 2));
+    const platforms: string[] = t.publisher_platforms ?? [];
+    const fbPositions: string[] = t.facebook_positions ?? [];
+    const igPositions: string[] = t.instagram_positions ?? [];
+    const msPositions: string[] = t.messenger_positions ?? [];
+    const anPositions: string[] = t.audience_network_positions ?? [];
+    // If no explicit positions, this adset uses Advantage+ automatic placements
+    const automatic = platforms.length === 0 && fbPositions.length === 0 && igPositions.length === 0;
     return {
-      publisher_platforms: t.publisher_platforms ?? [],
-      facebook_positions: t.facebook_positions ?? [],
-      instagram_positions: t.instagram_positions ?? [],
-      messenger_positions: t.messenger_positions ?? [],
-      audience_network_positions: t.audience_network_positions ?? [],
+      automatic,
+      publisher_platforms: platforms,
+      facebook_positions: fbPositions,
+      instagram_positions: igPositions,
+      messenger_positions: msPositions,
+      audience_network_positions: anPositions,
     };
-  } catch (err) {
-    console.log("[format-debug] fetchAdsetPlacements threw:", err);
+  } catch {
     return null;
   }
 }
@@ -314,8 +313,6 @@ export async function fetchAdContent(
   const adsetId = data.adset_id;
   const accountId = data.account_id;
   const imageHash = data.creative?.image_hash;
-  console.log("[format-debug] ad fields — adset_id:", adsetId, "account_id:", accountId, "image_hash:", imageHash);
-
   const [placements, imageDimensions] = await Promise.all([
     adsetId ? fetchAdsetPlacements(adsetId, accessToken) : Promise.resolve(null),
     accountId && imageHash ? fetchImageDimensions(accountId, imageHash, accessToken) : Promise.resolve(null),

@@ -38,6 +38,7 @@ Review each ad unit on six criteria:
    - The ad name implies a format (e.g. "Story") that contradicts the placement positions (e.g. only feed positions), or vice versa
    - Image dimensions don't suit the placement (e.g. 1:1 image in story/reels = letterboxed, content cut off; 9:16 in feed-only = cropped)
    - If placement data is absent: status = "unknown", note = "Placement data not available."
+   - If placement shows "Advantage+ automatic": Meta selects placements dynamically across feed, stories, reels, etc. Flag as "warning" only if the ad name strongly implies a specific format (e.g. "Story" or "Feed") that may conflict with another placement receiving the wrong size creative. Otherwise mark "pass" with a note that placements are automatic.
    - If placement is known but dimensions unavailable: use ad name and placement together to assess risk; warn if likely mismatch, pass if consistent
 
 For each check, assign one of:
@@ -176,12 +177,16 @@ export async function POST(request: Request) {
       if (fi) {
         const lines: string[] = [];
         if (fi.placements) {
-          const p = fi.placements;
-          if (p.publisher_platforms.length) lines.push(`  Platforms: ${p.publisher_platforms.join(", ")}`);
-          if (p.facebook_positions.length) lines.push(`  Facebook positions: ${p.facebook_positions.join(", ")}`);
-          if (p.instagram_positions.length) lines.push(`  Instagram positions: ${p.instagram_positions.join(", ")}`);
-          if (p.messenger_positions.length) lines.push(`  Messenger positions: ${p.messenger_positions.join(", ")}`);
-          if (p.audience_network_positions.length) lines.push(`  Audience Network positions: ${p.audience_network_positions.join(", ")}`);
+          if (fi.placements.automatic) {
+            lines.push(`  Placements: Advantage+ automatic (Meta selects placements dynamically — no explicit positions set)`);
+          } else {
+            const p = fi.placements;
+            if (p.publisher_platforms.length) lines.push(`  Platforms: ${p.publisher_platforms.join(", ")}`);
+            if (p.facebook_positions.length) lines.push(`  Facebook positions: ${p.facebook_positions.join(", ")}`);
+            if (p.instagram_positions.length) lines.push(`  Instagram positions: ${p.instagram_positions.join(", ")}`);
+            if (p.messenger_positions.length) lines.push(`  Messenger positions: ${p.messenger_positions.join(", ")}`);
+            if (p.audience_network_positions.length) lines.push(`  Audience Network positions: ${p.audience_network_positions.join(", ")}`);
+          }
         }
         if (fi.imageDimensions) {
           const { width, height } = fi.imageDimensions;
