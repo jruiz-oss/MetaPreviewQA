@@ -336,6 +336,10 @@ export async function fetchAdContent(
   const formatted = formatCreative(data);
   const aiEnhancements = parseAiEnhancements(data.creative?.degrees_of_freedom_spec);
 
+  console.log("[dim-debug] creative keys:", JSON.stringify(Object.keys(data.creative ?? {})));
+  console.log("[dim-debug] object_story_spec:", JSON.stringify(data.creative?.object_story_spec ?? null));
+  console.log("[dim-debug] asset_feed_spec keys:", JSON.stringify(Object.keys(data.creative?.asset_feed_spec ?? {})));
+
   // Fetch placement and creative dimension data in parallel
   const adsetId = data.adset_id;
   const accountId = data.account_id;
