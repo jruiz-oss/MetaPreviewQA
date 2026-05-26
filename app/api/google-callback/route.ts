@@ -5,15 +5,16 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
   const error = searchParams.get("error");
+  const allParams = Object.fromEntries(searchParams.entries());
 
   if (error) {
-    return new NextResponse(`<html><body><h2>Error: ${error}</h2></body></html>`, {
+    return new NextResponse(`<html><body><h2>Error: ${error}</h2><pre>${JSON.stringify(allParams, null, 2)}</pre></body></html>`, {
       headers: { "Content-Type": "text/html" },
     });
   }
 
   if (!code) {
-    return new NextResponse(`<html><body><h2>No code returned from Google.</h2></body></html>`, {
+    return new NextResponse(`<html><body><h2>No code returned from Google.</h2><p>All params received:</p><pre>${JSON.stringify(allParams, null, 2)}</pre><p>Full URL: ${request.url}</p></body></html>`, {
       headers: { "Content-Type": "text/html" },
     });
   }
