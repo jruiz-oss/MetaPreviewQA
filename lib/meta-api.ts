@@ -196,7 +196,7 @@ type CreativeFields = {
     titles?: Array<{ text?: string }>;
     call_to_action_types?: string[];
     link_urls?: Array<{ website_url?: string }>;
-    images?: Array<{ hash?: string; url?: string; width?: number; height?: number }>;
+    images?: Array<{ hash?: string; url?: string }>; // width/height not a valid sub-field — use AdImages endpoint
     videos?: Array<{ video_id?: string; url?: string; thumbnail_url?: string }>;
     ad_formats?: string[];
   };
@@ -253,21 +253,39 @@ async function fetchAdsetPlacements(adsetId: string, accessToken: string): Promi
 }
 
 /**
- * Fetches image dimensions from the AdImages endpoint using an image hash.
+ * Batch-fetches image dimensions from the AdImages endpoint using multiple hashes.
+ * Returns a map of hash → dimensions.
+ */
+async function fetchBatchImageDimensions(
+  accountId: string,
+  hashes: string[],
+  accessToken: string
+): Promise<Map<string, ImageDimensions>> {
+  const result = new Map<string, ImageDimensions>();
+  if (hashes.length === 0) return result;
+  try {
+    const hashParam = encodeURIComponent(JSON.stringify(hashes));
+    const url = `${GRAPH_API}/act_${accountId}/adimages?hashes=${hashParam}&fields=width,height,hash&access_token=${accessToken}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    const data = await res.json();
+    if (data.error || !data.data?.length) return result;
+    for (const img of data.data as Array<{ hash?: string; width?: number; height?: number }>) {
+      if (img.hash && img.width && img.height) {
+        result.set(img.hash, { width: img.width, height: img.height });
+      }
+    }
+  } catch {
+    // ignore — dimensions just won't be available
+  }
+  return result;
+}
+
+/**
+ * Single-hash convenience wrapper (used for object_story_spec fallback).
  */
 async function fetchImageDimensions(accountId: string, imageHash: string, accessToken: string): Promise<ImageDimensions | null> {
-  try {
-    const hashParam = encodeURIComponent(JSON.stringify([imageHash]));
-    const url = `${GRAPH_API}/act_${accountId}/adimages?hashes=${hashParam}&fields=width,height,hash&access_token=${accessToken}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    const data = await res.json();
-    if (data.error || !data.data?.length) return null;
-    const img = data.data[0];
-    if (!img.width || !img.height) return null;
-    return { width: img.width, height: img.height };
-  } catch {
-    return null;
-  }
+  const map = await fetchBatchImageDimensions(accountId, [imageHash], accessToken);
+  return map.get(imageHash) ?? null;
 }
 
 /**
@@ -303,7 +321,7 @@ export async function fetchAdContent(
     "adset_id",
     "account_id",
     "name",
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url,width,height},videos{video_id,thumbnail_url},ad_formats},degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},ad_formats},degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -340,48 +358,45 @@ export async function fetchAdContent(
   const formatted = formatCreative(data);
   const aiEnhancements = parseAiEnhancements(data.creative?.degrees_of_freedom_spec);
 
-  // Fetch placement data
+  // Fetch placement data and creative dimensions in parallel where possible
   const adsetId = data.adset_id;
   const accountId = data.account_id;
-  const placements = adsetId ? await fetchAdsetPlacements(adsetId, accessToken) : null;
 
-  // --- Collect creative dimensions ---
-  // Deduplicate by "WxH" string so we don't list the same size twice
-  const seenSizes = new Set<string>();
-  const creativeDimensions: ImageDimensions[] = [];
+  // Collect all image hashes from asset_feed_spec (batch lookup) + fallback locations
+  const feedHashes = (data.creative?.asset_feed_spec?.images ?? [])
+    .map((img) => img.hash)
+    .filter(Boolean) as string[];
+  const singleHash =
+    data.creative?.image_hash ??
+    data.creative?.object_story_spec?.link_data?.image_hash;
+  const allHashes = [...new Set([...feedHashes, ...(singleHash ? [singleHash] : [])])];
 
-  function addDim(w: number | undefined, h: number | undefined) {
-    if (!w || !h) return;
-    const key = `${w}x${h}`;
-    if (!seenSizes.has(key)) { seenSizes.add(key); creativeDimensions.push({ width: w, height: h }); }
-  }
-
-  // 1. asset_feed_spec.images — most common; dimensions come back directly
-  for (const img of data.creative?.asset_feed_spec?.images ?? []) {
-    addDim(img.width, img.height);
-  }
-
-  // 2. asset_feed_spec.videos — fetch video dimensions if needed
   const feedVideoIds = (data.creative?.asset_feed_spec?.videos ?? [])
     .map((v) => v.video_id)
     .filter(Boolean) as string[];
-  if (feedVideoIds.length > 0 && creativeDimensions.length === 0) {
-    const videoDims = await Promise.all(feedVideoIds.map((id) => fetchVideoDimensions(id, accessToken)));
-    videoDims.forEach((d) => d && addDim(d.width, d.height));
-  }
+  const singleVideoId = data.creative?.object_story_spec?.video_data?.video_id;
+  const allVideoIds = [...new Set([...feedVideoIds, ...(singleVideoId ? [singleVideoId] : [])])];
 
-  // 3. object_story_spec fallbacks (older ad types)
-  if (creativeDimensions.length === 0) {
-    const imageHash = data.creative?.image_hash ?? data.creative?.object_story_spec?.link_data?.image_hash;
-    const videoId = data.creative?.object_story_spec?.video_data?.video_id;
-    if (accountId && imageHash) {
-      const d = await fetchImageDimensions(accountId, imageHash, accessToken);
-      if (d) addDim(d.width, d.height);
-    } else if (videoId) {
-      const d = await fetchVideoDimensions(videoId, accessToken);
-      if (d) addDim(d.width, d.height);
-    }
+  const [placements, dimMap, videoDims] = await Promise.all([
+    adsetId ? fetchAdsetPlacements(adsetId, accessToken) : Promise.resolve(null),
+    accountId && allHashes.length > 0
+      ? fetchBatchImageDimensions(accountId, allHashes, accessToken)
+      : Promise.resolve(new Map<string, ImageDimensions>()),
+    allVideoIds.length > 0
+      ? Promise.all(allVideoIds.map((id) => fetchVideoDimensions(id, accessToken)))
+      : Promise.resolve([] as (ImageDimensions | null)[]),
+  ]);
+
+  // Deduplicate by WxH
+  const seenSizes = new Set<string>();
+  const creativeDimensions: ImageDimensions[] = [];
+  function addDim(d: ImageDimensions | null | undefined) {
+    if (!d?.width || !d?.height) return;
+    const key = `${d.width}x${d.height}`;
+    if (!seenSizes.has(key)) { seenSizes.add(key); creativeDimensions.push(d); }
   }
+  for (const hash of allHashes) addDim(dimMap.get(hash));
+  for (const d of videoDims) addDim(d);
 
   const adFormats = data.creative?.asset_feed_spec?.ad_formats ?? [];
   const formatInfo: FormatInfo = { placements, creativeDimensions, adFormats };
