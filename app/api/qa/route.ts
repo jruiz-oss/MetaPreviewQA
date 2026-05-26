@@ -144,10 +144,18 @@ export async function POST(request: Request) {
   try {
     const message = await client.messages.create({
       model: "claude-opus-4-6",
-      max_tokens: 4096,
+      max_tokens: 16000,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userMessage }],
     });
+
+    // Catch truncation before attempting to parse
+    if (message.stop_reason === "max_tokens") {
+      console.error("Response truncated — too many ad units for a single request. Consider reviewing fewer campaigns at once.");
+      throw new Error(
+        `Response was cut off (too many ad units). Try reviewing fewer campaigns at once (${units.length} units submitted).`
+      );
+    }
 
     const raw =
       message.content[0].type === "text" ? message.content[0].text : "";
