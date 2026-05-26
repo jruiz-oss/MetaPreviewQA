@@ -93,6 +93,46 @@ async function followRedirect(url: string): Promise<string | null> {
   }
 }
 
+type EnrollStatus = "OPT_IN" | "OPT_OUT" | string;
+type CreativeFeatureEntry = { enroll_status?: EnrollStatus };
+
+type DegreesOfFreedomSpec = {
+  creative_features_spec?: {
+    standard_enhancements?: CreativeFeatureEntry;
+    image_brightness_and_contrast?: CreativeFeatureEntry;
+    image_templates?: CreativeFeatureEntry;
+    image_uncrop?: CreativeFeatureEntry;
+    relevant_comments?: CreativeFeatureEntry;
+    music?: CreativeFeatureEntry;
+    inline_comment?: CreativeFeatureEntry;
+    visual_touch_up?: CreativeFeatureEntry;
+    body_label?: CreativeFeatureEntry;
+    title_label?: CreativeFeatureEntry;
+    description_label?: CreativeFeatureEntry;
+    [key: string]: CreativeFeatureEntry | undefined;
+  };
+};
+
+export type AiEnhancement = {
+  key: string;
+  label: string;
+  status: "on" | "off";
+};
+
+const ENHANCEMENT_LABELS: Record<string, string> = {
+  standard_enhancements: "All standard enhancements",
+  image_brightness_and_contrast: "Image brightness & contrast",
+  image_templates: "Image templates",
+  image_uncrop: "Image expansion (uncrop)",
+  relevant_comments: "Relevant comments",
+  music: "Music",
+  inline_comment: "Inline comments",
+  visual_touch_up: "Visual touch-up",
+  body_label: "Body text label",
+  title_label: "Title label",
+  description_label: "Description label",
+};
+
 type CreativeFields = {
   id?: string;
   name?: string;
@@ -100,6 +140,7 @@ type CreativeFields = {
   title?: string;
   call_to_action_type?: string;
   link_url?: string;
+  degrees_of_freedom_spec?: DegreesOfFreedomSpec;
   object_story_spec?: {
     link_data?: {
       message?: string;
@@ -145,6 +186,7 @@ type AdResponse = {
 export type FetchResult = {
   content: string | null;
   error: string | null;
+  aiEnhancements: AiEnhancement[] | null;
 };
 
 /**
@@ -157,7 +199,7 @@ export async function fetchAdContent(
 ): Promise<FetchResult> {
   const fields = [
     "name",
-    "creative{body,title,call_to_action_type,link_url,name,object_story_spec,asset_feed_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,object_story_spec,asset_feed_spec,degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -188,14 +230,36 @@ export async function fetchAdContent(
       friendly = `Token is missing required permissions (need ads_read or ads_management). Original: ${msg}`;
     }
 
-    return { content: null, error: friendly };
+    return { content: null, error: friendly, aiEnhancements: null };
   }
 
   const formatted = formatCreative(data);
+  const aiEnhancements = parseAiEnhancements(data.creative?.degrees_of_freedom_spec);
   return {
     content: formatted,
     error: formatted ? null : "Meta returned the ad but no readable creative fields were present.",
+    aiEnhancements,
   };
+}
+
+/**
+ * Parses degrees_of_freedom_spec into a flat list of AI enhancement toggles.
+ * Returns null if the field is absent (older ad / not retrieved).
+ */
+function parseAiEnhancements(spec?: DegreesOfFreedomSpec): AiEnhancement[] | null {
+  if (!spec?.creative_features_spec) return null;
+  const features = spec.creative_features_spec;
+  const results: AiEnhancement[] = [];
+  for (const [key, entry] of Object.entries(features)) {
+    if (!entry) continue;
+    const label = ENHANCEMENT_LABELS[key] ?? key.replace(/_/g, " ");
+    results.push({
+      key,
+      label,
+      status: entry.enroll_status === "OPT_IN" ? "on" : "off",
+    });
+  }
+  return results.length > 0 ? results : null;
 }
 
 function formatCreative(data: AdResponse): string | null {

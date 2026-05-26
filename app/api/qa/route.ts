@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { resolveAdId, fetchAdContent } from "@/lib/meta-api";
+import { resolveAdId, fetchAdContent, type AiEnhancement } from "@/lib/meta-api";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -17,16 +17,21 @@ You may also receive labeled source documents pulled from Google Drive links in 
 
 When these labeled documents are present, treat them as the primary source of truth over the WO summary text. Cross-reference each ad unit's actual copy and creative against the specific document provided for that purpose. Be explicit about what matches and what doesn't.
 
-Review each ad unit on four criteria:
+Review each ad unit on five criteria:
 1. copy_creative_alignment — Does the ad copy exactly match the approved copy doc? Does the described creative match the creative spec? Be specific about any differences.
 2. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references.
 3. url_cta — Does the ad's destination URL match the approved URL exactly? Does the CTA match what was specified?
 4. grammar_typos — Any grammar errors, typos, or awkward phrasing?
+5. ai_enhancements — Are any Meta Advantage+ AI enhancements turned ON? You will receive a list of enhancements and their on/off status fetched directly from the Meta API.
+   - If the list is absent or empty: status = "unknown", note = "Enhancement data not available for this ad."
+   - If ALL enhancements are OFF: status = "pass", note = "All AI enhancements are off."
+   - If ANY enhancements are ON: status = "warning", note = list which ones are on (e.g. "Image brightness & contrast, Music are enabled.")
 
 For each check, assign one of:
 - "pass" — looks correct
 - "fail" — clear problem found
 - "warning" — possible issue or couldn't fully verify
+- "unknown" — data not available (only valid for ai_enhancements)
 
 IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exact structure:
 
@@ -40,7 +45,8 @@ IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exac
         "copy_creative_alignment": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
         "promo_month_date": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
         "url_cta": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
-        "grammar_typos": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" }
+        "grammar_typos": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
+        "ai_enhancements": { "status": "pass" | "warning" | "unknown", "note": "one sentence explanation" }
       },
       "summary": "one sentence overall summary for this unit"
     }
@@ -101,10 +107,11 @@ export async function POST(request: Request) {
         };
       }
 
-      const { content, error } = await fetchAdContent(adId, accessToken);
+      const { content, error, aiEnhancements } = await fetchAdContent(adId, accessToken);
       return {
         ...unit,
         content,
+        aiEnhancements,
         note: content ? null : (error ?? "Meta API returned no content."),
       };
     })
@@ -135,7 +142,20 @@ export async function POST(request: Request) {
         ? `Ad creative content (from Meta API):\n${unit.content}`
         : `Note: ${unit.note ?? "Could not retrieve ad content."} Mark all checks as warning.`;
       const urlLine = unit.link ? `\nURL: ${unit.link}` : "";
-      return `---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${contentBlock}`;
+
+      // AI enhancements block
+      let enhancementsBlock = "";
+      const enhancements = (unit as { aiEnhancements?: AiEnhancement[] | null }).aiEnhancements;
+      if (enhancements && enhancements.length > 0) {
+        const lines = enhancements.map(
+          (e) => `  - ${e.label}: ${e.status === "on" ? "ON ⚠️" : "off"}`
+        );
+        enhancementsBlock = `\nMeta Advantage+ AI enhancements (from API):\n${lines.join("\n")}`;
+      } else {
+        enhancementsBlock = "\nMeta Advantage+ AI enhancements: not available for this ad.";
+      }
+
+      return `---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${contentBlock}${enhancementsBlock}`;
     })
     .join("\n\n");
 

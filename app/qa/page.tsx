@@ -21,6 +21,7 @@ type UnitResult = {
     promo_month_date: CheckResult;
     url_cta: CheckResult;
     grammar_typos: CheckResult;
+    ai_enhancements: CheckResult;
   };
   summary: string;
 };
@@ -37,6 +38,7 @@ const CHECK_LABELS: Record<string, string> = {
   promo_month_date: "Promo month & dates",
   url_cta: "URL & CTA destination",
   grammar_typos: "Grammar & typos",
+  ai_enhancements: "Advantage+ AI enhancements",
 };
 
 function StatusBadge({ status }: { status: string }) {
