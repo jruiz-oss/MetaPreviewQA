@@ -64,40 +64,49 @@ const WORD_MIME_TYPES = new Set([
 
 const PDF_MIME = "application/pdf";
 
-async function readDriveFolder(folderId: string): Promise<string> {
+async function readDriveFolder(folderId: string, depth = 0, folderName?: string): Promise<string> {
   const auth = getOAuthClient();
   const drive = google.drive({ version: "v3", auth });
   const docs = google.docs({ version: "v1", auth });
 
-  // List ALL non-trashed, non-folder files — including shared drives and "Shared with me"
+  // Safety: don't recurse more than 3 levels deep
+  if (depth > 3) {
+    return "(Maximum folder depth reached — open this folder manually to review deeper contents.)";
+  }
+
+  // List ALL non-trashed items (files AND sub-folders)
   const listRes = await drive.files.list({
-    q: `'${folderId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`,
+    q: `'${folderId}' in parents and trashed = false`,
     fields: "files(id, name, mimeType)",
-    pageSize: 20,
+    pageSize: 50,
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
     corpora: "allDrives",
   });
 
-  console.log(`[fetch-doc] folder ${folderId} → ${listRes.data.files?.length ?? 0} files found:`, JSON.stringify(listRes.data.files?.map(f => ({ name: f.name, mimeType: f.mimeType })) ?? []));
+  console.log(`[fetch-doc] folder ${folderId} (depth ${depth}) → ${listRes.data.files?.length ?? 0} items found:`, JSON.stringify(listRes.data.files?.map(f => ({ name: f.name, mimeType: f.mimeType })) ?? []));
 
-  const files = listRes.data.files ?? [];
-  if (files.length === 0) {
+  const allItems = listRes.data.files ?? [];
+  if (allItems.length === 0) {
     return "(No files found in this folder — the folder may be empty, or the authenticated account may not have access to its contents.)";
   }
 
+  const subFolders = allItems.filter(f => f.mimeType === "application/vnd.google-apps.folder");
+  const files = allItems.filter(f => f.mimeType !== "application/vnd.google-apps.folder");
+
   const sections: string[] = [];
 
+  // ── Process files in this folder ──────────────────────────────────────────
   for (const file of files) {
     if (!file.id || !file.mimeType) continue;
 
-    // Skip image/video/audio files — not readable as text
+    // Image/video/audio — list filename so QA knows what creative assets exist
     if (
       file.mimeType.startsWith("image/") ||
       file.mimeType.startsWith("video/") ||
       file.mimeType.startsWith("audio/")
     ) {
-      sections.push(`[File: ${file.name}]\n(Image/media file — skipped)`);
+      sections.push(`[Creative asset: ${file.name}]`);
       continue;
     }
 
@@ -178,9 +187,22 @@ async function readDriveFolder(folderId: string): Promise<string> {
     }
   }
 
+  // ── Recurse into sub-folders ───────────────────────────────────────────────
+  for (const folder of subFolders) {
+    if (!folder.id || !folder.name) continue;
+    try {
+      const subContent = await readDriveFolder(folder.id, depth + 1, folder.name);
+      sections.push(`[Sub-folder: ${folder.name}]\n${subContent}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      sections.push(`[Sub-folder: ${folder.name}]\n(Could not read this folder: ${msg})`);
+    }
+  }
+
+  const header = folderName ? `=== Folder: ${folderName} ===\n` : "";
   return sections.length > 0
-    ? sections.join("\n\n---\n\n")
-    : "(No readable content found in this folder.)";
+    ? header + sections.join("\n\n---\n\n")
+    : header + "(No readable content found in this folder.)";
 }
 
 // ─── Route handler ────────────────────────────────────────────────────────────
@@ -207,7 +229,7 @@ export async function POST(request: Request) {
     const folderId = extractFolderId(url);
     if (folderId) {
       const content = await readDriveFolder(folderId);
-      return NextResponse.json({ content: content.slice(0, 12000), type: "folder" });
+      return NextResponse.json({ content: content.slice(0, 30000), type: "folder" });
     }
 
     // 3. Google Drive file link (non-Doc)
