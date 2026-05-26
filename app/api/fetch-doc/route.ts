@@ -76,11 +76,14 @@ async function readDriveFolder(folderId: string): Promise<string> {
     pageSize: 20,
     supportsAllDrives: true,
     includeItemsFromAllDrives: true,
+    corpora: "allDrives",
   });
+
+  console.log(`[fetch-doc] folder ${folderId} → ${listRes.data.files?.length ?? 0} files found:`, JSON.stringify(listRes.data.files?.map(f => ({ name: f.name, mimeType: f.mimeType })) ?? []));
 
   const files = listRes.data.files ?? [];
   if (files.length === 0) {
-    return "(No files found in this folder.)";
+    return "(No files found in this folder — the folder may be empty, or the authenticated account may not have access to its contents.)";
   }
 
   const sections: string[] = [];
