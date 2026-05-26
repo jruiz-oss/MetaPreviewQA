@@ -127,11 +127,10 @@ export async function POST(request: Request) {
     const raw =
       message.content[0].type === "text" ? message.content[0].text : "";
 
-    const cleaned = raw
-      .replace(/^```json\s*/i, "")
-      .replace(/```\s*$/i, "")
-      .trim();
-    const result = JSON.parse(cleaned);
+    // Extract JSON robustly — handles markdown fences, leading/trailing text
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON object found in model response");
+    const result = JSON.parse(jsonMatch[0]);
 
     return NextResponse.json(result);
   } catch (err) {
