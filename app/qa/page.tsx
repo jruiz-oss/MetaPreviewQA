@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 type AdUnit = {
   id: string;
@@ -142,16 +142,23 @@ export default function QAPage() {
     );
   }
 
-  function extractGoogleDocUrls(text: string): string[] {
-    const regex = /https:\/\/docs\.google\.com\/document\/d\/[a-zA-Z0-9_-]+(?:\/[^\s"')]*)?/g;
+  function extractGoogleLinks(text: string): string[] {
+    // Matches Google Docs AND Google Drive folder/file links
+    const regex =
+      /https:\/\/(?:docs\.google\.com\/document\/d\/|drive\.google\.com\/(?:drive\/(?:u\/\d+\/)?folders\/|file\/d\/))[a-zA-Z0-9_-]+(?:\/[^\s"')]*)?/g;
     const matches = text.match(regex) ?? [];
-    // Deduplicate
     return Array.from(new Set(matches));
+  }
+
+  function labelForUrl(url: string): string {
+    if (url.includes("docs.google.com")) return "Google Doc";
+    if (url.includes("/folders/")) return "Drive Folder";
+    return "Drive File";
   }
 
   async function handleWoChange(value: string) {
     setWo(value);
-    const urls = extractGoogleDocUrls(value);
+    const urls = extractGoogleLinks(value);
     if (urls.length === 0) {
       setDetectedDocs([]);
       return;
@@ -195,6 +202,13 @@ export default function QAPage() {
       );
     }
   }
+
+  // Auto-load any newly detected docs that haven't been fetched yet
+  useEffect(() => {
+    const pending = detectedDocs.filter((d) => !d.content && !d.error && !d.loading);
+    pending.forEach((d) => loadDoc(d.url));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detectedDocs.map((d) => d.url).join(",")]);
 
   async function loadFromCampaign() {
     const id = campaignId.trim();
@@ -320,11 +334,11 @@ export default function QAPage() {
                 className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent resize-none"
               />
 
-              {/* Auto-detected Google Docs */}
+              {/* Auto-detected Google links */}
               {detectedDocs.length > 0 && (
                 <div className="mt-3 space-y-2">
                   <p className="text-xs font-medium text-gray-400 uppercase tracking-wide">
-                    Google Docs detected in WO
+                    Google links detected in WO
                   </p>
                   {detectedDocs.map((doc) => (
                     <div
@@ -334,36 +348,40 @@ export default function QAPage() {
                           ? "bg-emerald-50 border-emerald-200"
                           : doc.error
                           ? "bg-red-50 border-red-200"
+                          : doc.loading
+                          ? "bg-blue-50 border-blue-200"
                           : "bg-gray-50 border-gray-200"
                       }`}
                     >
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs text-gray-500 truncate">{doc.url}</p>
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <span className="text-xs font-medium text-gray-600">
+                            {labelForUrl(doc.url)}
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-400 truncate">{doc.url}</p>
                         {doc.content && (
                           <p className="text-xs text-emerald-700 mt-0.5">
-                            ✓ Loaded — {doc.content.length.toLocaleString()} chars
+                            ✓ Loaded — {doc.content.length.toLocaleString()} chars read into QA
                           </p>
                         )}
                         {doc.error && (
                           <p className="text-xs text-red-600 mt-0.5">{doc.error}</p>
                         )}
                       </div>
-                      {!doc.content && !doc.loading && (
+                      {doc.loading && (
+                        <span className="shrink-0 inline-block w-4 h-4 border-2 border-gray-300 border-t-gray-700 rounded-full animate-spin mt-1" />
+                      )}
+                      {doc.error && !doc.loading && (
                         <button
                           onClick={() => loadDoc(doc.url)}
-                          className="shrink-0 px-3 py-1 rounded-lg bg-gray-900 text-white text-xs font-medium hover:bg-gray-800 transition-colors"
+                          className="shrink-0 px-3 py-1.5 rounded-lg bg-gray-900 text-white text-xs font-medium hover:bg-gray-800 transition-colors"
                         >
-                          Load
+                          Retry
                         </button>
-                      )}
-                      {doc.loading && (
-                        <span className="shrink-0 inline-block w-4 h-4 border-2 border-gray-300 border-t-gray-700 rounded-full animate-spin mt-0.5" />
                       )}
                     </div>
                   ))}
-                  <p className="text-xs text-gray-400">
-                    Docs must be shared as "anyone with the link can view". Drive folder links are not supported — only direct Doc links.
-                  </p>
                 </div>
               )}
             </div>
