@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { resolveAdId, fetchAdContent, type AiEnhancement } from "@/lib/meta-api";
+import { resolveAdId, fetchAdContent, type AiEnhancement, type FormatInfo } from "@/lib/meta-api";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -17,7 +17,7 @@ You may also receive labeled source documents pulled from Google Drive links in 
 
 When these labeled documents are present, treat them as the primary source of truth over the WO summary text. Cross-reference each ad unit's actual copy and creative against the specific document provided for that purpose. Be explicit about what matches and what doesn't.
 
-Review each ad unit on five criteria:
+Review each ad unit on six criteria:
 1. copy_creative_alignment — Does the ad copy exactly match the approved copy doc? Does the described creative match the creative spec? Be specific about any differences.
 2. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references.
 3. url_cta — Does the ad's destination URL match the approved URL exactly? Does the CTA match what was specified?
@@ -26,12 +26,25 @@ Review each ad unit on five criteria:
    - If the list is absent or empty: status = "unknown", note = "Enhancement data not available for this ad."
    - If ALL enhancements are OFF: status = "pass", note = "All AI enhancements are off."
    - If ANY enhancements are ON: status = "warning", note = list which ones are on (e.g. "Image brightness & contrast, Music are enabled.")
+6. format_size — Does the creative format and dimensions match the placement(s) this ad is running on?
+   You will receive placement targeting (platforms and positions) and image dimensions (width × height) when available.
+   Also use the ad unit name as a hint — names often include "Story", "Feed", "Reel", "Static", "Video", etc.
+   Key Meta format requirements:
+   - Feed (facebook: feed, instagram: stream): ideal 1:1 (ratio ~1.0) or 4:5 (ratio ~0.8); acceptable range 0.8–1.91
+   - Stories (facebook: story, instagram: story): 9:16 (ratio ~0.5625) — a 1:1 or 4:5 image will have safe-zone bars and content may be cut off
+   - Reels (instagram: reels): 9:16 (ratio ~0.5625) — same as Stories
+   - Right column (facebook: right_hand_column): 1.91:1
+   Flag if:
+   - The ad name implies a format (e.g. "Story") that contradicts the placement positions (e.g. only feed positions), or vice versa
+   - Image dimensions don't suit the placement (e.g. 1:1 image in story/reels = letterboxed, content cut off; 9:16 in feed-only = cropped)
+   - If placement data is absent: status = "unknown", note = "Placement data not available."
+   - If placement is known but dimensions unavailable: use ad name and placement together to assess risk; warn if likely mismatch, pass if consistent
 
 For each check, assign one of:
 - "pass" — looks correct
 - "fail" — clear problem found
 - "warning" — possible issue or couldn't fully verify
-- "unknown" — data not available (only valid for ai_enhancements)
+- "unknown" — data not available (only valid for ai_enhancements and format_size)
 
 IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exact structure:
 
@@ -46,7 +59,8 @@ IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exac
         "promo_month_date": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
         "url_cta": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
         "grammar_typos": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
-        "ai_enhancements": { "status": "pass" | "warning" | "unknown", "note": "one sentence explanation" }
+        "ai_enhancements": { "status": "pass" | "warning" | "unknown", "note": "one sentence explanation" },
+        "format_size": { "status": "pass" | "fail" | "warning" | "unknown", "note": "one sentence explanation" }
       },
       "summary": "one sentence overall summary for this unit"
     }
@@ -107,11 +121,12 @@ export async function POST(request: Request) {
         };
       }
 
-      const { content, error, aiEnhancements } = await fetchAdContent(adId, accessToken);
+      const { content, error, aiEnhancements, formatInfo } = await fetchAdContent(adId, accessToken);
       return {
         ...unit,
         content,
         aiEnhancements,
+        formatInfo,
         note: content ? null : (error ?? "Meta API returned no content."),
       };
     })
@@ -155,7 +170,32 @@ export async function POST(request: Request) {
         enhancementsBlock = "\nMeta Advantage+ AI enhancements: not available for this ad.";
       }
 
-      return `---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${contentBlock}${enhancementsBlock}`;
+      // Format & placement block
+      let formatBlock = "";
+      const fi = (unit as { formatInfo?: FormatInfo | null }).formatInfo;
+      if (fi) {
+        const lines: string[] = [];
+        if (fi.placements) {
+          const p = fi.placements;
+          if (p.publisher_platforms.length) lines.push(`  Platforms: ${p.publisher_platforms.join(", ")}`);
+          if (p.facebook_positions.length) lines.push(`  Facebook positions: ${p.facebook_positions.join(", ")}`);
+          if (p.instagram_positions.length) lines.push(`  Instagram positions: ${p.instagram_positions.join(", ")}`);
+          if (p.messenger_positions.length) lines.push(`  Messenger positions: ${p.messenger_positions.join(", ")}`);
+          if (p.audience_network_positions.length) lines.push(`  Audience Network positions: ${p.audience_network_positions.join(", ")}`);
+        }
+        if (fi.imageDimensions) {
+          const { width, height } = fi.imageDimensions;
+          const ratio = (width / height).toFixed(3);
+          lines.push(`  Image dimensions: ${width} × ${height} (aspect ratio ${ratio})`);
+        }
+        formatBlock = lines.length > 0
+          ? `\nFormat & placement info (from Meta API):\n${lines.join("\n")}`
+          : "\nFormat & placement info: not available for this ad.";
+      } else {
+        formatBlock = "\nFormat & placement info: not available for this ad.";
+      }
+
+      return `---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${contentBlock}${enhancementsBlock}${formatBlock}`;
     })
     .join("\n\n");
 

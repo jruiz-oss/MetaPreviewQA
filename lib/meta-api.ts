@@ -5,6 +5,24 @@ export type CampaignAd = {
   name: string;
 };
 
+export type PlacementInfo = {
+  publisher_platforms: string[];
+  facebook_positions: string[];
+  instagram_positions: string[];
+  messenger_positions: string[];
+  audience_network_positions: string[];
+};
+
+export type ImageDimensions = {
+  width: number;
+  height: number;
+};
+
+export type FormatInfo = {
+  placements: PlacementInfo | null;
+  imageDimensions: ImageDimensions | null;
+};
+
 /**
  * Fetches all ads under a campaign ID from the Meta Graph API.
  * Returns up to 200 ads (paginates once if needed).
@@ -140,6 +158,7 @@ type CreativeFields = {
   title?: string;
   call_to_action_type?: string;
   link_url?: string;
+  image_hash?: string;
   degrees_of_freedom_spec?: DegreesOfFreedomSpec;
   object_story_spec?: {
     link_data?: {
@@ -179,6 +198,8 @@ type CreativeFields = {
 type AdResponse = {
   id?: string;
   name?: string;
+  adset_id?: string;
+  account_id?: string;
   creative?: CreativeFields;
   error?: { message?: string; code?: number };
 };
@@ -187,19 +208,62 @@ export type FetchResult = {
   content: string | null;
   error: string | null;
   aiEnhancements: AiEnhancement[] | null;
+  formatInfo: FormatInfo | null;
 };
 
 /**
  * Fetches ad creative content from the Meta Graph API.
  * Returns the formatted content, or a human-readable error string if Meta rejected the call.
  */
+/**
+ * Fetches placement targeting from an ad set.
+ */
+async function fetchAdsetPlacements(adsetId: string, accessToken: string): Promise<PlacementInfo | null> {
+  try {
+    const url = `${GRAPH_API}/${adsetId}?fields=targeting&access_token=${accessToken}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    if (data.error || !data.targeting) return null;
+    const t = data.targeting;
+    return {
+      publisher_platforms: t.publisher_platforms ?? [],
+      facebook_positions: t.facebook_positions ?? [],
+      instagram_positions: t.instagram_positions ?? [],
+      messenger_positions: t.messenger_positions ?? [],
+      audience_network_positions: t.audience_network_positions ?? [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetches image dimensions from the AdImages endpoint using an image hash.
+ */
+async function fetchImageDimensions(accountId: string, imageHash: string, accessToken: string): Promise<ImageDimensions | null> {
+  try {
+    const hashParam = encodeURIComponent(JSON.stringify([imageHash]));
+    const url = `${GRAPH_API}/act_${accountId}/adimages?hashes=${hashParam}&fields=width,height,hash&access_token=${accessToken}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    if (data.error || !data.data?.length) return null;
+    const img = data.data[0];
+    if (!img.width || !img.height) return null;
+    return { width: img.width, height: img.height };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchAdContent(
   adId: string,
   accessToken: string
 ): Promise<FetchResult> {
   const fields = [
+    "adset_id",
+    "account_id",
     "name",
-    "creative{body,title,call_to_action_type,link_url,name,object_story_spec,asset_feed_spec,degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec,asset_feed_spec,degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -209,7 +273,7 @@ export async function fetchAdContent(
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     data = await res.json();
   } catch (err) {
-    return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null };
+    return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null, formatInfo: null };
   }
 
   if (data.error) {
@@ -230,15 +294,29 @@ export async function fetchAdContent(
       friendly = `Token is missing required permissions (need ads_read or ads_management). Original: ${msg}`;
     }
 
-    return { content: null, error: friendly, aiEnhancements: null };
+    return { content: null, error: friendly, aiEnhancements: null, formatInfo: null };
   }
 
   const formatted = formatCreative(data);
   const aiEnhancements = parseAiEnhancements(data.creative?.degrees_of_freedom_spec);
+
+  // Fetch placement and image dimension data in parallel
+  const adsetId = data.adset_id;
+  const accountId = data.account_id;
+  const imageHash = data.creative?.image_hash;
+
+  const [placements, imageDimensions] = await Promise.all([
+    adsetId ? fetchAdsetPlacements(adsetId, accessToken) : Promise.resolve(null),
+    accountId && imageHash ? fetchImageDimensions(accountId, imageHash, accessToken) : Promise.resolve(null),
+  ]);
+
+  const formatInfo: FormatInfo = { placements, imageDimensions };
+
   return {
     content: formatted,
     error: formatted ? null : "Meta returned the ad but no readable creative fields were present.",
     aiEnhancements,
+    formatInfo,
   };
 }
 

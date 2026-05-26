@@ -22,6 +22,7 @@ type UnitResult = {
     url_cta: CheckResult;
     grammar_typos: CheckResult;
     ai_enhancements: CheckResult;
+    format_size: CheckResult;
   };
   summary: string;
 };
@@ -39,6 +40,7 @@ const CHECK_LABELS: Record<string, string> = {
   url_cta: "URL & CTA destination",
   grammar_typos: "Grammar & typos",
   ai_enhancements: "Advantage+ AI enhancements",
+  format_size: "Format & size",
 };
 
 function StatusBadge({ status }: { status: string }) {
