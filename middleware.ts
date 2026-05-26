@@ -4,8 +4,14 @@ import type { NextRequest } from "next/server";
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Allow auth API, login page, and temp debug route through
-  if (pathname === "/" || pathname.startsWith("/api/auth") || pathname.startsWith("/api/debug-drive")) {
+  // Allow auth API, login page, and temp setup/debug routes through
+  if (
+    pathname === "/" ||
+    pathname.startsWith("/api/auth") ||
+    pathname.startsWith("/api/debug-drive") ||
+    pathname.startsWith("/api/google-setup") ||
+    pathname.startsWith("/api/google-callback")
+  ) {
     return NextResponse.next();
   }
 
