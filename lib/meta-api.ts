@@ -168,6 +168,7 @@ type CreativeFields = {
       description?: string;
       link?: string;
       caption?: string;
+      image_hash?: string;
       call_to_action?: {
         type?: string;
         value?: { link?: string };
@@ -182,6 +183,7 @@ type CreativeFields = {
     video_data?: {
       message?: string;
       title?: string;
+      video_id?: string;
       call_to_action?: {
         type?: string;
         value?: { link?: string };
@@ -264,6 +266,31 @@ async function fetchImageDimensions(accountId: string, imageHash: string, access
   }
 }
 
+/**
+ * Fetches video dimensions from the Video object using a video ID.
+ * Uses the "format" field which returns an array of renditions — we pick the largest (original).
+ */
+async function fetchVideoDimensions(videoId: string, accessToken: string): Promise<ImageDimensions | null> {
+  try {
+    const url = `${GRAPH_API}/${videoId}?fields=format&access_token=${accessToken}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    if (data.error || !data.format?.length) return null;
+    type VideoFormat = { filter?: string; width?: number; height?: number };
+    const formats = data.format as VideoFormat[];
+    // Prefer the "default" rendition; fall back to the largest by area
+    const original =
+      formats.find((f) => f.filter === "default") ??
+      formats.reduce((best, f) =>
+        (f.width ?? 0) * (f.height ?? 0) > (best.width ?? 0) * (best.height ?? 0) ? f : best
+      , formats[0]);
+    if (!original?.width || !original?.height) return null;
+    return { width: original.width, height: original.height };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchAdContent(
   adId: string,
   accessToken: string
@@ -272,7 +299,7 @@ export async function fetchAdContent(
     "adset_id",
     "account_id",
     "name",
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec,asset_feed_spec,degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec,degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -309,13 +336,25 @@ export async function fetchAdContent(
   const formatted = formatCreative(data);
   const aiEnhancements = parseAiEnhancements(data.creative?.degrees_of_freedom_spec);
 
-  // Fetch placement and image dimension data in parallel
+  // Fetch placement and creative dimension data in parallel
   const adsetId = data.adset_id;
   const accountId = data.account_id;
-  const imageHash = data.creative?.image_hash;
+
+  // Image hash: check top-level creative field first, then link_data
+  const imageHash =
+    data.creative?.image_hash ??
+    data.creative?.object_story_spec?.link_data?.image_hash;
+
+  // Video ID: lives inside object_story_spec.video_data
+  const videoId = data.creative?.object_story_spec?.video_data?.video_id;
+
   const [placements, imageDimensions] = await Promise.all([
     adsetId ? fetchAdsetPlacements(adsetId, accessToken) : Promise.resolve(null),
-    accountId && imageHash ? fetchImageDimensions(accountId, imageHash, accessToken) : Promise.resolve(null),
+    accountId && imageHash
+      ? fetchImageDimensions(accountId, imageHash, accessToken)
+      : videoId
+      ? fetchVideoDimensions(videoId, accessToken)
+      : Promise.resolve(null),
   ]);
 
   const formatInfo: FormatInfo = { placements, imageDimensions };

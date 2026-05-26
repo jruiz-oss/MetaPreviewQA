@@ -191,7 +191,8 @@ export async function POST(request: Request) {
         if (fi.imageDimensions) {
           const { width, height } = fi.imageDimensions;
           const ratio = (width / height).toFixed(3);
-          lines.push(`  Image dimensions: ${width} × ${height} (aspect ratio ${ratio})`);
+          // Label as video or image based on aspect ratio heuristic (videos tend to be non-square)
+          lines.push(`  Creative dimensions: ${width} × ${height} (aspect ratio ${ratio})`);
         }
         formatBlock = lines.length > 0
           ? `\nFormat & placement info (from Meta API):\n${lines.join("\n")}`
