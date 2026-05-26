@@ -1,4 +1,4 @@
-const GRAPH_API = "https://graph.facebook.com/v19.0";
+const GRAPH_API = "https://graph.facebook.com/v23.0";
 
 /**
  * Resolves a Meta preview URL to an ad/creative ID.
@@ -102,14 +102,19 @@ type AdResponse = {
   error?: { message?: string; code?: number };
 };
 
+export type FetchResult = {
+  content: string | null;
+  error: string | null;
+};
+
 /**
  * Fetches ad creative content from the Meta Graph API.
- * Returns a plain-text summary suitable for Claude to review against a work order.
+ * Returns the formatted content, or a human-readable error string if Meta rejected the call.
  */
 export async function fetchAdContent(
   adId: string,
   accessToken: string
-): Promise<string | null> {
+): Promise<FetchResult> {
   const fields = [
     "name",
     "creative{body,title,call_to_action_type,link_url,name,object_story_spec,asset_feed_spec}",
@@ -121,16 +126,36 @@ export async function fetchAdContent(
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     data = await res.json();
-  } catch {
-    return null;
+  } catch (err) {
+    return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}` };
   }
 
   if (data.error) {
     console.error(`Meta API error for ad ${adId}:`, data.error);
-    return null;
+    const code = data.error.code;
+    const msg = data.error.message ?? "Unknown Meta API error";
+
+    // Translate common error codes into actionable messages
+    let friendly = `Meta API error (code ${code}): ${msg}`;
+    if (code === 12) {
+      friendly =
+        `Meta returned error #12 for ID ${adId}. Most likely cause: the token's user/system user does not have access to this ad's ad account, or the ID is not actually an Ad ID (could be a post/creative/campaign ID). Original message: ${msg}`;
+    } else if (code === 190) {
+      friendly = `Access token is invalid or expired. Regenerate META_ACCESS_TOKEN. Original: ${msg}`;
+    } else if (code === 100) {
+      friendly = `Bad request — likely an unknown field or malformed ID. Original: ${msg}`;
+    } else if (code === 200) {
+      friendly = `Token is missing required permissions (need ads_read or ads_management). Original: ${msg}`;
+    }
+
+    return { content: null, error: friendly };
   }
 
-  return formatCreative(data);
+  const formatted = formatCreative(data);
+  return {
+    content: formatted,
+    error: formatted ? null : "Meta returned the ad but no readable creative fields were present.",
+  };
 }
 
 function formatCreative(data: AdResponse): string | null {

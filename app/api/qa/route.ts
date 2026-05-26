@@ -80,11 +80,11 @@ export async function POST(request: Request) {
         };
       }
 
-      const content = await fetchAdContent(adId, accessToken);
+      const { content, error } = await fetchAdContent(adId, accessToken);
       return {
         ...unit,
         content,
-        note: content ? null : "Meta API returned no content — ad may not be accessible with this token.",
+        note: content ? null : (error ?? "Meta API returned no content."),
       };
     })
   );
