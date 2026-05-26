@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 import { getOAuthClient } from "@/lib/google-auth";
+import mammoth from "mammoth";
 
 // ─── URL parsers ──────────────────────────────────────────────────────────────
 
@@ -55,30 +56,53 @@ async function readGoogleDoc(docId: string): Promise<string> {
   return text.join("").trim();
 }
 
+const WORD_MIME_TYPES = new Set([
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+  "application/msword", // .doc
+  "application/vnd.ms-word",
+]);
+
+const PDF_MIME = "application/pdf";
+
 async function readDriveFolder(folderId: string): Promise<string> {
   const auth = getOAuthClient();
   const drive = google.drive({ version: "v3", auth });
   const docs = google.docs({ version: "v1", auth });
 
-  // List files in the folder — only Google Docs and text files
+  // List ALL non-trashed, non-folder files — including shared drives and "Shared with me"
   const listRes = await drive.files.list({
-    q: `'${folderId}' in parents and trashed = false and (mimeType = 'application/vnd.google-apps.document' or mimeType = 'text/plain')`,
+    q: `'${folderId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`,
     fields: "files(id, name, mimeType)",
-    pageSize: 10,
+    pageSize: 20,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
   });
 
   const files = listRes.data.files ?? [];
   if (files.length === 0) {
-    return "(No readable Google Docs found in this folder.)";
+    return "(No files found in this folder.)";
   }
 
   const sections: string[] = [];
 
   for (const file of files) {
-    if (!file.id) continue;
+    if (!file.id || !file.mimeType) continue;
+
+    // Skip image/video/audio files — not readable as text
+    if (
+      file.mimeType.startsWith("image/") ||
+      file.mimeType.startsWith("video/") ||
+      file.mimeType.startsWith("audio/")
+    ) {
+      sections.push(`[File: ${file.name}]\n(Image/media file — skipped)`);
+      continue;
+    }
+
     try {
       let content = "";
+
       if (file.mimeType === "application/vnd.google-apps.document") {
+        // Native Google Doc
         const docRes = await docs.documents.get({ documentId: file.id });
         const text: string[] = [];
         for (const block of docRes.data.body?.content ?? []) {
@@ -86,26 +110,74 @@ async function readDriveFolder(folderId: string): Promise<string> {
             for (const el of block.paragraph.elements ?? []) {
               if (el.textRun?.content) text.push(el.textRun.content);
             }
+          } else if (block.table) {
+            for (const row of block.table.tableRows ?? []) {
+              for (const cell of row.tableCells ?? []) {
+                for (const cellBlock of cell.content ?? []) {
+                  for (const el of cellBlock.paragraph?.elements ?? []) {
+                    if (el.textRun?.content) text.push(el.textRun.content);
+                  }
+                }
+              }
+            }
           }
         }
         content = text.join("").trim();
-      } else {
-        // Plain text — export directly
-        const exportRes = await drive.files.get(
-          { fileId: file.id, alt: "media" },
+
+      } else if (WORD_MIME_TYPES.has(file.mimeType)) {
+        // Word document — download binary and extract text with mammoth
+        const downloadRes = await drive.files.get(
+          { fileId: file.id, alt: "media", supportsAllDrives: true },
+          { responseType: "arraybuffer" }
+        );
+        const buffer = Buffer.from(downloadRes.data as ArrayBuffer);
+        const result = await mammoth.extractRawText({ buffer });
+        content = result.value.trim();
+
+      } else if (file.mimeType === "application/vnd.google-apps.spreadsheet") {
+        // Google Sheet — export as CSV
+        const exportRes = await drive.files.export(
+          { fileId: file.id, mimeType: "text/csv" },
           { responseType: "text" }
         );
         content = String(exportRes.data).trim();
+
+      } else if (file.mimeType === PDF_MIME) {
+        // PDFs: try Drive's plain-text export (works if Drive has indexed the PDF)
+        try {
+          const exportRes = await drive.files.export(
+            { fileId: file.id, mimeType: "text/plain" },
+            { responseType: "text" }
+          );
+          content = String(exportRes.data).trim();
+        } catch {
+          content = "(PDF — could not extract text automatically. Open the file directly to review.)";
+        }
+
+      } else if (file.mimeType === "text/plain") {
+        const downloadRes = await drive.files.get(
+          { fileId: file.id, alt: "media", supportsAllDrives: true },
+          { responseType: "text" }
+        );
+        content = String(downloadRes.data).trim();
+
+      } else {
+        // Unknown type — at minimum record the filename
+        content = `(File type ${file.mimeType} is not directly readable — open this file manually to review.)`;
       }
+
       if (content) {
         sections.push(`[File: ${file.name}]\n${content}`);
       }
-    } catch {
-      sections.push(`[File: ${file.name}]\n(Could not read this file.)`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      sections.push(`[File: ${file.name}]\n(Could not read this file: ${msg})`);
     }
   }
 
-  return sections.join("\n\n---\n\n");
+  return sections.length > 0
+    ? sections.join("\n\n---\n\n")
+    : "(No readable content found in this folder.)";
 }
 
 // ─── Route handler ────────────────────────────────────────────────────────────
