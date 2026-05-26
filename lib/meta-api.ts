@@ -369,13 +369,13 @@ export async function fetchAdContent(
   const singleHash =
     data.creative?.image_hash ??
     data.creative?.object_story_spec?.link_data?.image_hash;
-  const allHashes = [...new Set([...feedHashes, ...(singleHash ? [singleHash] : [])])];
+  const allHashes = Array.from(new Set([...feedHashes, ...(singleHash ? [singleHash] : [])]));
 
   const feedVideoIds = (data.creative?.asset_feed_spec?.videos ?? [])
     .map((v) => v.video_id)
     .filter(Boolean) as string[];
   const singleVideoId = data.creative?.object_story_spec?.video_data?.video_id;
-  const allVideoIds = [...new Set([...feedVideoIds, ...(singleVideoId ? [singleVideoId] : [])])];
+  const allVideoIds = Array.from(new Set([...feedVideoIds, ...(singleVideoId ? [singleVideoId] : [])]));
 
   const [placements, dimMap, videoDims] = await Promise.all([
     adsetId ? fetchAdsetPlacements(adsetId, accessToken) : Promise.resolve(null),
