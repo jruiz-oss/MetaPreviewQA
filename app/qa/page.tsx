@@ -97,6 +97,11 @@ export default function QAPage() {
   const [result, setResult] = useState<QAResult | null>(null);
   const [error, setError] = useState("");
 
+  // Campaign import state
+  const [campaignId, setCampaignId] = useState("");
+  const [campaignLoading, setCampaignLoading] = useState(false);
+  const [campaignError, setCampaignError] = useState("");
+
   function addUnit() {
     setUnits((prev) => [
       ...prev,
@@ -109,10 +114,56 @@ export default function QAPage() {
     setUnits((prev) => prev.filter((u) => u.id !== id));
   }
 
+  function extractAdId(input: string): string {
+    const trimmed = input.trim();
+    // Already a numeric ID
+    if (/^\d{10,}$/.test(trimmed)) return trimmed;
+    try {
+      const urlStr = trimmed.startsWith("http") ? trimmed : `https://${trimmed}`;
+      const url = new URL(urlStr);
+      const fromParams =
+        url.searchParams.get("id") ||
+        url.searchParams.get("ad_id") ||
+        url.searchParams.get("creative_id") ||
+        url.searchParams.get("selected_ad_ids");
+      if (fromParams) return fromParams.split(",")[0].trim();
+    } catch {
+      // not a URL, return as-is
+    }
+    return trimmed;
+  }
+
   function updateUnit(id: string, field: "name" | "link", value: string) {
+    const resolved = field === "link" ? extractAdId(value) : value;
     setUnits((prev) =>
-      prev.map((u) => (u.id === id ? { ...u, [field]: value } : u))
+      prev.map((u) => (u.id === id ? { ...u, [field]: resolved } : u))
     );
+  }
+
+  async function loadFromCampaign() {
+    const id = campaignId.trim();
+    if (!id) return;
+    setCampaignLoading(true);
+    setCampaignError("");
+    try {
+      const res = await fetch("/api/campaign-ads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ campaignId: id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Failed to load campaign ads");
+      const imported: AdUnit[] = data.ads.map((ad: { id: string; name: string }) => ({
+        id: String(Date.now()) + ad.id,
+        name: ad.name,
+        link: ad.id,
+      }));
+      setUnits(imported);
+    } catch (err) {
+      setCampaignError(err instanceof Error ? err.message : "Something went wrong");
+    } finally {
+      setCampaignLoading(false);
+    }
   }
 
   async function runQA() {
@@ -206,9 +257,39 @@ export default function QAPage() {
                   Ad units
                 </h2>
                 <p className="text-sm text-gray-500 mt-0.5">
-                  Paste the numeric <strong>Ad ID</strong> from Ads Manager — not the <code className="text-xs bg-gray-100 px-1 py-0.5 rounded">fb.me/adspreview/</code> client link. Find it in Ads Manager by clicking on the ad row; the ID appears at the bottom of the panel.
+                  Paste a <strong>Campaign ID</strong> above to auto-load all ads, or add them individually below using an Ad ID or Ads Manager URL.
                 </p>
               </div>
+
+              {/* Campaign import */}
+              <div className="flex gap-2 mb-5 pb-5 border-b border-gray-100">
+                <input
+                  type="text"
+                  value={campaignId}
+                  onChange={(e) => setCampaignId(e.target.value)}
+                  placeholder="Paste campaign ID to auto-load all ads"
+                  className="flex-1 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                />
+                <button
+                  onClick={loadFromCampaign}
+                  disabled={campaignLoading || !campaignId.trim()}
+                  className="px-4 py-2.5 rounded-xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap flex items-center gap-2"
+                >
+                  {campaignLoading ? (
+                    <>
+                      <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      Loading...
+                    </>
+                  ) : (
+                    "Load ads"
+                  )}
+                </button>
+              </div>
+              {campaignError && (
+                <div className="mb-4 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
+                  {campaignError}
+                </div>
+              )}
 
               {/* Column headers */}
               <div className="grid grid-cols-[1fr_2fr_32px] gap-3 mb-2 px-1">
@@ -216,7 +297,7 @@ export default function QAPage() {
                   Ad unit name
                 </span>
                 <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
-                  Ad ID
+                  Ad ID or URL
                 </span>
                 <span />
               </div>
@@ -242,7 +323,7 @@ export default function QAPage() {
                       onChange={(e) =>
                         updateUnit(unit.id, "link", e.target.value)
                       }
-                      placeholder="e.g. 120210001234567"
+                      placeholder="e.g. 120210001234567 or facebook.com/ads/preview/?id=..."
                       className="px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
                     />
                     <button
