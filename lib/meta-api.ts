@@ -223,8 +223,17 @@ async function fetchAdsetPlacements(adsetId: string, accessToken: string): Promi
     const url = `${GRAPH_API}/${adsetId}?fields=targeting&access_token=${accessToken}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
     const data = await res.json();
-    if (data.error || !data.targeting) return null;
+    console.log("[format-debug] adset response:", JSON.stringify(data, null, 2));
+    if (data.error) {
+      console.log("[format-debug] adset fetch error:", data.error);
+      return null;
+    }
+    if (!data.targeting) {
+      console.log("[format-debug] adset has no targeting field");
+      return null;
+    }
     const t = data.targeting;
+    console.log("[format-debug] targeting fields:", JSON.stringify(t, null, 2));
     return {
       publisher_platforms: t.publisher_platforms ?? [],
       facebook_positions: t.facebook_positions ?? [],
@@ -232,7 +241,8 @@ async function fetchAdsetPlacements(adsetId: string, accessToken: string): Promi
       messenger_positions: t.messenger_positions ?? [],
       audience_network_positions: t.audience_network_positions ?? [],
     };
-  } catch {
+  } catch (err) {
+    console.log("[format-debug] fetchAdsetPlacements threw:", err);
     return null;
   }
 }
@@ -304,6 +314,7 @@ export async function fetchAdContent(
   const adsetId = data.adset_id;
   const accountId = data.account_id;
   const imageHash = data.creative?.image_hash;
+  console.log("[format-debug] ad fields — adset_id:", adsetId, "account_id:", accountId, "image_hash:", imageHash);
 
   const [placements, imageDimensions] = await Promise.all([
     adsetId ? fetchAdsetPlacements(adsetId, accessToken) : Promise.resolve(null),
