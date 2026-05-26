@@ -119,7 +119,7 @@ export async function POST(request: Request) {
   try {
     const message = await client.messages.create({
       model: "claude-opus-4-6",
-      max_tokens: 2048,
+      max_tokens: 4096,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userMessage }],
     });
@@ -130,7 +130,16 @@ export async function POST(request: Request) {
     // Extract JSON robustly — handles markdown fences, leading/trailing text
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON object found in model response");
-    const result = JSON.parse(jsonMatch[0]);
+
+    let result;
+    try {
+      result = JSON.parse(jsonMatch[0]);
+    } catch (parseErr) {
+      console.error("Raw model response (first 500 chars):", raw.slice(0, 500));
+      console.error("Raw model response (around error):", raw.slice(6350, 6450));
+      console.error("Stop reason:", message.stop_reason);
+      throw parseErr;
+    }
 
     return NextResponse.json(result);
   } catch (err) {
