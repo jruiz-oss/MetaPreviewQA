@@ -2,13 +2,15 @@ import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { resolveAdId, fetchAdContent } from "@/lib/meta-api";
 
-const client = new Anthropic();
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const SYSTEM_PROMPT = `You are a QA reviewer for social media ads at a digital marketing agency. Your job is to check each ad unit against the work order provided.
 
 For each ad unit you will receive:
 - The ad unit name and preview link URL
 - The ad creative content pulled directly from the Meta API (copy, headline, CTA, destination URL)
+
+You may also receive a WORK ORDER DOCUMENT pulled from a linked Google Doc. When present, treat it as the authoritative source of truth — it contains the full brief including creative direction, offer details, approved copy, URLs, and any restrictions. Use it to inform all four checks, especially copy/creative alignment.
 
 Review each ad unit against the work order on four criteria:
 1. copy_creative_alignment — Does the copy and described creative match what the WO specifies? Look for mismatched imagery descriptions, wrong product/offer references, wrong campaign theme.
@@ -48,9 +50,10 @@ type AdUnit = {
 };
 
 export async function POST(request: Request) {
-  const { wo, units } = (await request.json()) as {
+  const { wo, units, docContent } = (await request.json()) as {
     wo: string;
     units: AdUnit[];
+    docContent?: string;
   };
 
   if (!wo || !units?.length) {
@@ -64,6 +67,13 @@ export async function POST(request: Request) {
   if (!accessToken) {
     return NextResponse.json(
       { error: "META_ACCESS_TOKEN environment variable is not set." },
+      { status: 500 }
+    );
+  }
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return NextResponse.json(
+      { error: "ANTHROPIC_API_KEY environment variable is not set." },
       { status: 500 }
     );
   }
@@ -100,7 +110,11 @@ export async function POST(request: Request) {
     })
     .join("\n\n");
 
-  const userMessage = `WORK ORDER:\n${wo}\n\nAD UNITS TO REVIEW:\n${unitSections}`;
+  const docSection = docContent
+    ? `\n\nWORK ORDER DOCUMENT (Google Doc — use as primary source of truth):\n${docContent}`
+    : "";
+
+  const userMessage = `WORK ORDER SUMMARY:\n${wo}${docSection}\n\nAD UNITS TO REVIEW:\n${unitSections}`;
 
   try {
     const message = await client.messages.create({
@@ -121,9 +135,10 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result);
   } catch (err) {
-    console.error("QA API error:", err);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("QA API error:", message);
     return NextResponse.json(
-      { error: "QA check failed. Check your API key and try again." },
+      { error: `QA check failed: ${message}` },
       { status: 500 }
     );
   }
