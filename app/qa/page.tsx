@@ -89,7 +89,8 @@ function CheckRow({ label, result }: { label: string; result: CheckResult }) {
 
 export default function QAPage() {
   const [wo, setWo] = useState("");
-  const [detectedDocs, setDetectedDocs] = useState<{ url: string; content: string | null; error: string | null; loading: boolean }[]>([]);
+  const [detectedDocs, setDetectedDocs] = useState<{ url: string; woLabel: string; content: string | null; error: string | null; loading: boolean }[]>([]);
+  const [woDestinationUrl, setWoDestinationUrl] = useState<string | null>(null);
   const [units, setUnits] = useState<AdUnit[]>([
     { id: "1", name: "", link: "" },
     { id: "2", name: "", link: "" },
@@ -142,35 +143,68 @@ export default function QAPage() {
     );
   }
 
-  function extractGoogleLinks(text: string): string[] {
-    // Matches Google Docs AND Google Drive folder/file links
-    const regex =
-      /https:\/\/(?:docs\.google\.com\/document\/d\/|drive\.google\.com\/(?:drive\/(?:u\/\d+\/)?folders\/|file\/d\/))[a-zA-Z0-9_-]+(?:\/[^\s"')]*)?/g;
-    const matches = text.match(regex) ?? [];
-    return Array.from(new Set(matches));
+  const GOOGLE_LINK_RE =
+    /https:\/\/(?:docs\.google\.com\/document\/d\/|drive\.google\.com\/(?:drive\/(?:u\/\d+\/)?folders\/|file\/d\/))[a-zA-Z0-9_-]+(?:\/[^\s"')]*)?/g;
+
+  // Extract labeled links from WO — returns [{woLabel, url}] for Google links
+  // and sets woDestinationUrl for the first non-Google https URL labeled "URL"
+  function parseLabeledLinks(text: string): { woLabel: string; url: string }[] {
+    // Match patterns like "Label: https://..." or "Label:\nhttps://..."
+    const labelRe = /([A-Za-z][A-Za-z0-9 /()_-]{0,30}?):\s*(https:\/\/[^\s\n"')]+)/g;
+    const results: { woLabel: string; url: string }[] = [];
+    const seenUrls = new Set<string>();
+    let match;
+    while ((match = labelRe.exec(text)) !== null) {
+      const woLabel = match[1].trim();
+      const url = match[2].trim();
+      if (seenUrls.has(url)) continue;
+      seenUrls.add(url);
+      // Destination URL (non-Google) — store separately
+      if (!GOOGLE_LINK_RE.test(url)) {
+        GOOGLE_LINK_RE.lastIndex = 0;
+        const lowerLabel = woLabel.toLowerCase();
+        if (lowerLabel.includes("url") || lowerLabel.includes("link") || lowerLabel.includes("destination")) {
+          setWoDestinationUrl(url);
+        }
+        continue;
+      }
+      GOOGLE_LINK_RE.lastIndex = 0;
+      results.push({ woLabel, url });
+    }
+    // Fallback: pick up any Google links not caught by label pattern
+    const rawMatches = Array.from(text.matchAll(GOOGLE_LINK_RE)).map((m) => m[0]);
+    GOOGLE_LINK_RE.lastIndex = 0;
+    for (const url of rawMatches) {
+      if (!seenUrls.has(url)) {
+        seenUrls.add(url);
+        results.push({ woLabel: "Document", url });
+      }
+    }
+    return results;
   }
 
-  function labelForUrl(url: string): string {
-    if (url.includes("docs.google.com")) return "Google Doc";
-    if (url.includes("/folders/")) return "Drive Folder";
+  function displayLabel(doc: { woLabel: string; url: string }): string {
+    if (doc.woLabel && doc.woLabel !== "Document") return doc.woLabel;
+    if (doc.url.includes("docs.google.com")) return "Google Doc";
+    if (doc.url.includes("/folders/")) return "Drive Folder";
     return "Drive File";
   }
 
   async function handleWoChange(value: string) {
     setWo(value);
-    const urls = extractGoogleLinks(value);
-    if (urls.length === 0) {
+    setWoDestinationUrl(null);
+    const labeled = parseLabeledLinks(value);
+    if (labeled.length === 0) {
       setDetectedDocs([]);
       return;
     }
-    // Add new docs, keep already-loaded ones
     setDetectedDocs((prev) => {
       const existingUrls = new Set(prev.map((d) => d.url));
-      const toAdd = urls.filter((u) => !existingUrls.has(u));
-      const toKeep = prev.filter((d) => urls.includes(d.url));
+      const toKeep = prev.filter((d) => labeled.some((l) => l.url === d.url));
+      const toAdd = labeled.filter((l) => !existingUrls.has(l.url));
       return [
         ...toKeep,
-        ...toAdd.map((url) => ({ url, content: null, error: null, loading: false })),
+        ...toAdd.map((l) => ({ url: l.url, woLabel: l.woLabel, content: null, error: null, loading: false })),
       ];
     });
   }
@@ -263,10 +297,10 @@ export default function QAPage() {
         body: JSON.stringify({
           wo,
           units: filledUnits,
-          docContent: detectedDocs
+          labeledDocs: detectedDocs
             .filter((d) => d.content)
-            .map((d) => d.content)
-            .join("\n\n---\n\n") || null,
+            .map((d) => ({ label: d.woLabel, content: d.content })),
+          destinationUrl: woDestinationUrl ?? null,
         }),
       });
 
@@ -334,6 +368,14 @@ export default function QAPage() {
                 className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent resize-none"
               />
 
+              {/* Detected destination URL */}
+              {woDestinationUrl && (
+                <div className="mt-3 px-4 py-3 rounded-xl border border-indigo-200 bg-indigo-50 text-sm flex items-start gap-2">
+                  <span className="text-xs font-semibold text-indigo-700 shrink-0 mt-0.5">URL</span>
+                  <p className="text-xs text-indigo-600 truncate">{woDestinationUrl}</p>
+                </div>
+              )}
+
               {/* Auto-detected Google links */}
               {detectedDocs.length > 0 && (
                 <div className="mt-3 space-y-2">
@@ -355,11 +397,14 @@ export default function QAPage() {
                     >
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-0.5">
-                          <span className="text-xs font-medium text-gray-600">
-                            {labelForUrl(doc.url)}
+                          <span className="text-xs font-semibold text-gray-700">
+                            {displayLabel(doc)}
                           </span>
                         </div>
                         <p className="text-xs text-gray-400 truncate">{doc.url}</p>
+                        {doc.loading && (
+                          <p className="text-xs text-blue-600 mt-0.5">Loading content…</p>
+                        )}
                         {doc.content && (
                           <p className="text-xs text-emerald-700 mt-0.5">
                             ✓ Loaded — {doc.content.length.toLocaleString()} chars read into QA

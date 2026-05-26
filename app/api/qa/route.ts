@@ -10,12 +10,17 @@ For each ad unit you will receive:
 - The ad unit name and preview link URL
 - The ad creative content pulled directly from the Meta API (copy, headline, CTA, destination URL)
 
-You may also receive a WORK ORDER DOCUMENT pulled from a linked Google Doc. When present, treat it as the authoritative source of truth — it contains the full brief including creative direction, offer details, approved copy, URLs, and any restrictions. Use it to inform all four checks, especially copy/creative alignment.
+You may also receive labeled source documents pulled from Google Drive links in the work order:
+- COPY DOCUMENT: The approved ad copy. Use this as the authoritative source for what copy should appear in the ad. Flag any word, phrase, offer detail, or CTA that differs from this doc — even minor variations.
+- CREATIVE DOCUMENT / SPEC: The approved creative brief or spec. Use this to verify the creative direction, imagery descriptions, and visual theme match.
+- DESTINATION URL: The approved landing page URL from the work order. Verify the ad's click-through URL matches exactly.
 
-Review each ad unit against the work order on four criteria:
-1. copy_creative_alignment — Does the copy and described creative match what the WO specifies? Look for mismatched imagery descriptions, wrong product/offer references, wrong campaign theme.
-2. promo_month_date — Are any promo months, dates, or time-limited references correct per the WO? Flag if last month's promo language appears.
-3. url_cta — Does the CTA or destination URL match what the WO specifies?
+When these labeled documents are present, treat them as the primary source of truth over the WO summary text. Cross-reference each ad unit's actual copy and creative against the specific document provided for that purpose. Be explicit about what matches and what doesn't.
+
+Review each ad unit on four criteria:
+1. copy_creative_alignment — Does the ad copy exactly match the approved copy doc? Does the described creative match the creative spec? Be specific about any differences.
+2. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references.
+3. url_cta — Does the ad's destination URL match the approved URL exactly? Does the CTA match what was specified?
 4. grammar_typos — Any grammar errors, typos, or awkward phrasing?
 
 For each check, assign one of:
@@ -49,11 +54,17 @@ type AdUnit = {
   link: string;
 };
 
+type LabeledDoc = {
+  label: string;
+  content: string;
+};
+
 export async function POST(request: Request) {
-  const { wo, units, docContent } = (await request.json()) as {
+  const { wo, units, labeledDocs, destinationUrl } = (await request.json()) as {
     wo: string;
     units: AdUnit[];
-    docContent?: string;
+    labeledDocs?: LabeledDoc[];
+    destinationUrl?: string | null;
   };
 
   if (!wo || !units?.length) {
@@ -99,6 +110,24 @@ export async function POST(request: Request) {
     })
   );
 
+  // Build labeled source docs section
+  const sourceSections: string[] = [];
+
+  if (labeledDocs && labeledDocs.length > 0) {
+    for (const doc of labeledDocs) {
+      const sectionTitle = doc.label.toUpperCase().includes("COPY")
+        ? "COPY DOCUMENT (approved copy — authoritative source for ad copy)"
+        : doc.label.toUpperCase().includes("CREATIVE")
+        ? "CREATIVE DOCUMENT / SPEC (approved creative brief)"
+        : `SOURCE DOCUMENT [${doc.label}]`;
+      sourceSections.push(`\n\n${sectionTitle}:\n${doc.content}`);
+    }
+  }
+
+  if (destinationUrl) {
+    sourceSections.push(`\n\nDESTINATION URL (approved landing page from WO):\n${destinationUrl}`);
+  }
+
   // Build the user message
   const unitSections = unitContents
     .map((unit) => {
@@ -110,11 +139,7 @@ export async function POST(request: Request) {
     })
     .join("\n\n");
 
-  const docSection = docContent
-    ? `\n\nWORK ORDER DOCUMENT (Google Doc — use as primary source of truth):\n${docContent}`
-    : "";
-
-  const userMessage = `WORK ORDER SUMMARY:\n${wo}${docSection}\n\nAD UNITS TO REVIEW:\n${unitSections}`;
+  const userMessage = `WORK ORDER SUMMARY:\n${wo}${sourceSections.join("")}\n\nAD UNITS TO REVIEW:\n${unitSections}`;
 
   try {
     const message = await client.messages.create({
@@ -136,7 +161,6 @@ export async function POST(request: Request) {
       result = JSON.parse(jsonMatch[0]);
     } catch (parseErr) {
       console.error("Raw model response (first 500 chars):", raw.slice(0, 500));
-      console.error("Raw model response (around error):", raw.slice(6350, 6450));
       console.error("Stop reason:", message.stop_reason);
       throw parseErr;
     }
