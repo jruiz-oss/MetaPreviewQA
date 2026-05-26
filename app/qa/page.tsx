@@ -99,11 +99,38 @@ export default function QAPage() {
   const [result, setResult] = useState<QAResult | null>(null);
   const [error, setError] = useState("");
 
-  // Campaign import state
-  const [campaignId, setCampaignId] = useState("");
-  const [campaignFilter, setCampaignFilter] = useState("");
-  const [campaignLoading, setCampaignLoading] = useState(false);
-  const [campaignError, setCampaignError] = useState("");
+  // Campaign import state — supports multiple campaigns
+  type CampaignRow = {
+    id: string;
+    campaignId: string;
+    filter: string;
+    loading: boolean;
+    error: string;
+  };
+  const [campaigns, setCampaigns] = useState<CampaignRow[]>([
+    { id: "c1", campaignId: "", filter: "", loading: false, error: "" },
+  ]);
+
+  function addCampaignRow() {
+    setCampaigns((prev) => [
+      ...prev,
+      { id: String(Date.now()), campaignId: "", filter: "", loading: false, error: "" },
+    ]);
+  }
+
+  function removeCampaignRow(id: string) {
+    if (campaigns.length <= 1) {
+      setCampaigns([{ id: "c1", campaignId: "", filter: "", loading: false, error: "" }]);
+    } else {
+      setCampaigns((prev) => prev.filter((c) => c.id !== id));
+    }
+  }
+
+  function updateCampaignRow(id: string, field: "campaignId" | "filter", value: string) {
+    setCampaigns((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, [field]: value, error: "" } : c))
+    );
+  }
 
   function addUnit() {
     setUnits((prev) => [
@@ -244,20 +271,24 @@ export default function QAPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detectedDocs.map((d) => d.url).join(",")]);
 
-  async function loadFromCampaign() {
-    const id = campaignId.trim();
-    if (!id) return;
-    setCampaignLoading(true);
-    setCampaignError("");
+  async function loadFromCampaign(rowId: string) {
+    const row = campaigns.find((c) => c.id === rowId);
+    if (!row || !row.campaignId.trim()) return;
+
+    setCampaigns((prev) =>
+      prev.map((c) => (c.id === rowId ? { ...c, loading: true, error: "" } : c))
+    );
+
     try {
       const res = await fetch("/api/campaign-ads", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ campaignId: id }),
+        body: JSON.stringify({ campaignId: row.campaignId.trim() }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to load campaign ads");
-      const keyword = campaignFilter.trim().toLowerCase();
+
+      const keyword = row.filter.trim().toLowerCase();
       const filtered = keyword
         ? data.ads.filter((ad: { id: string; name: string }) =>
             ad.name.toLowerCase().includes(keyword)
@@ -265,7 +296,11 @@ export default function QAPage() {
         : data.ads;
 
       if (filtered.length === 0) {
-        throw new Error(`No ads matched "${campaignFilter.trim()}" — try a different keyword.`);
+        throw new Error(
+          keyword
+            ? `No ads matched "${row.filter.trim()}" — try a different keyword.`
+            : "No ads found in this campaign."
+        );
       }
 
       const imported: AdUnit[] = filtered.map((ad: { id: string; name: string }) => ({
@@ -273,11 +308,24 @@ export default function QAPage() {
         name: ad.name,
         link: ad.id,
       }));
-      setUnits(imported);
+
+      // Append to existing units (remove empty placeholder rows first)
+      setUnits((prev) => {
+        const nonEmpty = prev.filter((u) => u.link.trim() || u.name.trim());
+        return nonEmpty.length > 0 ? [...nonEmpty, ...imported] : imported;
+      });
+
+      setCampaigns((prev) =>
+        prev.map((c) => (c.id === rowId ? { ...c, loading: false } : c))
+      );
     } catch (err) {
-      setCampaignError(err instanceof Error ? err.message : "Something went wrong");
-    } finally {
-      setCampaignLoading(false);
+      setCampaigns((prev) =>
+        prev.map((c) =>
+          c.id === rowId
+            ? { ...c, loading: false, error: err instanceof Error ? err.message : "Something went wrong" }
+            : c
+        )
+      );
     }
   }
 
@@ -445,44 +493,67 @@ export default function QAPage() {
                 </p>
               </div>
 
-              {/* Campaign import */}
-              <div className="flex flex-col gap-2 mb-5 pb-5 border-b border-gray-100">
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={campaignId}
-                    onChange={(e) => setCampaignId(e.target.value)}
-                    placeholder="Paste campaign ID to auto-load all ads"
-                    className="flex-1 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
-                  />
-                  <input
-                    type="text"
-                    value={campaignFilter}
-                    onChange={(e) => setCampaignFilter(e.target.value)}
-                    placeholder="Filter by name (e.g. june)"
-                    className="w-48 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
-                  />
-                  <button
-                    onClick={loadFromCampaign}
-                    disabled={campaignLoading || !campaignId.trim()}
-                    className="px-4 py-2.5 rounded-xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap flex items-center gap-2"
-                  >
-                    {campaignLoading ? (
-                      <>
-                        <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                        Loading...
-                      </>
-                    ) : (
-                      "Load ads"
+              {/* Campaign import — multi-campaign */}
+              <div className="mb-5 pb-5 border-b border-gray-100 space-y-2">
+                <div className="grid grid-cols-[1fr_auto_auto_32px] gap-2 px-1 mb-1">
+                  <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">Campaign ID</span>
+                  <span className="text-xs font-medium text-gray-400 uppercase tracking-wide w-40">Filter (optional)</span>
+                  <span />
+                  <span />
+                </div>
+
+                {campaigns.map((row) => (
+                  <div key={row.id} className="space-y-1">
+                    <div className="grid grid-cols-[1fr_auto_auto_32px] gap-2 items-center">
+                      <input
+                        type="text"
+                        value={row.campaignId}
+                        onChange={(e) => updateCampaignRow(row.id, "campaignId", e.target.value)}
+                        placeholder="Paste campaign ID"
+                        className="px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                      />
+                      <input
+                        type="text"
+                        value={row.filter}
+                        onChange={(e) => updateCampaignRow(row.id, "filter", e.target.value)}
+                        placeholder="e.g. june"
+                        className="w-40 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                      />
+                      <button
+                        onClick={() => loadFromCampaign(row.id)}
+                        disabled={row.loading || !row.campaignId.trim()}
+                        className="px-4 py-2.5 rounded-xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap flex items-center gap-2"
+                      >
+                        {row.loading ? (
+                          <>
+                            <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                            Loading...
+                          </>
+                        ) : (
+                          "Load ads"
+                        )}
+                      </button>
+                      <button
+                        onClick={() => removeCampaignRow(row.id)}
+                        className="flex items-center justify-center w-8 h-8 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+                        title="Remove"
+                      >
+                        ×
+                      </button>
+                    </div>
+                    {row.error && (
+                      <p className="text-xs text-red-600 pl-1">{row.error}</p>
                     )}
-                  </button>
-                </div>
+                  </div>
+                ))}
+
+                <button
+                  onClick={addCampaignRow}
+                  className="w-full py-2 rounded-xl border border-dashed border-gray-300 text-sm text-gray-500 hover:text-gray-700 hover:border-gray-400 transition-colors"
+                >
+                  + Add another campaign
+                </button>
               </div>
-              {campaignError && (
-                <div className="mb-4 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
-                  {campaignError}
-                </div>
-              )}
 
               {/* Column headers */}
               <div className="grid grid-cols-[1fr_2fr_32px] gap-3 mb-2 px-1">
