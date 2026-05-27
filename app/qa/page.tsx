@@ -399,9 +399,9 @@ export default function QAPage() {
     <div className="min-h-screen bg-[#f8f8f6]">
       <header className="border-b border-gray-200 bg-white px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <img src="/vera-logo.png" alt="Vera" className="h-10" />
-          <span className="text-gray-200">|</span>
           <span className="text-xs font-medium tracking-widest text-gray-400 uppercase">Commit Agency</span>
+          <span className="text-gray-200">|</span>
+          <img src="/vera-logo.png" alt="Vera" className="h-20" />
         </div>
         {result && (
           <button
