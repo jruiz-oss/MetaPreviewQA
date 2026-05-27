@@ -22,10 +22,14 @@ Review each ad unit on six criteria:
 2. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references.
 3. url_cta — Does the ad's destination URL match the approved URL exactly? Does the CTA match what was specified?
 4. grammar_typos — Any grammar errors, typos, or awkward phrasing?
-5. ai_enhancements — Are any Meta Advantage+ AI enhancements turned ON? You will receive a list of enhancements and their on/off status fetched directly from the Meta API.
-   - If the list is absent or empty: status = "unknown", note = "Enhancement data not available for this ad."
-   - If ALL enhancements are OFF: status = "pass", note = "All AI enhancements are off."
-   - If ANY enhancements are ON: status = "warning", note = list which ones are on (e.g. "Image brightness & contrast, Music are enabled.")
+5. ai_enhancements — Are any Meta Advantage+ AI enhancements turned ON? You will receive two pieces of data:
+   (a) API-checked enhancements: a list of enhancements and their on/off status fetched directly from the Meta API.
+   (b) Manual check required: a list of enhancements that cannot be read from the API and must be verified by a human inside Meta Ads Manager.
+   Evaluation rules:
+   - If any API-checked enhancement is ON: status = "warning", note = name all ON enhancements, then add "Manual check also required in Ads Manager for: [list the manual items]."
+   - If all API-checked enhancements are OFF: status = "warning", note = "All API-readable enhancements are off. The following must still be verified manually in Ads Manager: [list the manual items]."
+   - If API enhancement data is absent: status = "unknown", note = "API enhancement data unavailable. The following must be verified manually in Ads Manager: [list the manual items]."
+   Never return "pass" for ai_enhancements — manual items always require a human to verify.
 6. format_size — Do the creative asset dimensions match the intended format(s) for this ad?
    You will receive "Creative asset sizes" listing every unique width×height found across the ad's creative assets, plus placement info and ad format type.
    Also use the ad unit name as a strong hint — names typically include "Story", "Feed", "Reel", "Static", "Video", "1x1", "9x16", "4x5", etc.
@@ -176,13 +180,17 @@ export async function POST(request: Request) {
     // AI enhancements block
     let enhancementsBlock = "";
     const enhancements = (unit as { aiEnhancements?: AiEnhancement[] | null }).aiEnhancements;
+    const manualItems = (unit as { manualCheckItems?: string[] }).manualCheckItems ?? [];
+    const manualList = manualItems.length > 0
+      ? `\nEnhancements requiring manual verification in Ads Manager:\n${manualItems.map(i => `  - ${i}`).join("\n")}`
+      : "";
     if (enhancements && enhancements.length > 0) {
       const lines = enhancements.map(
         (e) => `  - ${e.label}: ${e.status === "on" ? "ON ⚠️" : "off"}`
       );
-      enhancementsBlock = `\nMeta Advantage+ AI enhancements (from API):\n${lines.join("\n")}`;
+      enhancementsBlock = `\nMeta Advantage+ AI enhancements (from API):\n${lines.join("\n")}${manualList}`;
     } else {
-      enhancementsBlock = "\nMeta Advantage+ AI enhancements: not available for this ad.";
+      enhancementsBlock = `\nMeta Advantage+ AI enhancements: not available for this ad.${manualList}`;
     }
 
     // Format & placement block

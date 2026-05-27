@@ -118,17 +118,28 @@ type CreativeFeatureEntry = { enroll_status?: EnrollStatus };
 
 type DegreesOfFreedomSpec = {
   creative_features_spec?: {
+    // Confirmed fields (Meta API docs explicitly state their Ads Manager UI label)
+    image_templates?: CreativeFeatureEntry;          // "Add Overlays"
+    image_touchups?: CreativeFeatureEntry;           // "Visual Touch Ups" (image ads)
+    video_auto_crop?: CreativeFeatureEntry;          // "Visual Touch Ups" (video ads)
+    text_optimizations?: CreativeFeatureEntry;       // "Text Improvements"
+    image_brightness_and_contrast?: CreativeFeatureEntry; // "Adjust Brightness & Contrast"
+    reveal_details_over_time?: CreativeFeatureEntry; // "Reveal Details Over Time"
+    text_translation?: CreativeFeatureEntry;         // "Translations"
+    add_text_overlay?: CreativeFeatureEntry;         // "Add Dynamic Overlays"
+    inline_comment?: CreativeFeatureEntry;           // "Relevant Comments"
+    enhance_cta?: CreativeFeatureEntry;              // "Enhance CTA"
+    image_uncrop?: CreativeFeatureEntry;             // "Expand Image"
+    // Fields present in API — UI label not confirmed in docs
+    show_summary?: CreativeFeatureEntry;
+    site_extensions?: CreativeFeatureEntry;
+    biz_ai?: CreativeFeatureEntry;
+    replace_media_text?: CreativeFeatureEntry;
+    image_animation?: CreativeFeatureEntry;
+    video_highlights?: CreativeFeatureEntry;
+    profile_card?: CreativeFeatureEntry;
+    // Legacy — kept for backward compat with older ads
     standard_enhancements?: CreativeFeatureEntry;
-    image_brightness_and_contrast?: CreativeFeatureEntry;
-    image_templates?: CreativeFeatureEntry;
-    image_uncrop?: CreativeFeatureEntry;
-    relevant_comments?: CreativeFeatureEntry;
-    music?: CreativeFeatureEntry;
-    inline_comment?: CreativeFeatureEntry;
-    visual_touch_up?: CreativeFeatureEntry;
-    body_label?: CreativeFeatureEntry;
-    title_label?: CreativeFeatureEntry;
-    description_label?: CreativeFeatureEntry;
     [key: string]: CreativeFeatureEntry | undefined;
   };
 };
@@ -139,19 +150,46 @@ export type AiEnhancement = {
   status: "on" | "off";
 };
 
+// Confirmed: Meta API docs explicitly state these Ads Manager UI labels
+// Unconfirmed: field name strongly matches the UI label but no doc confirmation found
 const ENHANCEMENT_LABELS: Record<string, string> = {
-  standard_enhancements: "All standard enhancements",
-  image_brightness_and_contrast: "Image brightness & contrast",
-  image_templates: "Image templates",
-  image_uncrop: "Image expansion (uncrop)",
-  relevant_comments: "Relevant comments",
-  music: "Music",
-  inline_comment: "Inline comments",
-  visual_touch_up: "Visual touch-up",
-  body_label: "Body text label",
-  title_label: "Title label",
-  description_label: "Description label",
+  // Confirmed
+  image_templates: "Add Overlays",
+  image_touchups: "Visual Touch Ups",
+  video_auto_crop: "Visual Touch Ups (video)",
+  text_optimizations: "Text Improvements",
+  image_brightness_and_contrast: "Adjust Brightness & Contrast",
+  reveal_details_over_time: "Reveal Details Over Time",
+  text_translation: "Translations",
+  add_text_overlay: "Add Dynamic Overlays",
+  inline_comment: "Relevant Comments",
+  enhance_cta: "Enhance CTA",
+  image_uncrop: "Expand Image",
+  // Unconfirmed label
+  show_summary: "Show Summaries",
+  site_extensions: "Site Links",
+  biz_ai: "Add Business AI",
+  replace_media_text: "Enhance Media Text",
+  image_animation: "Add Animation",
+  video_highlights: "Show Spotlights",
+  profile_card: "Profile End Card",
+  // Legacy
+  standard_enhancements: "Standard Enhancements (legacy)",
 };
+
+// Items from the QA checklist that have no API field in degrees_of_freedom_spec.
+// These must be verified manually inside Meta Ads Manager.
+export const MANUAL_CHECK_ITEMS: string[] = [
+  "Website Summary",
+  "Promotions",
+  "Website Highlights",
+  "Products (Creative Set-Up)",
+  "Adapt Multi-Image Format",
+  "Add Product Tags",
+  "Highlight Carousel Card (carousel only)",
+  "Related Media",
+  "Personalized Destinations",
+];
 
 type CreativeFields = {
   id?: string;
@@ -198,6 +236,7 @@ type CreativeFields = {
     link_urls?: Array<{ website_url?: string }>;
     images?: Array<{ hash?: string; url?: string }>; // width/height not a valid sub-field — use AdImages endpoint
     videos?: Array<{ video_id?: string; url?: string; thumbnail_url?: string }>;
+    audios?: Array<{ type?: string }>; // non-empty = Add Music is ON (music lives here, not in degrees_of_freedom_spec)
     ad_formats?: string[];
   };
 };
@@ -217,6 +256,7 @@ export type FetchResult = {
   aiEnhancements: AiEnhancement[] | null;
   formatInfo: FormatInfo | null; // null only on hard API error
   creativeImageUrls: string[]; // image/thumbnail URLs for visual QA
+  manualCheckItems: string[]; // checklist items that cannot be read from the API — must be verified in Ads Manager
 };
 
 /**
@@ -322,7 +362,7 @@ export async function fetchAdContent(
     "adset_id",
     "account_id",
     "name",
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},ad_formats},degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},audios{type},ad_formats},degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -332,7 +372,7 @@ export async function fetchAdContent(
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     data = await res.json();
   } catch (err) {
-    return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null, formatInfo: null, creativeImageUrls: [] };
+    return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null, formatInfo: null, creativeImageUrls: [], manualCheckItems: MANUAL_CHECK_ITEMS };
   }
 
   if (data.error) {
@@ -353,11 +393,20 @@ export async function fetchAdContent(
       friendly = `Token is missing required permissions (need ads_read or ads_management). Original: ${msg}`;
     }
 
-    return { content: null, error: friendly, aiEnhancements: null, formatInfo: null, creativeImageUrls: [] };
+    return { content: null, error: friendly, aiEnhancements: null, formatInfo: null, creativeImageUrls: [], manualCheckItems: MANUAL_CHECK_ITEMS };
   }
 
   const formatted = formatCreative(data);
-  const aiEnhancements = parseAiEnhancements(data.creative?.degrees_of_freedom_spec);
+  let aiEnhancements = parseAiEnhancements(data.creative?.degrees_of_freedom_spec);
+
+  // Music is NOT in degrees_of_freedom_spec — it's controlled via asset_feed_spec.audios.
+  // A non-empty audios array means Add Music is ON.
+  // Only report if asset_feed_spec was returned (so we can distinguish "off" from "unknown").
+  if (data.creative?.asset_feed_spec !== undefined) {
+    const musicOn = (data.creative.asset_feed_spec.audios?.length ?? 0) > 0;
+    const musicEntry: AiEnhancement = { key: "music", label: "Add Music", status: musicOn ? "on" : "off" };
+    aiEnhancements = aiEnhancements ? [...aiEnhancements, musicEntry] : [musicEntry];
+  }
 
   // Fetch placement data and creative dimensions in parallel where possible
   const adsetId = data.adset_id;
@@ -420,6 +469,7 @@ export async function fetchAdContent(
     aiEnhancements,
     formatInfo,
     creativeImageUrls,
+    manualCheckItems: MANUAL_CHECK_ITEMS,
   };
 }
 
