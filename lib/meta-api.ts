@@ -65,7 +65,7 @@ export async function fetchCampaignAdsList(
  * Handles:
  *   - Numeric IDs pasted directly: 120210001234567
  *   - Ads Manager URLs with ?id= param: facebook.com/ads/preview/?id=XXXXX
- *   - fb.me short links: fb.me/adspreview/facebook/1Z3drgvvv0VRnUA  (follows redirect)
+ * Note: fb.me short links cannot be resolved (no ad ID is extractable) — returns null.
  */
 export async function resolveAdId(input: string): Promise<string | null> {
   const trimmed = input.trim();
@@ -91,23 +91,6 @@ export async function resolveAdId(input: string): Promise<string | null> {
     if (fromParams) return fromParams.split(",")[0].trim();
 
     return null;
-  } catch {
-    return null;
-  }
-}
-
-async function followRedirect(url: string): Promise<string | null> {
-  try {
-    const res = await fetch(url, {
-      redirect: "follow",
-      signal: AbortSignal.timeout(8000),
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      },
-    });
-    // res.url is the final URL after all redirects
-    return res.url !== url ? res.url : null;
   } catch {
     return null;
   }
@@ -260,10 +243,6 @@ export type FetchResult = {
 };
 
 /**
- * Fetches ad creative content from the Meta Graph API.
- * Returns the formatted content, or a human-readable error string if Meta rejected the call.
- */
-/**
  * Fetches placement targeting from an ad set.
  */
 async function fetchAdsetPlacements(adsetId: string, accessToken: string): Promise<PlacementInfo | null> {
@@ -322,14 +301,6 @@ async function fetchBatchImageDimensions(
 }
 
 /**
- * Single-hash convenience wrapper (used for object_story_spec fallback).
- */
-async function fetchImageDimensions(accountId: string, imageHash: string, accessToken: string): Promise<ImageDimensions | null> {
-  const map = await fetchBatchImageDimensions(accountId, [imageHash], accessToken);
-  return map.get(imageHash) ?? null;
-}
-
-/**
  * Fetches video dimensions from the Video object using a video ID.
  * Uses the "format" field which returns an array of renditions — we pick the largest (original).
  */
@@ -354,6 +325,11 @@ async function fetchVideoDimensions(videoId: string, accessToken: string): Promi
   }
 }
 
+/**
+ * Fetches ad creative content from the Meta Graph API.
+ * Returns the formatted content, AI enhancement statuses, format info, and
+ * a list of checklist items that must be verified manually in Ads Manager.
+ */
 export async function fetchAdContent(
   adId: string,
   accessToken: string

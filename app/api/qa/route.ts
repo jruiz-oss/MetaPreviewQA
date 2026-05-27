@@ -66,7 +66,7 @@ IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exac
         "promo_month_date": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
         "url_cta": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
         "grammar_typos": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
-        "ai_enhancements": { "status": "pass" | "warning" | "unknown", "note": "one sentence explanation" },
+        "ai_enhancements": { "status": "warning" | "unknown", "note": "one sentence explanation" },
         "format_size": { "status": "pass" | "fail" | "warning" | "unknown", "note": "one sentence explanation" }
       },
       "summary": "one sentence overall summary for this unit"
@@ -128,13 +128,14 @@ export async function POST(request: Request) {
         };
       }
 
-      const { content, error, aiEnhancements, formatInfo, creativeImageUrls } = await fetchAdContent(adId, accessToken);
+      const { content, error, aiEnhancements, formatInfo, creativeImageUrls, manualCheckItems } = await fetchAdContent(adId, accessToken);
       return {
         ...unit,
         content,
         aiEnhancements,
         formatInfo,
         creativeImageUrls,
+        manualCheckItems,
         note: content ? null : (error ?? "Meta API returned no content."),
       };
     })
