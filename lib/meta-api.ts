@@ -158,6 +158,16 @@ const ENHANCEMENT_LABELS: Record<string, string> = {
   profile_card: "Profile End Card",
   // Legacy
   standard_enhancements: "Standard Enhancements (legacy)",
+  // Unconfirmed — seen in API responses, UI label not verified
+  ads_with_benefits: "Ads with Benefits",
+  advantage_plus_creative: "Advantage+ Creative",
+  carousel_to_video: "Carousel to Video",
+  cv_transformation: "Creative Variations",
+  pac_relaxation: "PAC Relaxation",
+  product_extensions: "Product Extensions",
+  show_destination_blurbs: "Destination Blurbs",
+  video_filtering: "Video Filtering",
+  video_uncrop: "Expand Video",
 };
 
 // Keys the Meta API reports as OPT_IN but that don't correspond to a user-controllable
