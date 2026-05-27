@@ -179,7 +179,6 @@ export const MANUAL_CHECK_ITEMS: string[] = [
   "Highlight Carousel Card (carousel only)",
   "Related Media",
   "Personalized Destinations",
-  "Translate Voiceover",
 ];
 
 type CreativeFields = {
@@ -464,6 +463,9 @@ export async function fetchAdContent(
 function parseAiEnhancements(spec?: DegreesOfFreedomSpec): AiEnhancement[] | null {
   if (!spec?.creative_features_spec) return null;
   const features = spec.creative_features_spec;
+  console.log("[DEBUG enhancements raw]", JSON.stringify(
+    Object.entries(features).map(([k, v]) => ({ key: k, enroll_status: v?.enroll_status }))
+  ));
   const results: AiEnhancement[] = [];
   for (const [key, entry] of Object.entries(features)) {
     if (!entry) continue;
