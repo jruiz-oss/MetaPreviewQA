@@ -33,7 +33,10 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-[#f8f8f6]">
       <div className="w-full max-w-sm">
         <div className="mb-8">
-          <img src="/vera-logo.png" alt="Vera" className="h-10 mb-6" />
+          <img src="/vera-logo.png" alt="Vera" className="h-20 mb-4" />
+          <p className="text-xs font-medium tracking-widest text-gray-400 uppercase mb-2">
+            Commit Agency
+          </p>
           <p className="text-sm text-gray-500">
             Enter the team password to continue
           </p>
