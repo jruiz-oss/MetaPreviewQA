@@ -463,10 +463,7 @@ export async function fetchAdContent(
 function parseAiEnhancements(spec?: DegreesOfFreedomSpec): AiEnhancement[] | null {
   if (!spec?.creative_features_spec) return null;
   const features = spec.creative_features_spec;
-  console.log("[DEBUG enhancements raw]", JSON.stringify(
-    Object.entries(features).map(([k, v]) => ({ key: k, enroll_status: v?.enroll_status }))
-  ));
-  const results: AiEnhancement[] = [];
+const results: AiEnhancement[] = [];
   for (const [key, entry] of Object.entries(features)) {
     if (!entry) continue;
     if (UNRELIABLE_API_KEYS.has(key)) continue;
