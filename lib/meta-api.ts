@@ -216,6 +216,7 @@ export type FetchResult = {
   error: string | null;
   aiEnhancements: AiEnhancement[] | null;
   formatInfo: FormatInfo | null; // null only on hard API error
+  creativeImageUrls: string[]; // image/thumbnail URLs for visual QA
 };
 
 /**
@@ -331,7 +332,7 @@ export async function fetchAdContent(
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     data = await res.json();
   } catch (err) {
-    return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null, formatInfo: null };
+    return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null, formatInfo: null, creativeImageUrls: [] };
   }
 
   if (data.error) {
@@ -352,7 +353,7 @@ export async function fetchAdContent(
       friendly = `Token is missing required permissions (need ads_read or ads_management). Original: ${msg}`;
     }
 
-    return { content: null, error: friendly, aiEnhancements: null, formatInfo: null };
+    return { content: null, error: friendly, aiEnhancements: null, formatInfo: null, creativeImageUrls: [] };
   }
 
   const formatted = formatCreative(data);
@@ -401,11 +402,24 @@ export async function fetchAdContent(
   const adFormats = data.creative?.asset_feed_spec?.ad_formats ?? [];
   const formatInfo: FormatInfo = { placements, creativeDimensions, adFormats };
 
+  // Collect image/thumbnail URLs for visual QA (deduplicated, max 6)
+  const seenUrls = new Set<string>();
+  const creativeImageUrls: string[] = [];
+  function addUrl(u: string | undefined | null) {
+    if (u && !seenUrls.has(u) && creativeImageUrls.length < 6) {
+      seenUrls.add(u);
+      creativeImageUrls.push(u);
+    }
+  }
+  for (const img of data.creative?.asset_feed_spec?.images ?? []) addUrl(img.url);
+  for (const vid of data.creative?.asset_feed_spec?.videos ?? []) addUrl(vid.thumbnail_url);
+
   return {
     content: formatted,
     error: formatted ? null : "Meta returned the ad but no readable creative fields were present.",
     aiEnhancements,
     formatInfo,
+    creativeImageUrls,
   };
 }
 

@@ -666,7 +666,13 @@ export default function QAPage() {
                     : "Issues found"}
                 </h2>
                 {result.notes && (
-                  <p className="text-sm text-gray-500 mt-1">{result.notes}</p>
+                  <div className="mt-2 space-y-1.5">
+                    {result.notes
+                      .split(/(?<=\.)\s+(?=Promo\s+\d|Note:|Additionally,)/)
+                      .map((chunk, i) => (
+                        <p key={i} className="text-sm text-gray-500">{chunk.trim()}</p>
+                      ))}
+                  </div>
                 )}
               </div>
               <StatusBadge status={result.overall_status} />
