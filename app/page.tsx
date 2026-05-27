@@ -33,7 +33,7 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-[#f8f8f6]">
       <div className="w-full max-w-sm">
         <div className="mb-8">
-          <img src="/vera-wordmark-transparent.png" alt="Vera" className="h-32 mb-5 block ml-0" />
+          <img src="/vera-wordmark-transparent.png" alt="Vera" className="h-[90px] mb-5 block ml-0" />
           <p className="text-xs font-medium tracking-widest text-gray-400 uppercase mb-2">
             Commit Agency
           </p>

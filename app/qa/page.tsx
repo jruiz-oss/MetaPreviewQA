@@ -401,7 +401,7 @@ export default function QAPage() {
         <div className="flex items-center gap-3">
           <span className="text-xs font-medium tracking-widest text-gray-400 uppercase">Commit Agency</span>
           <span className="text-gray-200">|</span>
-          <img src="/vera-wordmark-transparent.png" alt="Vera" className="h-20" />
+          <img src="/vera-wordmark-transparent.png" alt="Vera" className="h-14" />
         </div>
         {result && (
           <button
