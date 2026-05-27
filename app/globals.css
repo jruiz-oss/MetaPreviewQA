@@ -7,6 +7,74 @@
   box-sizing: border-box;
 }
 
+/* ── QA Loading Animation ─────────────────────────────── */
+
+@keyframes ring-pulse {
+  0%   { transform: scale(0.85); opacity: 0.7; }
+  50%  { transform: scale(1.08); opacity: 0.25; }
+  100% { transform: scale(0.85); opacity: 0.7; }
+}
+
+@keyframes ring-pulse-2 {
+  0%   { transform: scale(0.75); opacity: 0.5; }
+  50%  { transform: scale(1.15); opacity: 0.1; }
+  100% { transform: scale(0.75); opacity: 0.5; }
+}
+
+@keyframes ring-pulse-3 {
+  0%   { transform: scale(0.6); opacity: 0.4; }
+  50%  { transform: scale(1.22); opacity: 0.05; }
+  100% { transform: scale(0.6); opacity: 0.4; }
+}
+
+@keyframes core-breathe {
+  0%, 100% { transform: scale(1);    opacity: 1; }
+  50%       { transform: scale(0.9); opacity: 0.85; }
+}
+
+@keyframes scan-line {
+  0%   { transform: translateY(-56px); opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { transform: translateY(56px);  opacity: 0; }
+}
+
+@keyframes check-fade {
+  0%   { opacity: 0; transform: translateY(6px); }
+  15%  { opacity: 1; transform: translateY(0); }
+  80%  { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-6px); }
+}
+
+@keyframes dot-chase {
+  0%   { transform: rotate(0deg)   translateX(38px) rotate(0deg); }
+  100% { transform: rotate(360deg) translateX(38px) rotate(-360deg); }
+}
+
+@keyframes dot-chase-2 {
+  0%   { transform: rotate(120deg) translateX(38px) rotate(-120deg); }
+  100% { transform: rotate(480deg) translateX(38px) rotate(-480deg); }
+}
+
+@keyframes dot-chase-3 {
+  0%   { transform: rotate(240deg) translateX(38px) rotate(-240deg); }
+  100% { transform: rotate(600deg) translateX(38px) rotate(-600deg); }
+}
+
+.qa-ring-1 { animation: ring-pulse   2.4s ease-in-out infinite; }
+.qa-ring-2 { animation: ring-pulse-2 2.4s ease-in-out infinite 0.5s; }
+.qa-ring-3 { animation: ring-pulse-3 2.4s ease-in-out infinite 1s; }
+.qa-core   { animation: core-breathe 2.4s ease-in-out infinite; }
+.qa-scan   { animation: scan-line    2s linear infinite; }
+
+.qa-dot-1  { animation: dot-chase   1.8s linear infinite; }
+.qa-dot-2  { animation: dot-chase-2 1.8s linear infinite; }
+.qa-dot-3  { animation: dot-chase-3 1.8s linear infinite; }
+
+.qa-check-label {
+  animation: check-fade 3s ease-in-out infinite;
+}
+
 body {
   font-family: 'Inter', system-ui, sans-serif;
   background: #f8f8f6;

@@ -376,6 +376,25 @@ export default function QAPage() {
     setError("");
   }
 
+  const CHECK_NAMES = [
+    "Copy / creative alignment",
+    "Promo month & dates",
+    "URL & CTA destination",
+    "Grammar & typos",
+    "Advantage+ AI enhancements",
+    "Format & size",
+  ];
+
+  const [checkIdx, setCheckIdx] = useState(0);
+
+  useEffect(() => {
+    if (!loading) return;
+    const interval = setInterval(() => {
+      setCheckIdx((i) => (i + 1) % CHECK_NAMES.length);
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [loading]);
+
   return (
     <div className="min-h-screen bg-[#f8f8f6]">
       <header className="border-b border-gray-200 bg-white px-6 py-4 flex items-center justify-between">
@@ -397,7 +416,72 @@ export default function QAPage() {
       </header>
 
       <main className="max-w-3xl mx-auto px-6 py-8">
-        {!result ? (
+        {loading ? (
+          /* ── QA Running Animation ─────────────────────────── */
+          <div className="flex flex-col items-center justify-center min-h-[62vh] gap-8 select-none">
+            {/* Orbital ring system */}
+            <div className="relative flex items-center justify-center" style={{ width: 160, height: 160 }}>
+              {/* Pulsing rings */}
+              <div className="qa-ring-3 absolute rounded-full border border-gray-300/50" style={{ width: 150, height: 150 }} />
+              <div className="qa-ring-2 absolute rounded-full border border-gray-400/50" style={{ width: 118, height: 118 }} />
+              <div className="qa-ring-1 absolute rounded-full border border-gray-500/60" style={{ width: 88, height: 88 }} />
+
+              {/* Orbiting dots */}
+              <div className="absolute" style={{ width: 0, height: 0 }}>
+                <div className="qa-dot-1 absolute" style={{ width: 0, height: 0 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#111827", position: "absolute", top: -4, left: -4 }} />
+                </div>
+                <div className="qa-dot-2 absolute" style={{ width: 0, height: 0 }}>
+                  <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#6b7280", position: "absolute", top: -2.5, left: -2.5 }} />
+                </div>
+                <div className="qa-dot-3 absolute" style={{ width: 0, height: 0 }}>
+                  <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#9ca3af", position: "absolute", top: -2.5, left: -2.5 }} />
+                </div>
+              </div>
+
+              {/* Core circle with scan line */}
+              <div className="qa-core relative flex items-center justify-center rounded-full bg-gray-900 overflow-hidden" style={{ width: 52, height: 52 }}>
+                <div
+                  className="qa-scan absolute"
+                  style={{
+                    width: 38,
+                    height: 1.5,
+                    background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.85), transparent)",
+                    borderRadius: 4,
+                  }}
+                />
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" style={{ position: "relative", zIndex: 1 }}>
+                  <path d="M9 12l2 2 4-4M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </div>
+            </div>
+
+            {/* Label + cycling check name */}
+            <div className="text-center space-y-3">
+              <p className="text-sm font-semibold text-gray-900 tracking-wide">Running QA check</p>
+              <div style={{ height: 22, overflow: "hidden", position: "relative" }}>
+                <p key={checkIdx} className="qa-check-label text-sm text-gray-400">
+                  Checking: {CHECK_NAMES[checkIdx]}
+                </p>
+              </div>
+              {/* Progress pill row */}
+              <div className="flex items-center justify-center gap-1.5 pt-1">
+                {CHECK_NAMES.map((_, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      width: i === checkIdx ? 18 : 4,
+                      height: 4,
+                      borderRadius: 9999,
+                      background: i === checkIdx ? "#111827" : "#d1d5db",
+                      transition: "width 0.4s ease, background 0.4s ease",
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : !result ? (
           <div className="space-y-5">
             {/* Step 1 — Work Order */}
             <div className="bg-white rounded-2xl border border-gray-200 p-6">
@@ -637,16 +721,9 @@ export default function QAPage() {
                 !wo.trim() ||
                 units.every((u) => !u.link.trim())
               }
-              className="w-full py-3.5 rounded-2xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              className="w-full py-3.5 rounded-2xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {loading ? (
-                <>
-                  <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Running QA check...
-                </>
-              ) : (
-                "Run QA check"
-              )}
+              Run QA check
             </button>
           </div>
         ) : (
