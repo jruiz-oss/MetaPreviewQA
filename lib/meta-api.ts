@@ -160,7 +160,14 @@ const ENHANCEMENT_LABELS: Record<string, string> = {
   standard_enhancements: "Standard Enhancements (legacy)",
 };
 
-// Items from the QA checklist that have no API field in degrees_of_freedom_spec.
+// Keys the Meta API reports as OPT_IN but that don't correspond to a user-controllable
+// toggle visible in Ads Manager. Excluding these from API-checked enhancements prevents
+// false positives. They are moved to MANUAL_CHECK_ITEMS instead.
+const UNRELIABLE_API_KEYS = new Set([
+  "translate_voiceover",
+]);
+
+// Items from the QA checklist that have no reliable API field in degrees_of_freedom_spec.
 // These must be verified manually inside Meta Ads Manager.
 export const MANUAL_CHECK_ITEMS: string[] = [
   "Website Summary",
@@ -172,6 +179,7 @@ export const MANUAL_CHECK_ITEMS: string[] = [
   "Highlight Carousel Card (carousel only)",
   "Related Media",
   "Personalized Destinations",
+  "Translate Voiceover",
 ];
 
 type CreativeFields = {
@@ -459,6 +467,7 @@ function parseAiEnhancements(spec?: DegreesOfFreedomSpec): AiEnhancement[] | nul
   const results: AiEnhancement[] = [];
   for (const [key, entry] of Object.entries(features)) {
     if (!entry) continue;
+    if (UNRELIABLE_API_KEYS.has(key)) continue;
     const label = ENHANCEMENT_LABELS[key] ?? key.replace(/_/g, " ");
     results.push({
       key,
