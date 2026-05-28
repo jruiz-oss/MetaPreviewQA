@@ -271,11 +271,6 @@ export async function POST(request: Request) {
   // Download Drive images server-side
   const validDriveImages = await downloadDriveImages(driveImages ?? []);
 
-  // --- Batching helpers ---
-  // Max images per API call. Each base64 image averages ~700 KB encoded;
-  // keeping ≤12 images per batch stays well under the ~20 MB request limit.
-  const MAX_IMAGES_PER_BATCH = 12;
-
   // Match Drive images to a unit by checking if meaningful words from the
   // unit name appear in the image filename (case-insensitive).
   function driveImagesForUnit(unitName: string): FetchedImage[] {
@@ -470,50 +465,27 @@ export async function POST(request: Request) {
     };
   }
 
-  // --- Build batches ---
-  // Group units so each batch stays under MAX_IMAGES_PER_BATCH total images
-  // (Drive images for that batch + live Meta images for those units).
+  // --- Build batches: ONE ad unit per Claude call ---
+  // Bundling several units + up to a dozen images into one multimodal call was
+  // the real cause of the 300s timeouts: vision input + large output generation
+  // is slow, so a heavy campaign's few big calls could each take 100s+. A single
+  // unit (its text + its 1-2 live images + its matched Drive images) is a small,
+  // fast call (~5-15s). Many of these run concurrently and fail in isolation,
+  // keeping every request comfortably under Vercel's limit. driveImagesForUnit
+  // also means each unit only carries ITS matched Drive images — no more
+  // re-sending the whole approved set in every batch.
   type Batch = { units: (typeof unitContents); driveImages: FetchedImage[] };
-  const batches: Batch[] = [];
+  const batches: Batch[] = unitContents.map((unit) => ({
+    units: [unit],
+    driveImages: driveImagesForUnit(unit.name ?? ""),
+  }));
 
-  let currentBatch: Batch = { units: [], driveImages: [] };
-  let currentImageCount = 0;
+  console.log(`[qa] Running ${batches.length} per-unit call(s) for ${unitContents.length} ad unit(s).`);
 
-  for (const unit of unitContents) {
-    const unitDrive = driveImagesForUnit(unit.name ?? "");
-    const liveCount = ((unit as { creativeImages?: FetchedImage[] }).creativeImages ?? []).length;
-    const unitImageCount = unitDrive.length + liveCount;
-
-    // If adding this unit would exceed the limit AND we already have something,
-    // flush the current batch first.
-    if (currentBatch.units.length > 0 && currentImageCount + unitImageCount > MAX_IMAGES_PER_BATCH) {
-      batches.push(currentBatch);
-      currentBatch = { units: [], driveImages: [] };
-      currentImageCount = 0;
-    }
-
-    // Merge this unit's Drive images into the batch (deduplicate by name)
-    for (const img of unitDrive) {
-      if (!currentBatch.driveImages.find((d) => d.name === img.name)) {
-        currentBatch.driveImages.push(img);
-      }
-    }
-    currentBatch.units.push(unit);
-    currentImageCount = currentBatch.driveImages.length + liveCount +
-      currentBatch.units
-        .slice(0, -1)
-        .reduce((s, u) => s + (((u as { creativeImages?: FetchedImage[] }).creativeImages ?? []).length), 0);
-  }
-  if (currentBatch.units.length > 0) batches.push(currentBatch);
-
-  console.log(`[qa] Running ${batches.length} batch(es) for ${unitContents.length} ad unit(s).`);
-
-  // Run batches concurrently with a cap. Each runBatch is a full Claude call
-  // (~30-90s); running them sequentially was blowing past Vercel's 300s limit.
-  // A cap of 3 keeps us fast while staying clear of Claude rate limits (the
-  // per-batch 429 retry/backoff handles any we do hit). Results stay ordered
-  // because each result is written back to its original batch index.
-  const MAX_CONCURRENT_BATCHES = 3;
+  // Run per-unit calls concurrently with a cap. Each call is now small, so we
+  // can run more at once; the per-call 429 retry/backoff handles rate limits.
+  // Results stay ordered because each result is written back to its index.
+  const MAX_CONCURRENT_BATCHES = 5;
 
   try {
     const batchResults: Awaited<ReturnType<typeof runBatch>>[] = new Array(batches.length);
