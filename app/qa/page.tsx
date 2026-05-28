@@ -53,6 +53,63 @@ const CHECK_LABELS: Record<string, string> = {
   format_size: "Format & size",
 };
 
+// Order in which consolidated critical issues are grouped/scanned.
+const CRITICAL_ORDER = [
+  "copy_creative_alignment",
+  "promo_month_date",
+  "format_size",
+  "url_cta",
+  "grammar_typos",
+  "ai_enhancements",
+] as const;
+
+type ConsolidatedIssue = { label: string; detail: string; units: string[] };
+
+// Build the Critical issues summary by grouping FAILING checks across every ad
+// unit, rather than concatenating each unit's individual issue list. Each ad is
+// QA'd in its own model call, so the raw critical_issues array repeats the same
+// problem once per ad (e.g. "missing June 14" twelve times). Here we bucket by
+// check type, collect the affected ad names, and pick the most common phrasing
+// as the representative description — so one shared problem reads as a single
+// line "<issue> — affects ad A, ad B, ad C." Derived from the structured
+// `checks` so it stays correct regardless of how many ads or batches ran.
+function consolidateCriticalIssues(units: UnitResult[]): ConsolidatedIssue[] {
+  const buckets = new Map<
+    string,
+    { units: string[]; noteCounts: Map<string, number> }
+  >();
+
+  for (const unit of units) {
+    const name = unit.name || "Unnamed";
+    for (const key of CRITICAL_ORDER) {
+      const check = unit.checks?.[key];
+      if (!check) continue;
+      // ai_enhancements never returns "fail" — it's flagged critical when an
+      // enhancement is actually ON (note names it), not for manual-check-only.
+      const isCritical =
+        check.status === "fail" ||
+        (key === "ai_enhancements" && /\bON\b/.test(check.note));
+      if (!isCritical) continue;
+
+      if (!buckets.has(key)) buckets.set(key, { units: [], noteCounts: new Map() });
+      const b = buckets.get(key)!;
+      if (!b.units.includes(name)) b.units.push(name);
+      const note = check.note?.trim();
+      if (note) b.noteCounts.set(note, (b.noteCounts.get(note) ?? 0) + 1);
+    }
+  }
+
+  return CRITICAL_ORDER.filter((key) => buckets.has(key))
+    .map((key) => {
+      const b = buckets.get(key)!;
+      const detail =
+        Array.from(b.noteCounts.entries()).sort((a, c) => c[1] - a[1])[0]?.[0] ?? "";
+      return { label: CHECK_LABELS[key], detail, units: b.units };
+    })
+    // Most widely-shared problems first.
+    .sort((a, c) => c.units.length - a.units.length);
+}
+
 function StatusBadge({ status }: { status: string }) {
   const styles: Record<string, string> = {
     pass: "bg-emerald-50 text-emerald-700 border border-emerald-200",
@@ -880,22 +937,36 @@ export default function QAPage() {
               <StatusBadge status={result.overall_status} />
             </div>
 
-            {/* Critical issues */}
-            {result.critical_issues.length > 0 && (
-              <div className="bg-red-50 border border-red-200 rounded-2xl p-5">
-                <p className="text-sm font-semibold text-red-700 mb-2">
-                  Critical issues
-                </p>
-                <ul className="space-y-1">
-                  {result.critical_issues.map((issue, i) => (
-                    <li key={i} className="text-sm text-red-600 flex gap-2">
-                      <span className="shrink-0">•</span>
-                      {issue}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
+            {/* Critical issues — consolidated: one line per shared problem,
+                with the list of affected ad units, instead of repeating the
+                same issue once per ad. */}
+            {(() => {
+              const issues = consolidateCriticalIssues(result.units);
+              if (issues.length === 0) return null;
+              return (
+                <div className="bg-red-50 border border-red-200 rounded-2xl p-5">
+                  <p className="text-sm font-semibold text-red-700 mb-2">
+                    Critical issues
+                  </p>
+                  <ul className="space-y-2">
+                    {issues.map((issue, i) => (
+                      <li key={i} className="text-sm text-red-600 flex gap-2">
+                        <span className="shrink-0">•</span>
+                        <span>
+                          <span className="font-medium">{issue.label}</span>
+                          {issue.detail ? ` — ${issue.detail}` : ""}
+                          <span className="block text-xs text-red-500/80 mt-0.5">
+                            Affects {issue.units.length}{" "}
+                            {issue.units.length === 1 ? "ad" : "ads"}:{" "}
+                            {issue.units.join(", ")}
+                          </span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })()}
 
             {/* Per unit cards */}
             {result.units.map((unit, i) => (
