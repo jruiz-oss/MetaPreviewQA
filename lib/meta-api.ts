@@ -346,6 +346,36 @@ async function fetchVideoDimensions(videoId: string, accessToken: string): Promi
 }
 
 /**
+ * Fetches the "Add Music" status by reading asset_feed_spec.audios in isolation.
+ *
+ * This field must be requested on its own: for ads that use a track from Meta's licensed
+ * music collection, `audios` returns (#100) Missing Permission, and Graph fails an entire
+ * request if any single requested field is forbidden. Isolating it here means a forbidden
+ * `audios` field degrades to "unknown" instead of failing the whole creative read.
+ *
+ * Returns:
+ *   "on"      — asset_feed_spec present and contains at least one audio track
+ *   "off"     — asset_feed_spec present with no audio tracks
+ *   "unknown" — field forbidden (#100), errored, or no asset_feed_spec to read
+ */
+async function fetchMusicStatus(
+  adId: string,
+  accessToken: string
+): Promise<"on" | "off" | "unknown"> {
+  try {
+    const url = `${GRAPH_API}/${adId}?fields=creative{asset_feed_spec{audios{type}}}&access_token=${accessToken}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    if (data.error) return "unknown";
+    const afs = data.creative?.asset_feed_spec;
+    if (afs === undefined) return "unknown"; // no asset_feed_spec — can't distinguish off from absent
+    return (afs.audios?.length ?? 0) > 0 ? "on" : "off";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
  * Fetches ad creative content from the Meta Graph API.
  * Returns the formatted content, AI enhancement statuses, format info, and
  * a list of checklist items that must be verified manually in Ads Manager.
@@ -358,7 +388,12 @@ export async function fetchAdContent(
     "adset_id",
     "account_id",
     "name",
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},audios{type},ad_formats},degrees_of_freedom_spec}",
+    // NOTE: asset_feed_spec.audios is intentionally NOT requested here. For ads that use a
+    // track from Meta's licensed music collection, reading `audios` returns (#100) Missing
+    // Permission, and because Graph fails the whole request on a single forbidden field, that
+    // one field would fail the entire ad read. Music status is fetched separately in
+    // fetchMusicStatus() so it degrades to "unknown" instead of nuking the creative read.
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},ad_formats},degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -406,15 +441,6 @@ export async function fetchAdContent(
   const formatted = formatCreative(data);
   let aiEnhancements = parseAiEnhancements(data.creative?.degrees_of_freedom_spec);
 
-  // Music is NOT in degrees_of_freedom_spec — it's controlled via asset_feed_spec.audios.
-  // A non-empty audios array means Add Music is ON.
-  // Only report if asset_feed_spec was returned (so we can distinguish "off" from "unknown").
-  if (data.creative?.asset_feed_spec !== undefined) {
-    const musicOn = (data.creative.asset_feed_spec.audios?.length ?? 0) > 0;
-    const musicEntry: AiEnhancement = { key: "music", label: "Add Music", status: musicOn ? "on" : "off" };
-    aiEnhancements = aiEnhancements ? [...aiEnhancements, musicEntry] : [musicEntry];
-  }
-
   // Fetch placement data and creative dimensions in parallel where possible
   const adsetId = data.adset_id;
   const accountId = data.account_id;
@@ -434,7 +460,7 @@ export async function fetchAdContent(
   const singleVideoId = data.creative?.object_story_spec?.video_data?.video_id;
   const allVideoIds = Array.from(new Set([...feedVideoIds, ...(singleVideoId ? [singleVideoId] : [])]));
 
-  const [placements, dimMap, videoDims] = await Promise.all([
+  const [placements, dimMap, videoDims, musicStatus] = await Promise.all([
     adsetId ? fetchAdsetPlacements(adsetId, accessToken) : Promise.resolve(null),
     accountId && allHashes.length > 0
       ? fetchBatchImageDimensions(accountId, allHashes, accessToken)
@@ -442,7 +468,17 @@ export async function fetchAdContent(
     allVideoIds.length > 0
       ? Promise.all(allVideoIds.map((id) => fetchVideoDimensions(id, accessToken)))
       : Promise.resolve([] as (ImageDimensions | null)[]),
+    fetchMusicStatus(adId, accessToken),
   ]);
+
+  // Music ("Add Music") is read in its own request because the asset_feed_spec.audios field
+  // returns (#100) for ads using licensed music and would otherwise fail the whole creative
+  // read. Only surface it when we could actually determine on/off — "unknown" is dropped so
+  // the QA model treats it as a manual-check item rather than a false "off".
+  if (musicStatus !== "unknown") {
+    const musicEntry: AiEnhancement = { key: "music", label: "Add Music", status: musicStatus };
+    aiEnhancements = aiEnhancements ? [...aiEnhancements, musicEntry] : [musicEntry];
+  }
 
   // Deduplicate by WxH
   const seenSizes = new Set<string>();
