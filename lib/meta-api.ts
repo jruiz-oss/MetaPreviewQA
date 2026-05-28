@@ -391,7 +391,7 @@ export async function fetchAdContent(
     } else if (code === 190) {
       friendly = `Access token is invalid or expired. Regenerate META_ACCESS_TOKEN. Original: ${msg}`;
     } else if (code === 100) {
-      friendly = `Bad request — likely an unknown field or malformed ID. Original: ${msg}`;
+      friendly = `Permission denied for ad ${adId} (Meta code 100). This usually means the token's user does not have access to this ad's ad account in Business Manager. Verify the account is shared with the token owner, or that the correct access token is being used. Original: ${msg}`;
     } else if (code === 200) {
       friendly = `Token is missing required permissions (need ads_read or ads_management). Original: ${msg}`;
     }

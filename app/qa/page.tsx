@@ -407,7 +407,7 @@ export default function QAPage() {
             src="/vera-wordmark-transparent.png"
             alt="Vera"
             className="h-[42px] cursor-pointer"
-            onClick={() => router.push("/")}
+            onClick={reset}
           />
         </div>
         {result && (
