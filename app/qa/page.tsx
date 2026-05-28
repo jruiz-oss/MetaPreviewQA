@@ -383,7 +383,15 @@ export default function QAPage() {
     const labeledDocs = detectedDocs
       .filter((d) => d.content)
       .map((d) => ({ label: d.woLabel, content: d.content }));
-    const driveImages = detectedDocs.flatMap((d) => d.images ?? []);
+
+    // Only cross-reference images from the link labeled as the creative (e.g.
+    // "Updated Creative:"). A WO usually also links a broad JOB FOLDER that
+    // contains the entire campaign (copy, every concept, approvals, incoming) —
+    // pulling images from that dumps dozens of irrelevant assets onto every ad.
+    // If no creative-labeled link exists, fall back to all detected images.
+    const creativeDocs = detectedDocs.filter((d) => /creativ/i.test(d.woLabel));
+    const imageSourceDocs = creativeDocs.length > 0 ? creativeDocs : detectedDocs;
+    const driveImages = imageSourceDocs.flatMap((d) => d.images ?? []);
 
     const errors: string[] = [];
 

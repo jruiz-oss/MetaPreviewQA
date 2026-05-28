@@ -283,23 +283,52 @@ export async function POST(request: Request) {
   const MAX_DRIVE_IMAGES_PER_UNIT = 4;
   const allDriveRefs = driveImages ?? [];
 
+  // Tokenize a name (filename or ad unit name) into lowercase alphanumeric
+  // tokens. Keeps short-but-meaningful tokens like "v1", "v2", "1x1", "9x16"
+  // (length ≥ 2) which are exactly the version/format discriminators we need.
+  function tokenize(s: string): string[] {
+    return s
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 2);
+  }
+
+  // Pre-compute document frequency of each token across ALL Drive image names.
+  // A token in every file (e.g. "june", "hrok", the concept name) carries no
+  // signal and gets weight ~0; a rare token ("v1", "static") gets high weight.
+  // This is what makes matching general across clients — it learns which tokens
+  // are distinctive from the files themselves rather than hardcoding names.
+  const refTokenSets = allDriveRefs.map((r) => new Set(tokenize(r.name)));
+  const docFreq = new Map<string, number>();
+  refTokenSets.forEach((toks) => {
+    toks.forEach((t) => docFreq.set(t, (docFreq.get(t) ?? 0) + 1));
+  });
+  const totalRefs = allDriveRefs.length;
+  const idf = (t: string) => Math.log((totalRefs + 1) / ((docFreq.get(t) ?? 0) + 1));
+
   function rankRefsForUnit(unitName: string): DriveImageRef[] {
     if (!allDriveRefs.length) return [];
-    const words = unitName
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ")
-      .split(/\s+/)
-      .filter((w) => w.length > 3); // skip short stop-words
-    if (!words.length) return []; // no usable keywords → don't dump everything
+    const unitTokens = new Set(tokenize(unitName));
+    if (!unitTokens.size) return [];
 
-    return allDriveRefs
-      .map((ref) => {
-        const fname = ref.name.toLowerCase();
-        const score = words.reduce((s, w) => s + (fname.includes(w) ? 1 : 0), 0);
+    const scored = allDriveRefs
+      .map((ref, i) => {
+        let score = 0;
+        unitTokens.forEach((t) => {
+          if (refTokenSets[i].has(t)) score += idf(t);
+        });
         return { ref, score };
       })
-      .filter((x) => x.score > 0) // require at least one real overlap
-      .sort((a, b) => b.score - a.score)
+      .filter((x) => x.score > 0) // require at least one shared token
+      .sort((a, b) => b.score - a.score);
+
+    if (!scored.length) return []; // no match → no Drive comparison for this unit
+
+    // Keep only images close to the best score (so a unit doesn't pull in
+    // weakly-related extras from the wrong version), capped.
+    const best = scored[0].score;
+    return scored
+      .filter((x) => x.score >= best * 0.5)
       .slice(0, MAX_DRIVE_IMAGES_PER_UNIT)
       .map((x) => x.ref);
   }

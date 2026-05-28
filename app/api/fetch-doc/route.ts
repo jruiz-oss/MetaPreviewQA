@@ -84,7 +84,8 @@ async function readDriveFolder(
   folderId: string,
   depth = 0,
   folderName?: string,
-  images?: DriveImageRef[]
+  images?: DriveImageRef[],
+  pathPrefix = ""
 ): Promise<string> {
   const auth = getOAuthClient();
   const drive = google.drive({ version: "v3", auth });
@@ -135,8 +136,12 @@ async function readDriveFolder(
         if (images.length >= MAX_DRIVE_IMAGES) {
           console.log(`[fetch-doc] SKIP image "${file.name}" — image cap reached (${MAX_DRIVE_IMAGES}); not cross-referenced.`);
         } else if (file.id) {
-          images.push({ id: file.id, name: file.name ?? "creative", mediaType: file.mimeType });
-          console.log(`[fetch-doc] QUEUED image "${file.name}" (${file.mimeType}) for cross-reference [${images.length}/${MAX_DRIVE_IMAGES}].`);
+          // Prefix with the relative folder path so the QA matcher can tell which
+          // subfolder (e.g. "V1/" vs "V2/") an image came from — that's what
+          // distinguishes versions, and it lives in the folder, not the filename.
+          const qualifiedName = `${pathPrefix}${file.name ?? "creative"}`;
+          images.push({ id: file.id, name: qualifiedName, mediaType: file.mimeType });
+          console.log(`[fetch-doc] QUEUED image "${qualifiedName}" (${file.mimeType}) for cross-reference [${images.length}/${MAX_DRIVE_IMAGES}].`);
         }
       } else if (images) {
         console.log(`[fetch-doc] SKIP asset "${file.name}" — type ${file.mimeType} not viewable; filename only, not cross-referenced.`);
@@ -225,7 +230,7 @@ async function readDriveFolder(
   for (const folder of subFolders) {
     if (!folder.id || !folder.name) continue;
     try {
-      const subContent = await readDriveFolder(folder.id, depth + 1, folder.name, images);
+      const subContent = await readDriveFolder(folder.id, depth + 1, folder.name, images, `${pathPrefix}${folder.name}/`);
       sections.push(`[Sub-folder: ${folder.name}]\n${subContent}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
