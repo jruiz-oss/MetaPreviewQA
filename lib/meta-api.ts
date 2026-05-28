@@ -250,7 +250,7 @@ type AdResponse = {
   adset_id?: string;
   account_id?: string;
   creative?: CreativeFields;
-  error?: { message?: string; code?: number };
+  error?: { message?: string; code?: number; fbtrace_id?: string };
 };
 
 export type FetchResult = {
