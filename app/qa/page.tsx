@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 
 type AdUnit = {
   id: string;
@@ -92,6 +93,7 @@ function CheckRow({ label, result }: { label: string; result: CheckResult }) {
 }
 
 export default function QAPage() {
+  const router = useRouter();
   const [wo, setWo] = useState("");
   const [detectedDocs, setDetectedDocs] = useState<{ url: string; woLabel: string; content: string | null; error: string | null; loading: boolean }[]>([]);
   const [woDestinationUrl, setWoDestinationUrl] = useState<string | null>(null);
@@ -401,7 +403,12 @@ export default function QAPage() {
         <div className="flex items-center gap-3">
           <span className="text-xs font-medium tracking-widest text-gray-400 uppercase">Commit Agency</span>
           <span className="text-gray-200">|</span>
-          <img src="/vera-wordmark-transparent.png" alt="Vera" className="h-14" />
+          <img
+            src="/vera-wordmark-transparent.png"
+            alt="Vera"
+            className="h-[42px] cursor-pointer"
+            onClick={() => router.push("/")}
+          />
         </div>
         {result && (
           <button
