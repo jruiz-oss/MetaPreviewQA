@@ -7,6 +7,9 @@ type AdUnit = {
   id: string;
   name: string;
   link: string;
+  // Which campaign this unit was imported from. Manually-typed units have none
+  // and are grouped together. Used to send one QA request per campaign.
+  campaignId?: string;
 };
 
 type DriveImage = {
@@ -110,6 +113,8 @@ export default function QAPage() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<QAResult | null>(null);
   const [error, setError] = useState("");
+  // Progress across per-campaign QA requests (done / total campaigns).
+  const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
 
   // Campaign import state — supports multiple campaigns
   type CampaignRow = {
@@ -316,10 +321,12 @@ export default function QAPage() {
         );
       }
 
+      const importedCampaignId = row.campaignId.trim();
       const imported: AdUnit[] = filtered.map((ad: { id: string; name: string }) => ({
         id: String(Date.now()) + ad.id,
         name: ad.name,
         link: ad.id,
+        campaignId: importedCampaignId,
       }));
 
       // Append to existing units (remove empty placeholder rows first)
@@ -342,58 +349,110 @@ export default function QAPage() {
     }
   }
 
+  // Rank used to roll individual unit statuses up into an overall status.
+  function statusRank(s: string): number {
+    return s === "fail" ? 2 : s === "warning" ? 1 : 0;
+  }
+
   async function runQA() {
     if (!wo.trim()) return;
     const filledUnits = units.filter((u) => u.link.trim());
     if (filledUnits.length === 0) return;
 
+    // Group units by the campaign they were imported from. Manually-typed units
+    // (no campaignId) form one extra group so they're still checked. Each group
+    // becomes its own /api/qa request, keeping every request small and well under
+    // Vercel's 300s limit, and letting results stream in campaign-by-campaign.
+    const groupsMap = new Map<string, AdUnit[]>();
+    for (const u of filledUnits) {
+      const key = u.campaignId ?? "__manual__";
+      if (!groupsMap.has(key)) groupsMap.set(key, []);
+      groupsMap.get(key)!.push(u);
+    }
+    const groups = Array.from(groupsMap.entries()).map(([key, us]) => ({
+      key,
+      label: key === "__manual__" ? "Manually added units" : `Campaign ${key}`,
+      units: us,
+    }));
+
     setLoading(true);
-    setResult(null);
+    setResult({ overall_status: "pass", units: [], critical_issues: [], notes: "" });
     setError("");
+    setProgress({ done: 0, total: groups.length });
 
-    try {
-      const res = await fetch("/api/qa", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          wo,
-          units: filledUnits,
-          labeledDocs: detectedDocs
-            .filter((d) => d.content)
-            .map((d) => ({ label: d.woLabel, content: d.content })),
-          driveImages: detectedDocs.flatMap((d) => d.images ?? []),
-          destinationUrl: woDestinationUrl ?? null,
-        }),
-      });
+    const labeledDocs = detectedDocs
+      .filter((d) => d.content)
+      .map((d) => ({ label: d.woLabel, content: d.content }));
+    const driveImages = detectedDocs.flatMap((d) => d.images ?? []);
 
-      // Read the body as text first so we can handle non-JSON responses.
-      // On a Vercel timeout (504 FUNCTION_INVOCATION_TIMEOUT) the body is an
-      // HTML/text error page, not JSON — calling res.json() directly threw the
-      // opaque "Unexpected token 'A', \"An error o\"... is not valid JSON".
-      const rawBody = await res.text();
-      let data: { error?: string } & Record<string, unknown> = {};
+    const errors: string[] = [];
+
+    async function runGroup(group: (typeof groups)[number]) {
       try {
-        data = rawBody ? JSON.parse(rawBody) : {};
-      } catch {
-        // Body wasn't JSON — surface a clear message instead of a parse error.
-        if (res.status === 504) {
+        const res = await fetch("/api/qa", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            wo,
+            units: group.units,
+            labeledDocs,
+            driveImages,
+            destinationUrl: woDestinationUrl ?? null,
+          }),
+        });
+
+        // Read as text first: a Vercel 504 returns an HTML/text page, not JSON.
+        const rawBody = await res.text();
+        let data: { error?: string } & Record<string, unknown> = {};
+        try {
+          data = rawBody ? JSON.parse(rawBody) : {};
+        } catch {
           throw new Error(
-            "Server timed out (504) — the QA run took longer than 5 minutes. Try reviewing fewer ad units at once."
+            res.status === 504
+              ? `${group.label}: timed out (504) — too many units in this campaign.`
+              : `${group.label}: unexpected response (HTTP ${res.status}).`
           );
         }
-        throw new Error(`Server returned an unexpected response (HTTP ${res.status}).`);
-      }
+        if (!res.ok) {
+          throw new Error(data.error ?? `${group.label}: QA check failed (HTTP ${res.status})`);
+        }
 
-      if (!res.ok) {
-        throw new Error(data.error ?? `QA check failed (HTTP ${res.status})`);
+        const partial = data as unknown as QAResult;
+        // Merge this campaign's results into the accumulating result as soon as
+        // it returns, so the user sees results stream in rather than waiting.
+        setResult((prev) => {
+          const base = prev ?? { overall_status: "pass" as QAResult["overall_status"], units: [], critical_issues: [], notes: "" };
+          const mergedUnits = [...base.units, ...(partial.units ?? [])];
+          const mergedCritical = [...base.critical_issues, ...(partial.critical_issues ?? [])];
+          const worst = mergedUnits.reduce(
+            (w, u) => (statusRank(u.status) > statusRank(w) ? u.status : w),
+            "pass" as QAResult["overall_status"]
+          );
+          return { overall_status: worst, units: mergedUnits, critical_issues: mergedCritical, notes: "" };
+        });
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : `${group.label}: something went wrong`);
+      } finally {
+        setProgress((p) => ({ done: p.done + 1, total: p.total }));
       }
-
-      setResult(data as unknown as QAResult);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
-    } finally {
-      setLoading(false);
     }
+
+    // Run campaigns with limited client-side concurrency so we don't fire every
+    // request at once. Each request still batches internally on the server.
+    const MAX_CONCURRENT = 2;
+    let idx = 0;
+    const worker = async (): Promise<void> => {
+      while (idx < groups.length) {
+        const myIdx = idx++;
+        await runGroup(groups[myIdx]);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_CONCURRENT, groups.length) }, () => worker())
+    );
+
+    if (errors.length > 0) setError(errors.join("  "));
+    setLoading(false);
   }
 
   function reset() {
@@ -410,6 +469,7 @@ export default function QAPage() {
     ]);
     setResult(null);
     setError("");
+    setProgress({ done: 0, total: 0 });
   }
 
   const CHECK_NAMES = [
@@ -455,7 +515,7 @@ export default function QAPage() {
       </header>
 
       <main className="max-w-3xl mx-auto px-6 py-8">
-        {loading ? (
+        {loading && (!result || result.units.length === 0) ? (
           /* ── QA Running Animation ─────────────────────────── */
           <div className="flex flex-col items-center justify-center min-h-[62vh] gap-8 select-none">
             {/* Orbital ring system */}
@@ -520,7 +580,7 @@ export default function QAPage() {
               </div>
             </div>
           </div>
-        ) : !result ? (
+        ) : !result || result.units.length === 0 ? (
           <div className="space-y-5">
             {/* Step 1 — Work Order */}
             <div className="bg-white rounded-2xl border border-gray-200 p-6">
@@ -769,6 +829,23 @@ export default function QAPage() {
         ) : (
           /* Results */
           <div className="space-y-5">
+            {/* Progressive run banner — shown while remaining campaigns finish */}
+            {loading && progress.total > 0 && (
+              <div className="bg-blue-50 border border-blue-200 rounded-2xl px-5 py-3 flex items-center gap-3">
+                <span className="shrink-0 inline-block w-4 h-4 border-2 border-blue-300 border-t-blue-700 rounded-full animate-spin" />
+                <p className="text-sm text-blue-700">
+                  Checking campaigns… {progress.done} of {progress.total} done. Results appear below as each finishes.
+                </p>
+              </div>
+            )}
+
+            {/* Any per-campaign errors (some campaigns may fail while others succeed) */}
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-2xl px-5 py-3 text-sm text-red-700">
+                {error}
+              </div>
+            )}
+
             {/* Overall status */}
             <div className="bg-white rounded-2xl border border-gray-200 p-6 flex items-center justify-between">
               <div>
