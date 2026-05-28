@@ -366,13 +366,29 @@ export default function QAPage() {
         }),
       });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error ?? "QA check failed");
+      // Read the body as text first so we can handle non-JSON responses.
+      // On a Vercel timeout (504 FUNCTION_INVOCATION_TIMEOUT) the body is an
+      // HTML/text error page, not JSON — calling res.json() directly threw the
+      // opaque "Unexpected token 'A', \"An error o\"... is not valid JSON".
+      const rawBody = await res.text();
+      let data: { error?: string } & Record<string, unknown> = {};
+      try {
+        data = rawBody ? JSON.parse(rawBody) : {};
+      } catch {
+        // Body wasn't JSON — surface a clear message instead of a parse error.
+        if (res.status === 504) {
+          throw new Error(
+            "Server timed out (504) — the QA run took longer than 5 minutes. Try reviewing fewer ad units at once."
+          );
+        }
+        throw new Error(`Server returned an unexpected response (HTTP ${res.status}).`);
       }
 
-      const data = await res.json();
-      setResult(data);
+      if (!res.ok) {
+        throw new Error(data.error ?? `QA check failed (HTTP ${res.status})`);
+      }
+
+      setResult(data as unknown as QAResult);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {

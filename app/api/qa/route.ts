@@ -262,8 +262,9 @@ export async function POST(request: Request) {
   const woSection = `WORK ORDER SUMMARY:\n${wo}${sourceSections.join("")}`;
 
   // Build the user message — multi-modal: text + image blocks per unit
+  type CacheControl = { cache_control?: { type: "ephemeral" } };
   type ContentBlock =
-    | { type: "text"; text: string }
+    | ({ type: "text"; text: string } & CacheControl)
     | { type: "image"; source: { type: "url"; url: string } }
     | { type: "image"; source: { type: "base64"; media_type: ImageMediaType; data: string } };
 
@@ -387,7 +388,10 @@ export async function POST(request: Request) {
   ): Promise<{ units: unknown[]; critical_issues: string[]; notes: string }> {
     const messageContent: ContentBlock[] = [];
 
-    messageContent.push({ type: "text", text: woSection });
+    // The work-order section is identical across every batch — cache it too so
+    // it isn't re-billed per batch. This is a second cache breakpoint after the
+    // system prompt.
+    messageContent.push({ type: "text", text: woSection, cache_control: { type: "ephemeral" } });
 
     if (batchDriveImages.length > 0) {
       messageContent.push({
@@ -419,7 +423,12 @@ export async function POST(request: Request) {
         message = await client.messages.create({
           model: "claude-sonnet-4-6",
           max_tokens: 16000,
-          system: SYSTEM_PROMPT,
+          // Cache the large, unchanging system prompt so it is billed at full
+          // price only once (~5 min TTL); subsequent batches/runs read it at
+          // ~10% cost. cache_control marks the end of the cached prefix.
+          system: [
+            { type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+          ],
           messages: [{ role: "user", content: messageContent }],
         });
         break;
@@ -499,14 +508,30 @@ export async function POST(request: Request) {
 
   console.log(`[qa] Running ${batches.length} batch(es) for ${unitContents.length} ad unit(s).`);
 
+  // Run batches concurrently with a cap. Each runBatch is a full Claude call
+  // (~30-90s); running them sequentially was blowing past Vercel's 300s limit.
+  // A cap of 3 keeps us fast while staying clear of Claude rate limits (the
+  // per-batch 429 retry/backoff handles any we do hit). Results stay ordered
+  // because each result is written back to its original batch index.
+  const MAX_CONCURRENT_BATCHES = 3;
+
   try {
-    const batchResults = [];
-    for (let i = 0; i < batches.length; i++) {
-      const b = batches[i];
-      console.log(`[qa] Batch ${i + 1}/${batches.length}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
-      const result = await runBatch(b.units, b.driveImages);
-      batchResults.push(result);
-    }
+    const batchResults: Awaited<ReturnType<typeof runBatch>>[] = new Array(batches.length);
+    let nextIndex = 0;
+
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const i = nextIndex++;
+        if (i >= batches.length) return;
+        const b = batches[i];
+        console.log(`[qa] Batch ${i + 1}/${batches.length}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
+        batchResults[i] = await runBatch(b.units, b.driveImages);
+      }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_CONCURRENT_BATCHES, batches.length) }, () => worker())
+    );
 
     // Merge batch results
     const allUnits = batchResults.flatMap((r) => r.units);
