@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import { google } from "googleapis";
+import { getOAuthClient } from "@/lib/google-auth";
 import { resolveAdId, fetchAdContent, type AiEnhancement, type FormatInfo } from "@/lib/meta-api";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -92,11 +94,48 @@ type LabeledDoc = {
 type ImageMediaType = "image/jpeg" | "image/png" | "image/webp" | "image/gif";
 const ALLOWED_IMAGE_MEDIA_TYPES: ImageMediaType[] = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 
-type DriveImage = {
+// Lightweight reference passed from the browser — bytes are downloaded
+// server-side below to keep the request body under Vercel's ~4.5MB limit.
+type DriveImageRef = {
+  id: string;
   name: string;
   mediaType: string;
-  data: string; // base64-encoded image bytes
 };
+
+type FetchedImage = { name: string; mediaType: ImageMediaType; data: string };
+
+// Anthropic allows up to 5MB per image; cap a touch below that.
+const MAX_IMAGE_BYTES = 4_500_000;
+
+// Download the queued Drive images server-side (no Vercel body limit here).
+async function downloadDriveImages(refs: DriveImageRef[]): Promise<FetchedImage[]> {
+  if (!refs.length) return [];
+  const drive = google.drive({ version: "v3", auth: getOAuthClient() });
+  const out: FetchedImage[] = [];
+  for (const ref of refs) {
+    if (!ref.id || !(ALLOWED_IMAGE_MEDIA_TYPES as string[]).includes(ref.mediaType)) {
+      console.log(`[qa] SKIP image "${ref.name}" — unsupported type ${ref.mediaType}.`);
+      continue;
+    }
+    try {
+      const res = await drive.files.get(
+        { fileId: ref.id, alt: "media", supportsAllDrives: true },
+        { responseType: "arraybuffer" }
+      );
+      const buf = Buffer.from(res.data as ArrayBuffer);
+      if (buf.length <= MAX_IMAGE_BYTES) {
+        out.push({ name: ref.name, mediaType: ref.mediaType as ImageMediaType, data: buf.toString("base64") });
+        console.log(`[qa] DOWNLOADED image "${ref.name}" (${(buf.length / 1024).toFixed(0)} KB) → cross-referenced.`);
+      } else {
+        console.log(`[qa] SKIP image "${ref.name}" — ${(buf.length / 1_000_000).toFixed(1)} MB exceeds ${(MAX_IMAGE_BYTES / 1_000_000).toFixed(1)} MB limit.`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "unknown error";
+      console.log(`[qa] SKIP image "${ref.name}" — download failed: ${msg}`);
+    }
+  }
+  return out;
+}
 
 export async function POST(request: Request) {
   const { wo, units, labeledDocs, destinationUrl, driveImages } = (await request.json()) as {
@@ -104,7 +143,7 @@ export async function POST(request: Request) {
     units: AdUnit[];
     labeledDocs?: LabeledDoc[];
     destinationUrl?: string | null;
-    driveImages?: DriveImage[];
+    driveImages?: DriveImageRef[];
   };
 
   if (!wo || !units?.length) {
@@ -189,10 +228,7 @@ export async function POST(request: Request) {
   // Approved creative pulled from Drive — shared across all ad units. Each image is
   // preceded by a text label with its filename so the model can match it to the
   // right ad unit/concept/size and compare against the live Meta creative.
-  const validDriveImages = (driveImages ?? []).filter(
-    (img): img is { name: string; mediaType: ImageMediaType; data: string } =>
-      !!img.data && (ALLOWED_IMAGE_MEDIA_TYPES as string[]).includes(img.mediaType)
-  );
+  const validDriveImages = await downloadDriveImages(driveImages ?? []);
   if (validDriveImages.length > 0) {
     messageContent.push({
       type: "text",

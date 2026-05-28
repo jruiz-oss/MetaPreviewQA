@@ -10,9 +10,9 @@ type AdUnit = {
 };
 
 type DriveImage = {
+  id: string;
   name: string;
   mediaType: string;
-  data: string;
 };
 
 type CheckResult = {

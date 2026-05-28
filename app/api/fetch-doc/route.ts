@@ -72,18 +72,19 @@ const VIEWABLE_IMAGE_MIME = new Set([
   "image/gif",
 ]);
 
-// Caps to keep the QA request within Anthropic API limits (5MB/image, 100 images)
-// and token cost reasonable.
+// Cap how many images we hand off for cross-referencing. We pass lightweight
+// references (Drive file id) — NOT the bytes — so the browser payload stays
+// tiny and well under Vercel's ~4.5MB serverless request-body limit. The QA
+// route downloads the actual bytes server-side.
 const MAX_DRIVE_IMAGES = 16;
-const MAX_IMAGE_BYTES = 4_500_000; // ~4.5MB before base64 expansion
 
-export type DriveImage = { name: string; mediaType: string; data: string };
+export type DriveImageRef = { id: string; name: string; mediaType: string };
 
 async function readDriveFolder(
   folderId: string,
   depth = 0,
   folderName?: string,
-  images?: DriveImage[]
+  images?: DriveImageRef[]
 ): Promise<string> {
   const auth = getOAuthClient();
   const drive = google.drive({ version: "v3", auth });
@@ -128,32 +129,14 @@ async function readDriveFolder(
     ) {
       sections.push(`[Creative asset: ${file.name}]`);
 
-      // Download viewable images so the QA model can actually inspect them.
-      // PSDs, PDFs, video and audio are skipped (not viewable) — filename only.
+      // Queue viewable images (by reference, not bytes) for server-side download
+      // in the QA route. PSDs, PDFs, video and audio are skipped (not viewable).
       if (images && VIEWABLE_IMAGE_MIME.has(file.mimeType)) {
         if (images.length >= MAX_DRIVE_IMAGES) {
           console.log(`[fetch-doc] SKIP image "${file.name}" — image cap reached (${MAX_DRIVE_IMAGES}); not cross-referenced.`);
-        } else {
-          try {
-            const imgRes = await drive.files.get(
-              { fileId: file.id, alt: "media", supportsAllDrives: true },
-              { responseType: "arraybuffer" }
-            );
-            const buf = Buffer.from(imgRes.data as ArrayBuffer);
-            if (buf.length <= MAX_IMAGE_BYTES) {
-              images.push({
-                name: file.name ?? "creative",
-                mediaType: file.mimeType,
-                data: buf.toString("base64"),
-              });
-              console.log(`[fetch-doc] DOWNLOADED image "${file.name}" (${file.mimeType}, ${(buf.length / 1024).toFixed(0)} KB) → cross-referenced [${images.length}/${MAX_DRIVE_IMAGES}].`);
-            } else {
-              console.log(`[fetch-doc] SKIP image "${file.name}" — ${(buf.length / 1_000_000).toFixed(1)} MB exceeds ${(MAX_IMAGE_BYTES / 1_000_000).toFixed(1)} MB limit; not cross-referenced.`);
-            }
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : "unknown error";
-            console.log(`[fetch-doc] SKIP image "${file.name}" — download failed: ${msg}`);
-          }
+        } else if (file.id) {
+          images.push({ id: file.id, name: file.name ?? "creative", mediaType: file.mimeType });
+          console.log(`[fetch-doc] QUEUED image "${file.name}" (${file.mimeType}) for cross-reference [${images.length}/${MAX_DRIVE_IMAGES}].`);
         }
       } else if (images) {
         console.log(`[fetch-doc] SKIP asset "${file.name}" — type ${file.mimeType} not viewable; filename only, not cross-referenced.`);
@@ -279,7 +262,7 @@ export async function POST(request: Request) {
     // 2. Google Drive folder link
     const folderId = extractFolderId(url);
     if (folderId) {
-      const images: DriveImage[] = [];
+      const images: DriveImageRef[] = [];
       const content = await readDriveFolder(folderId, 0, undefined, images);
       return NextResponse.json({ content: content.slice(0, 30000), type: "folder", images });
     }
