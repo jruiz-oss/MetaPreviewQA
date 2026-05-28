@@ -211,41 +211,47 @@ export async function POST(request: Request) {
     sourceSections.push(`\n\nDESTINATION URL (approved landing page from WO):\n${destinationUrl}`);
   }
 
+  const woSection = `WORK ORDER SUMMARY:\n${wo}${sourceSections.join("")}`;
+
   // Build the user message — multi-modal: text + image blocks per unit
   type ContentBlock =
     | { type: "text"; text: string }
     | { type: "image"; source: { type: "url"; url: string } }
     | { type: "image"; source: { type: "base64"; media_type: ImageMediaType; data: string } };
 
-  const messageContent: ContentBlock[] = [];
-
-  // Opening text: WO + source docs
-  messageContent.push({
-    type: "text",
-    text: `WORK ORDER SUMMARY:\n${wo}${sourceSections.join("")}`,
-  });
-
-  // Approved creative pulled from Drive — shared across all ad units. Each image is
-  // preceded by a text label with its filename so the model can match it to the
-  // right ad unit/concept/size and compare against the live Meta creative.
+  // Download Drive images server-side
   const validDriveImages = await downloadDriveImages(driveImages ?? []);
-  if (validDriveImages.length > 0) {
-    messageContent.push({
-      type: "text",
-      text: `\n\nAPPROVED CREATIVE FROM DRIVE (${validDriveImages.length} image(s) — these are the signed-off designs the live Meta ads should match; match each to an ad unit by filename/concept/size):`,
+
+  // --- Batching helpers ---
+  // Max images per API call. Each base64 image averages ~700 KB encoded;
+  // keeping ≤12 images per batch stays well under the ~20 MB request limit.
+  const MAX_IMAGES_PER_BATCH = 12;
+
+  // Match Drive images to a unit by checking if meaningful words from the
+  // unit name appear in the image filename (case-insensitive).
+  function driveImagesForUnit(unitName: string): FetchedImage[] {
+    if (!validDriveImages.length) return [];
+    const words = unitName
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 3); // skip short stop-words
+
+    if (!words.length) return validDriveImages; // no keywords → include all
+
+    return validDriveImages.filter((img) => {
+      const fname = img.name.toLowerCase();
+      return words.some((w) => fname.includes(w));
     });
-    for (const img of validDriveImages) {
-      messageContent.push({ type: "text", text: `\nApproved creative file: ${img.name}` });
-      messageContent.push({
-        type: "image",
-        source: { type: "base64", media_type: img.mediaType, data: img.data },
-      });
-    }
   }
 
-  messageContent.push({ type: "text", text: `\n\nAD UNITS TO REVIEW:` });
+  // Build content blocks for a single ad unit (text + image blocks)
+  function buildUnitBlocks(
+    unit: (typeof unitContents)[number],
+    unitDriveImages: FetchedImage[]
+  ): ContentBlock[] {
+    const blocks: ContentBlock[] = [];
 
-  for (const unit of unitContents) {
     const contentBlock = unit.content
       ? `Ad creative content (from Meta API):\n${unit.content}`
       : `Note: ${unit.note ?? "Could not retrieve ad content."} Mark all checks as warning.`;
@@ -310,25 +316,54 @@ export async function POST(request: Request) {
     const imageUrls = (unit as { creativeImageUrls?: string[] }).creativeImageUrls ?? [];
     const imageNote = imageUrls.length > 0
       ? `\nLive Meta creative: ${imageUrls.length} image(s) follow below for visual review.`
-      : validDriveImages.length > 0
+      : unitDriveImages.length > 0
       ? "\nLive Meta creative: no live image returned by the Meta API for this ad — check the approved Drive creative above against this unit's copy/spec and note that the live Meta image could not be retrieved for a direct comparison."
       : "\nCreative images: not available — visual creative check cannot be performed.";
 
-    messageContent.push({
+    blocks.push({
       type: "text",
       text: `\n---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${contentBlock}${enhancementsBlock}${formatBlock}${imageNote}`,
     });
 
-    // Append actual image blocks for this unit
     for (const imgUrl of imageUrls) {
-      messageContent.push({
-        type: "image",
-        source: { type: "url", url: imgUrl },
-      });
+      blocks.push({ type: "image", source: { type: "url", url: imgUrl } });
     }
+
+    return blocks;
   }
 
-  try {
+  // Call the Claude API for one batch of units + their Drive images
+  async function runBatch(
+    batchUnits: (typeof unitContents),
+    batchDriveImages: FetchedImage[]
+  ): Promise<{ units: unknown[]; critical_issues: string[]; notes: string }> {
+    const messageContent: ContentBlock[] = [];
+
+    messageContent.push({ type: "text", text: woSection });
+
+    if (batchDriveImages.length > 0) {
+      messageContent.push({
+        type: "text",
+        text: `\n\nAPPROVED CREATIVE FROM DRIVE (${batchDriveImages.length} image(s) — these are the signed-off designs the live Meta ads should match; match each to an ad unit by filename/concept/size):`,
+      });
+      for (const img of batchDriveImages) {
+        messageContent.push({ type: "text", text: `\nApproved creative file: ${img.name}` });
+        messageContent.push({
+          type: "image",
+          source: { type: "base64", media_type: img.mediaType, data: img.data },
+        });
+      }
+    }
+
+    messageContent.push({ type: "text", text: `\n\nAD UNITS TO REVIEW:` });
+
+    for (const unit of batchUnits) {
+      const unitDriveImages = batchDriveImages; // already pre-filtered for this batch
+      for (const block of buildUnitBlocks(unit, unitDriveImages)) {
+        messageContent.push(block);
+      }
+    }
+
     const message = await client.messages.create({
       model: "claude-opus-4-6",
       max_tokens: 16000,
@@ -336,31 +371,94 @@ export async function POST(request: Request) {
       messages: [{ role: "user", content: messageContent }],
     });
 
-    // Catch truncation before attempting to parse
     if (message.stop_reason === "max_tokens") {
-      console.error("Response truncated — too many ad units for a single request. Consider reviewing fewer campaigns at once.");
       throw new Error(
-        `Response was cut off (too many ad units). Try reviewing fewer campaigns at once (${units.length} units submitted).`
+        `Response was cut off (too many ad units in batch). Try reviewing fewer campaigns at once.`
       );
     }
 
-    const raw =
-      message.content[0].type === "text" ? message.content[0].text : "";
-
-    // Extract JSON robustly — handles markdown fences, leading/trailing text
+    const raw = message.content[0].type === "text" ? message.content[0].text : "";
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON object found in model response");
 
-    let result;
+    let parsed;
     try {
-      result = JSON.parse(jsonMatch[0]);
+      parsed = JSON.parse(jsonMatch[0]);
     } catch (parseErr) {
       console.error("Raw model response (first 500 chars):", raw.slice(0, 500));
-      console.error("Stop reason:", message.stop_reason);
       throw parseErr;
     }
 
-    return NextResponse.json(result);
+    return {
+      units: parsed.units ?? [],
+      critical_issues: parsed.critical_issues ?? [],
+      notes: parsed.notes ?? "",
+    };
+  }
+
+  // --- Build batches ---
+  // Group units so each batch stays under MAX_IMAGES_PER_BATCH total images
+  // (Drive images for that batch + live Meta images for those units).
+  type Batch = { units: (typeof unitContents); driveImages: FetchedImage[] };
+  const batches: Batch[] = [];
+
+  let currentBatch: Batch = { units: [], driveImages: [] };
+  let currentImageCount = 0;
+
+  for (const unit of unitContents) {
+    const unitDrive = driveImagesForUnit(unit.name ?? "");
+    const liveCount = ((unit as { creativeImageUrls?: string[] }).creativeImageUrls ?? []).length;
+    const unitImageCount = unitDrive.length + liveCount;
+
+    // If adding this unit would exceed the limit AND we already have something,
+    // flush the current batch first.
+    if (currentBatch.units.length > 0 && currentImageCount + unitImageCount > MAX_IMAGES_PER_BATCH) {
+      batches.push(currentBatch);
+      currentBatch = { units: [], driveImages: [] };
+      currentImageCount = 0;
+    }
+
+    // Merge this unit's Drive images into the batch (deduplicate by name)
+    for (const img of unitDrive) {
+      if (!currentBatch.driveImages.find((d) => d.name === img.name)) {
+        currentBatch.driveImages.push(img);
+      }
+    }
+    currentBatch.units.push(unit);
+    currentImageCount = currentBatch.driveImages.length + liveCount +
+      currentBatch.units
+        .slice(0, -1)
+        .reduce((s, u) => s + (((u as { creativeImageUrls?: string[] }).creativeImageUrls ?? []).length), 0);
+  }
+  if (currentBatch.units.length > 0) batches.push(currentBatch);
+
+  console.log(`[qa] Running ${batches.length} batch(es) for ${unitContents.length} ad unit(s).`);
+
+  try {
+    const batchResults = await Promise.all(
+      batches.map((b, i) => {
+        console.log(`[qa] Batch ${i + 1}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
+        return runBatch(b.units, b.driveImages);
+      })
+    );
+
+    // Merge batch results
+    const allUnits = batchResults.flatMap((r) => r.units);
+    const allCritical = batchResults.flatMap((r) => r.critical_issues);
+    const allNotes = batchResults.map((r) => r.notes).filter(Boolean).join(" | ");
+
+    const statusPriority = (s: string) => (s === "fail" ? 2 : s === "warning" ? 1 : 0);
+    const worstStatus = (allUnits as { status?: string }[]).reduce(
+      (worst, u) => (statusPriority(u.status ?? "pass") > statusPriority(worst) ? (u.status ?? "pass") : worst),
+      "pass"
+    );
+
+    return NextResponse.json({
+      overall_status: worstStatus,
+      units: allUnits,
+      critical_issues: allCritical,
+      notes: allNotes,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("QA API error:", message);
