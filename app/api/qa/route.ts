@@ -107,6 +107,33 @@ type FetchedImage = { name: string; mediaType: ImageMediaType; data: string };
 // Anthropic allows up to 5MB per image; cap a touch below that.
 const MAX_IMAGE_BYTES = 4_500_000;
 
+// Download a URL-based image server-side and return as base64.
+async function downloadUrlImage(url: string): Promise<FetchedImage | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.log(`[qa] SKIP live Meta image — HTTP ${res.status} for ${url}`);
+      return null;
+    }
+    const contentType = res.headers.get("content-type") ?? "image/jpeg";
+    const mediaType = (ALLOWED_IMAGE_MEDIA_TYPES as string[]).includes(contentType)
+      ? (contentType as ImageMediaType)
+      : "image/jpeg";
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > MAX_IMAGE_BYTES) {
+      console.log(`[qa] SKIP live Meta image — ${(buf.length / 1_000_000).toFixed(1)} MB exceeds limit.`);
+      return null;
+    }
+    const name = url.split("/").pop()?.split("?")[0] ?? "meta-creative.jpg";
+    console.log(`[qa] DOWNLOADED live Meta image "${name}" (${(buf.length / 1024).toFixed(0)} KB).`);
+    return { name, mediaType, data: buf.toString("base64") };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    console.log(`[qa] SKIP live Meta image — download failed: ${msg}`);
+    return null;
+  }
+}
+
 // Download the queued Drive images server-side (no Vercel body limit here).
 async function downloadDriveImages(refs: DriveImageRef[]): Promise<FetchedImage[]> {
   if (!refs.length) return [];
@@ -181,12 +208,20 @@ export async function POST(request: Request) {
       }
 
       const { content, error, aiEnhancements, formatInfo, creativeImageUrls, manualCheckItems } = await fetchAdContent(adId, accessToken);
+
+      // Download live Meta images server-side so we can pass them as base64
+      // (Meta CDN URLs are blocked by robots.txt when passed directly to Claude).
+      const creativeImages: FetchedImage[] = (
+        await Promise.all((creativeImageUrls ?? []).map(downloadUrlImage))
+      ).filter((img): img is FetchedImage => img !== null);
+
       return {
         ...unit,
         content,
         aiEnhancements,
         formatInfo,
         creativeImageUrls,
+        creativeImages,
         manualCheckItems,
         note: content ? null : (error ?? "Meta API returned no content."),
       };
@@ -312,10 +347,10 @@ export async function POST(request: Request) {
       formatBlock = "\nFormat & placement info: not available for this ad.";
     }
 
-    // Image URLs for visual QA
-    const imageUrls = (unit as { creativeImageUrls?: string[] }).creativeImageUrls ?? [];
-    const imageNote = imageUrls.length > 0
-      ? `\nLive Meta creative: ${imageUrls.length} image(s) follow below for visual review.`
+    // Live Meta creative images (pre-downloaded as base64)
+    const liveImages = (unit as { creativeImages?: FetchedImage[] }).creativeImages ?? [];
+    const imageNote = liveImages.length > 0
+      ? `\nLive Meta creative: ${liveImages.length} image(s) follow below for visual review.`
       : unitDriveImages.length > 0
       ? "\nLive Meta creative: no live image returned by the Meta API for this ad — check the approved Drive creative above against this unit's copy/spec and note that the live Meta image could not be retrieved for a direct comparison."
       : "\nCreative images: not available — visual creative check cannot be performed.";
@@ -325,8 +360,8 @@ export async function POST(request: Request) {
       text: `\n---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${contentBlock}${enhancementsBlock}${formatBlock}${imageNote}`,
     });
 
-    for (const imgUrl of imageUrls) {
-      blocks.push({ type: "image", source: { type: "url", url: imgUrl } });
+    for (const img of liveImages) {
+      blocks.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
     }
 
     return blocks;
@@ -407,7 +442,7 @@ export async function POST(request: Request) {
 
   for (const unit of unitContents) {
     const unitDrive = driveImagesForUnit(unit.name ?? "");
-    const liveCount = ((unit as { creativeImageUrls?: string[] }).creativeImageUrls ?? []).length;
+    const liveCount = ((unit as { creativeImages?: FetchedImage[] }).creativeImages ?? []).length;
     const unitImageCount = unitDrive.length + liveCount;
 
     // If adding this unit would exceed the limit AND we already have something,
@@ -428,7 +463,7 @@ export async function POST(request: Request) {
     currentImageCount = currentBatch.driveImages.length + liveCount +
       currentBatch.units
         .slice(0, -1)
-        .reduce((s, u) => s + (((u as { creativeImageUrls?: string[] }).creativeImageUrls ?? []).length), 0);
+        .reduce((s, u) => s + (((u as { creativeImages?: FetchedImage[] }).creativeImages ?? []).length), 0);
   }
   if (currentBatch.units.length > 0) batches.push(currentBatch);
 
