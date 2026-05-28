@@ -9,6 +9,12 @@ type AdUnit = {
   link: string;
 };
 
+type DriveImage = {
+  name: string;
+  mediaType: string;
+  data: string;
+};
+
 type CheckResult = {
   status: "pass" | "fail" | "warning" | "unknown";
   note: string;
@@ -95,7 +101,7 @@ function CheckRow({ label, result }: { label: string; result: CheckResult }) {
 export default function QAPage() {
   const router = useRouter();
   const [wo, setWo] = useState("");
-  const [detectedDocs, setDetectedDocs] = useState<{ url: string; woLabel: string; content: string | null; error: string | null; loading: boolean }[]>([]);
+  const [detectedDocs, setDetectedDocs] = useState<{ url: string; woLabel: string; content: string | null; images: DriveImage[]; error: string | null; loading: boolean }[]>([]);
   const [woDestinationUrl, setWoDestinationUrl] = useState<string | null>(null);
   const [units, setUnits] = useState<AdUnit[]>([
     { id: "1", name: "", link: "" },
@@ -238,7 +244,7 @@ export default function QAPage() {
       const toAdd = labeled.filter((l) => !existingUrls.has(l.url));
       return [
         ...toKeep,
-        ...toAdd.map((l) => ({ url: l.url, woLabel: l.woLabel, content: null, error: null, loading: false })),
+        ...toAdd.map((l) => ({ url: l.url, woLabel: l.woLabel, content: null, images: [], error: null, loading: false })),
       ];
     });
   }
@@ -257,7 +263,7 @@ export default function QAPage() {
       if (!res.ok) throw new Error(data.error ?? "Failed to fetch doc");
       setDetectedDocs((prev) =>
         prev.map((d) =>
-          d.url === url ? { ...d, loading: false, content: data.content } : d
+          d.url === url ? { ...d, loading: false, content: data.content, images: data.images ?? [] } : d
         )
       );
     } catch (err) {
@@ -355,6 +361,7 @@ export default function QAPage() {
           labeledDocs: detectedDocs
             .filter((d) => d.content)
             .map((d) => ({ label: d.woLabel, content: d.content })),
+          driveImages: detectedDocs.flatMap((d) => d.images ?? []),
           destinationUrl: woDestinationUrl ?? null,
         }),
       });
@@ -560,7 +567,8 @@ export default function QAPage() {
                         )}
                         {doc.content && (
                           <p className="text-xs text-emerald-700 mt-0.5">
-                            ✓ Loaded — {doc.content.length.toLocaleString()} chars read into QA
+                            ✓ Loaded — {doc.content.length.toLocaleString()} chars
+                            {doc.images.length > 0 && ` + ${doc.images.length} image${doc.images.length === 1 ? "" : "s"}`} read into QA
                           </p>
                         )}
                         {doc.error && (

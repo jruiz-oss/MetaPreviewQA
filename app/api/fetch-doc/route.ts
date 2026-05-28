@@ -64,7 +64,27 @@ const WORD_MIME_TYPES = new Set([
 
 const PDF_MIME = "application/pdf";
 
-async function readDriveFolder(folderId: string, depth = 0, folderName?: string): Promise<string> {
+// Image types the model can actually view (PSD, PDF, etc. are excluded — not viewable).
+const VIEWABLE_IMAGE_MIME = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+]);
+
+// Caps to keep the QA request within Anthropic API limits (5MB/image, 100 images)
+// and token cost reasonable.
+const MAX_DRIVE_IMAGES = 16;
+const MAX_IMAGE_BYTES = 4_500_000; // ~4.5MB before base64 expansion
+
+export type DriveImage = { name: string; mediaType: string; data: string };
+
+async function readDriveFolder(
+  folderId: string,
+  depth = 0,
+  folderName?: string,
+  images?: DriveImage[]
+): Promise<string> {
   const auth = getOAuthClient();
   const drive = google.drive({ version: "v3", auth });
   const docs = google.docs({ version: "v1", auth });
@@ -107,6 +127,31 @@ async function readDriveFolder(folderId: string, depth = 0, folderName?: string)
       file.mimeType.startsWith("audio/")
     ) {
       sections.push(`[Creative asset: ${file.name}]`);
+
+      // Download viewable images so the QA model can actually inspect them.
+      // PSDs, PDFs, video and audio are skipped (not viewable) — filename only.
+      if (
+        images &&
+        images.length < MAX_DRIVE_IMAGES &&
+        VIEWABLE_IMAGE_MIME.has(file.mimeType)
+      ) {
+        try {
+          const imgRes = await drive.files.get(
+            { fileId: file.id, alt: "media", supportsAllDrives: true },
+            { responseType: "arraybuffer" }
+          );
+          const buf = Buffer.from(imgRes.data as ArrayBuffer);
+          if (buf.length <= MAX_IMAGE_BYTES) {
+            images.push({
+              name: file.name ?? "creative",
+              mediaType: file.mimeType,
+              data: buf.toString("base64"),
+            });
+          }
+        } catch {
+          // ignore — filename is already recorded above
+        }
+      }
       continue;
     }
 
@@ -191,7 +236,7 @@ async function readDriveFolder(folderId: string, depth = 0, folderName?: string)
   for (const folder of subFolders) {
     if (!folder.id || !folder.name) continue;
     try {
-      const subContent = await readDriveFolder(folder.id, depth + 1, folder.name);
+      const subContent = await readDriveFolder(folder.id, depth + 1, folder.name, images);
       sections.push(`[Sub-folder: ${folder.name}]\n${subContent}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -228,8 +273,9 @@ export async function POST(request: Request) {
     // 2. Google Drive folder link
     const folderId = extractFolderId(url);
     if (folderId) {
-      const content = await readDriveFolder(folderId);
-      return NextResponse.json({ content: content.slice(0, 30000), type: "folder" });
+      const images: DriveImage[] = [];
+      const content = await readDriveFolder(folderId, 0, undefined, images);
+      return NextResponse.json({ content: content.slice(0, 30000), type: "folder", images });
     }
 
     // 3. Google Drive file link (non-Doc)

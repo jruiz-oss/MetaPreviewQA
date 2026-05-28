@@ -292,26 +292,32 @@ async function fetchAdsetPlacements(adsetId: string, accessToken: string): Promi
   }
 }
 
+type ImageMeta = ImageDimensions & { url?: string };
+
 /**
- * Batch-fetches image dimensions from the AdImages endpoint using multiple hashes.
- * Returns a map of hash → dimensions.
+ * Batch-fetches image metadata (dimensions + a viewable URL) from the AdImages
+ * endpoint using multiple hashes. Returns a map of hash → { width, height, url }.
+ *
+ * The `url` is a temporary Meta CDN link to the full image — used to feed
+ * hash-based single-image ads (object_story_spec / top-level image_hash) into the
+ * visual QA check, which otherwise only sees URLs from asset_feed_spec.
  */
 async function fetchBatchImageDimensions(
   accountId: string,
   hashes: string[],
   accessToken: string
-): Promise<Map<string, ImageDimensions>> {
-  const result = new Map<string, ImageDimensions>();
+): Promise<Map<string, ImageMeta>> {
+  const result = new Map<string, ImageMeta>();
   if (hashes.length === 0) return result;
   try {
     const hashParam = encodeURIComponent(JSON.stringify(hashes));
-    const url = `${GRAPH_API}/act_${accountId}/adimages?hashes=${hashParam}&fields=width,height,hash&access_token=${accessToken}`;
+    const url = `${GRAPH_API}/act_${accountId}/adimages?hashes=${hashParam}&fields=width,height,hash,url,permalink_url&access_token=${accessToken}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     const data = await res.json();
     if (data.error || !data.data?.length) return result;
-    for (const img of data.data as Array<{ hash?: string; width?: number; height?: number }>) {
+    for (const img of data.data as Array<{ hash?: string; width?: number; height?: number; url?: string; permalink_url?: string }>) {
       if (img.hash && img.width && img.height) {
-        result.set(img.hash, { width: img.width, height: img.height });
+        result.set(img.hash, { width: img.width, height: img.height, url: img.url ?? img.permalink_url });
       }
     }
   } catch {
@@ -464,7 +470,7 @@ export async function fetchAdContent(
     adsetId ? fetchAdsetPlacements(adsetId, accessToken) : Promise.resolve(null),
     accountId && allHashes.length > 0
       ? fetchBatchImageDimensions(accountId, allHashes, accessToken)
-      : Promise.resolve(new Map<string, ImageDimensions>()),
+      : Promise.resolve(new Map<string, ImageMeta>()),
     allVideoIds.length > 0
       ? Promise.all(allVideoIds.map((id) => fetchVideoDimensions(id, accessToken)))
       : Promise.resolve([] as (ImageDimensions | null)[]),
@@ -505,6 +511,10 @@ export async function fetchAdContent(
   }
   for (const img of data.creative?.asset_feed_spec?.images ?? []) addUrl(img.url);
   for (const vid of data.creative?.asset_feed_spec?.videos ?? []) addUrl(vid.thumbnail_url);
+  // Hash-based single-image ads (object_story_spec / top-level image_hash) carry no URL
+  // in the creative spec — pull the viewable URL resolved from the AdImages endpoint so
+  // these statics still get a visual check.
+  for (const hash of allHashes) addUrl(dimMap.get(hash)?.url);
 
   return {
     content: formatted,

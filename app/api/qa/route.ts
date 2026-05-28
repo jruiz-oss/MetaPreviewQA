@@ -18,7 +18,10 @@ You may also receive labeled source documents pulled from Google Drive links in 
 When these labeled documents are present, treat them as the primary source of truth over the WO summary text. Cross-reference each ad unit's actual copy and creative against the specific document provided for that purpose. Be explicit about what matches and what doesn't.
 
 Review each ad unit on six criteria:
-1. copy_creative_alignment — Does the ad copy exactly match the approved copy doc? When images are provided, visually inspect the creative: check that any text overlaid on the image (headline, offer text, dates, disclaimers) matches the approved copy, verify the visual theme and imagery match the creative spec, and flag anything in the visual that contradicts the brief (wrong colors, missing/wrong logo, wrong offer amount, stale date visible in the image, etc.). If no images are provided, note that visual creative could not be checked. Be specific about any differences.
+1. copy_creative_alignment — Does the ad copy exactly match the approved copy doc? You may receive images from two sources:
+   - APPROVED CREATIVE FROM DRIVE: the design files the client signed off on (labeled with their filenames). These are what the live ad is supposed to match.
+   - LIVE META CREATIVE: the image(s) actually live in the Meta ad, shown per ad unit below.
+   When images are provided, visually inspect the creative: check that any text overlaid on the image (headline, offer text, dates, disclaimers) matches the approved copy, verify the visual theme and imagery match the creative spec, and flag anything in the visual that contradicts the brief (wrong colors, missing/wrong logo, wrong offer amount, stale date visible in the image, etc.). When BOTH a Drive approved image and a live Meta image are present, compare them directly and flag any difference between the approved creative and what is live — match Drive assets to ad units by filename/concept and size (e.g. "1080x1920 V2", "Tier Credit Multiplier", "Carousel"). If only one source is present, check what you can. If no images are provided at all, note that visual creative could not be checked. Be specific about any differences.
 2. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references.
 3. url_cta — Does the ad's destination URL match the approved URL exactly? Does the CTA match what was specified?
 4. grammar_typos — Any grammar errors, typos, or awkward phrasing?
@@ -86,12 +89,22 @@ type LabeledDoc = {
   content: string;
 };
 
+type ImageMediaType = "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+const ALLOWED_IMAGE_MEDIA_TYPES: ImageMediaType[] = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+
+type DriveImage = {
+  name: string;
+  mediaType: string;
+  data: string; // base64-encoded image bytes
+};
+
 export async function POST(request: Request) {
-  const { wo, units, labeledDocs, destinationUrl } = (await request.json()) as {
+  const { wo, units, labeledDocs, destinationUrl, driveImages } = (await request.json()) as {
     wo: string;
     units: AdUnit[];
     labeledDocs?: LabeledDoc[];
     destinationUrl?: string | null;
+    driveImages?: DriveImage[];
   };
 
   if (!wo || !units?.length) {
@@ -162,15 +175,39 @@ export async function POST(request: Request) {
   // Build the user message — multi-modal: text + image blocks per unit
   type ContentBlock =
     | { type: "text"; text: string }
-    | { type: "image"; source: { type: "url"; url: string } };
+    | { type: "image"; source: { type: "url"; url: string } }
+    | { type: "image"; source: { type: "base64"; media_type: ImageMediaType; data: string } };
 
   const messageContent: ContentBlock[] = [];
 
   // Opening text: WO + source docs
   messageContent.push({
     type: "text",
-    text: `WORK ORDER SUMMARY:\n${wo}${sourceSections.join("")}\n\nAD UNITS TO REVIEW:`,
+    text: `WORK ORDER SUMMARY:\n${wo}${sourceSections.join("")}`,
   });
+
+  // Approved creative pulled from Drive — shared across all ad units. Each image is
+  // preceded by a text label with its filename so the model can match it to the
+  // right ad unit/concept/size and compare against the live Meta creative.
+  const validDriveImages = (driveImages ?? []).filter(
+    (img): img is { name: string; mediaType: ImageMediaType; data: string } =>
+      !!img.data && (ALLOWED_IMAGE_MEDIA_TYPES as string[]).includes(img.mediaType)
+  );
+  if (validDriveImages.length > 0) {
+    messageContent.push({
+      type: "text",
+      text: `\n\nAPPROVED CREATIVE FROM DRIVE (${validDriveImages.length} image(s) — these are the signed-off designs the live Meta ads should match; match each to an ad unit by filename/concept/size):`,
+    });
+    for (const img of validDriveImages) {
+      messageContent.push({ type: "text", text: `\nApproved creative file: ${img.name}` });
+      messageContent.push({
+        type: "image",
+        source: { type: "base64", media_type: img.mediaType, data: img.data },
+      });
+    }
+  }
+
+  messageContent.push({ type: "text", text: `\n\nAD UNITS TO REVIEW:` });
 
   for (const unit of unitContents) {
     const contentBlock = unit.content
@@ -236,7 +273,9 @@ export async function POST(request: Request) {
     // Image URLs for visual QA
     const imageUrls = (unit as { creativeImageUrls?: string[] }).creativeImageUrls ?? [];
     const imageNote = imageUrls.length > 0
-      ? `\nCreative images: ${imageUrls.length} image(s) follow below for visual review.`
+      ? `\nLive Meta creative: ${imageUrls.length} image(s) follow below for visual review.`
+      : validDriveImages.length > 0
+      ? "\nLive Meta creative: no live image returned by the Meta API for this ad — check the approved Drive creative above against this unit's copy/spec and note that the live Meta image could not be retrieved for a direct comparison."
       : "\nCreative images: not available — visual creative check cannot be performed.";
 
     messageContent.push({
