@@ -480,12 +480,15 @@ export async function POST(request: Request) {
   console.log(`[qa] Running ${batches.length} batch(es) for ${unitContents.length} ad unit(s).`);
 
   try {
-    const batchResults = await Promise.all(
-      batches.map((b, i) => {
-        console.log(`[qa] Batch ${i + 1}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
-        return runBatch(b.units, b.driveImages);
-      })
-    );
+    const batchResults = [];
+    for (let i = 0; i < batches.length; i++) {
+      const b = batches[i];
+      console.log(`[qa] Batch ${i + 1}/${batches.length}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
+      const result = await runBatch(b.units, b.driveImages);
+      batchResults.push(result);
+      // Brief pause between batches to stay under the token-per-minute rate limit
+      if (i < batches.length - 1) await new Promise((r) => setTimeout(r, 3000));
+    }
 
     // Merge batch results
     const allUnits = batchResults.flatMap((r) => r.units);
