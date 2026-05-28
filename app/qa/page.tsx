@@ -374,6 +374,17 @@ export default function QAPage() {
   }
 
   function reset() {
+    // Full clear of all input boxes — stays logged in (no auth touched)
+    setWo("");
+    setDetectedDocs([]);
+    setWoDestinationUrl(null);
+    setUnits([
+      { id: "1", name: "", link: "" },
+      { id: "2", name: "", link: "" },
+    ]);
+    setCampaigns([
+      { id: "c1", campaignId: "", filter: "", loading: false, loaded: false, error: "" },
+    ]);
     setResult(null);
     setError("");
   }
