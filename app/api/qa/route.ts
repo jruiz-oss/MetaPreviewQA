@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { google } from "googleapis";
+import sharp from "sharp";
 import { getOAuthClient } from "@/lib/google-auth";
 import { resolveAdId, fetchAdContent, type AiEnhancement, type FormatInfo } from "@/lib/meta-api";
 
@@ -109,7 +110,24 @@ type FetchedImage = { name: string; mediaType: ImageMediaType; data: string };
 // Anthropic allows up to 5MB per image; cap a touch below that.
 const MAX_IMAGE_BYTES = 4_500_000;
 
-// Download a URL-based image server-side and return as base64.
+// Resize an image buffer so its longest side is ≤ MAX_SIDE px.
+// Claude can fully read text and visual details at 768px; sending 1080px originals
+// is wasteful and expensive (more tokens). JPEG at quality 75 keeps it lean.
+const MAX_SIDE = 768;
+async function resizeForClaude(buf: Buffer): Promise<{ buf: Buffer; mediaType: ImageMediaType }> {
+  try {
+    const resized = await sharp(buf)
+      .resize(MAX_SIDE, MAX_SIDE, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 75 })
+      .toBuffer();
+    return { buf: resized, mediaType: "image/jpeg" };
+  } catch {
+    // If sharp fails (unsupported format etc.) fall back to original
+    return { buf, mediaType: "image/jpeg" };
+  }
+}
+
+// Download a URL-based image server-side, resize, and return as base64.
 async function downloadUrlImage(url: string): Promise<FetchedImage | null> {
   try {
     const res = await fetch(url);
@@ -117,17 +135,10 @@ async function downloadUrlImage(url: string): Promise<FetchedImage | null> {
       console.log(`[qa] SKIP live Meta image — HTTP ${res.status} for ${url}`);
       return null;
     }
-    const contentType = res.headers.get("content-type") ?? "image/jpeg";
-    const mediaType = (ALLOWED_IMAGE_MEDIA_TYPES as string[]).includes(contentType)
-      ? (contentType as ImageMediaType)
-      : "image/jpeg";
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > MAX_IMAGE_BYTES) {
-      console.log(`[qa] SKIP live Meta image — ${(buf.length / 1_000_000).toFixed(1)} MB exceeds limit.`);
-      return null;
-    }
+    const rawBuf = Buffer.from(await res.arrayBuffer());
+    const { buf, mediaType } = await resizeForClaude(rawBuf);
     const name = url.split("/").pop()?.split("?")[0] ?? "meta-creative.jpg";
-    console.log(`[qa] DOWNLOADED live Meta image "${name}" (${(buf.length / 1024).toFixed(0)} KB).`);
+    console.log(`[qa] DOWNLOADED live Meta image "${name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${(buf.length / 1024).toFixed(0)} KB resized).`);
     return { name, mediaType, data: buf.toString("base64") };
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
@@ -151,13 +162,10 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<FetchedImage[
         { fileId: ref.id, alt: "media", supportsAllDrives: true },
         { responseType: "arraybuffer" }
       );
-      const buf = Buffer.from(res.data as ArrayBuffer);
-      if (buf.length <= MAX_IMAGE_BYTES) {
-        out.push({ name: ref.name, mediaType: ref.mediaType as ImageMediaType, data: buf.toString("base64") });
-        console.log(`[qa] DOWNLOADED image "${ref.name}" (${(buf.length / 1024).toFixed(0)} KB) → cross-referenced.`);
-      } else {
-        console.log(`[qa] SKIP image "${ref.name}" — ${(buf.length / 1_000_000).toFixed(1)} MB exceeds ${(MAX_IMAGE_BYTES / 1_000_000).toFixed(1)} MB limit.`);
-      }
+      const rawBuf = Buffer.from(res.data as ArrayBuffer);
+      const { buf, mediaType: resizedType } = await resizeForClaude(rawBuf);
+      out.push({ name: ref.name, mediaType: resizedType, data: buf.toString("base64") });
+      console.log(`[qa] DOWNLOADED image "${ref.name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${(buf.length / 1024).toFixed(0)} KB resized) → cross-referenced.`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "unknown error";
       console.log(`[qa] SKIP image "${ref.name}" — download failed: ${msg}`);
