@@ -154,27 +154,31 @@ async function downloadUrlImage(url: string): Promise<FetchedImage | null> {
 async function downloadDriveImages(refs: DriveImageRef[]): Promise<FetchedImage[]> {
   if (!refs.length) return [];
   const drive = google.drive({ version: "v3", auth: getOAuthClient() });
-  const out: FetchedImage[] = [];
-  for (const ref of refs) {
-    if (!ref.id || !(ALLOWED_IMAGE_MEDIA_TYPES as string[]).includes(ref.mediaType)) {
-      console.log(`[qa] SKIP image "${ref.name}" — unsupported type ${ref.mediaType}.`);
-      continue;
-    }
-    try {
-      const res = await drive.files.get(
-        { fileId: ref.id, alt: "media", supportsAllDrives: true },
-        { responseType: "arraybuffer" }
-      );
-      const rawBuf = Buffer.from(res.data as ArrayBuffer);
-      const { buf, mediaType: resizedType } = await resizeForClaude(rawBuf);
-      out.push({ name: ref.name, mediaType: resizedType, data: buf.toString("base64") });
-      console.log(`[qa] DOWNLOADED image "${ref.name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${(buf.length / 1024).toFixed(0)} KB resized) → cross-referenced.`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "unknown error";
-      console.log(`[qa] SKIP image "${ref.name}" — download failed: ${msg}`);
-    }
-  }
-  return out;
+
+  // Download in parallel — sequential was needless latency.
+  const results = await Promise.all(
+    refs.map(async (ref): Promise<FetchedImage | null> => {
+      if (!ref.id || !(ALLOWED_IMAGE_MEDIA_TYPES as string[]).includes(ref.mediaType)) {
+        console.log(`[qa] SKIP image "${ref.name}" — unsupported type ${ref.mediaType}.`);
+        return null;
+      }
+      try {
+        const res = await drive.files.get(
+          { fileId: ref.id, alt: "media", supportsAllDrives: true },
+          { responseType: "arraybuffer" }
+        );
+        const rawBuf = Buffer.from(res.data as ArrayBuffer);
+        const { buf, mediaType: resizedType } = await resizeForClaude(rawBuf);
+        console.log(`[qa] DOWNLOADED image "${ref.name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${(buf.length / 1024).toFixed(0)} KB resized) → cross-referenced.`);
+        return { name: ref.name, mediaType: resizedType, data: buf.toString("base64") };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "unknown error";
+        console.log(`[qa] SKIP image "${ref.name}" — download failed: ${msg}`);
+        return null;
+      }
+    })
+  );
+  return results.filter((img): img is FetchedImage => img !== null);
 }
 
 export async function POST(request: Request) {
@@ -268,26 +272,45 @@ export async function POST(request: Request) {
     | { type: "image"; source: { type: "url"; url: string } }
     | { type: "image"; source: { type: "base64"; media_type: ImageMediaType; data: string } };
 
-  // Download Drive images server-side
-  const validDriveImages = await downloadDriveImages(driveImages ?? []);
+  // Cap how many Drive images we attach to ANY single ad unit. A WO that links
+  // Drive folders can surface dozens of assets (every size variant, old versions,
+  // source files). The previous matcher dumped ALL of them onto a unit whose name
+  // had no long keywords, and otherwise matched on a single shared word — so one
+  // unit ended up with 40+ images and a Claude call so large it timed the function
+  // out. We now rank by how many words from the unit name appear in the filename
+  // and keep only the best few. No match → no Drive comparison for that unit
+  // (the prompt already handles a missing approved image gracefully).
+  const MAX_DRIVE_IMAGES_PER_UNIT = 4;
+  const allDriveRefs = driveImages ?? [];
 
-  // Match Drive images to a unit by checking if meaningful words from the
-  // unit name appear in the image filename (case-insensitive).
-  function driveImagesForUnit(unitName: string): FetchedImage[] {
-    if (!validDriveImages.length) return [];
+  function rankRefsForUnit(unitName: string): DriveImageRef[] {
+    if (!allDriveRefs.length) return [];
     const words = unitName
       .toLowerCase()
       .replace(/[^a-z0-9\s]/g, " ")
       .split(/\s+/)
       .filter((w) => w.length > 3); // skip short stop-words
+    if (!words.length) return []; // no usable keywords → don't dump everything
 
-    if (!words.length) return validDriveImages; // no keywords → include all
-
-    return validDriveImages.filter((img) => {
-      const fname = img.name.toLowerCase();
-      return words.some((w) => fname.includes(w));
-    });
+    return allDriveRefs
+      .map((ref) => {
+        const fname = ref.name.toLowerCase();
+        const score = words.reduce((s, w) => s + (fname.includes(w) ? 1 : 0), 0);
+        return { ref, score };
+      })
+      .filter((x) => x.score > 0) // require at least one real overlap
+      .sort((a, b) => b.score - a.score)
+      .slice(0, MAX_DRIVE_IMAGES_PER_UNIT)
+      .map((x) => x.ref);
   }
+
+  // Match first, then download ONLY the images actually used by some unit —
+  // no point downloading 40 assets when a handful are referenced.
+  const refsPerUnit = unitContents.map((u) => rankRefsForUnit(u.name ?? ""));
+  const neededIds = new Set<string>();
+  for (const refs of refsPerUnit) for (const r of refs) neededIds.add(r.id);
+  const downloadedDrive = await downloadDriveImages(allDriveRefs.filter((r) => neededIds.has(r.id)));
+  const driveByName = new Map(downloadedDrive.map((img) => [img.name, img] as const));
 
   // Build content blocks for a single ad unit (text + image blocks)
   function buildUnitBlocks(
@@ -475,9 +498,11 @@ export async function POST(request: Request) {
   // also means each unit only carries ITS matched Drive images — no more
   // re-sending the whole approved set in every batch.
   type Batch = { units: (typeof unitContents); driveImages: FetchedImage[] };
-  const batches: Batch[] = unitContents.map((unit) => ({
+  const batches: Batch[] = unitContents.map((unit, i) => ({
     units: [unit],
-    driveImages: driveImagesForUnit(unit.name ?? ""),
+    driveImages: refsPerUnit[i]
+      .map((r) => driveByName.get(r.name))
+      .filter((x): x is FetchedImage => !!x),
   }));
 
   console.log(`[qa] Running ${batches.length} per-unit call(s) for ${unitContents.length} ad unit(s).`);
