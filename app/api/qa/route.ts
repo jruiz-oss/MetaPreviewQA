@@ -58,6 +58,8 @@ For each check, assign one of:
 - "warning" — possible issue or couldn't fully verify
 - "unknown" — data not available (only valid for ai_enhancements and format_size)
 
+BREVITY IS REQUIRED. Every "note" and "summary" field must be a single sentence of 25 words or fewer. Do not list multiple issues in one note — pick the most important one. Do not use numbered lists inside note fields.
+
 IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exact structure:
 
 {
@@ -67,18 +69,18 @@ IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exac
       "name": "string",
       "status": "pass" | "fail" | "warning",
       "checks": {
-        "copy_creative_alignment": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
-        "promo_month_date": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
-        "url_cta": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
-        "grammar_typos": { "status": "pass" | "fail" | "warning", "note": "one sentence explanation" },
-        "ai_enhancements": { "status": "warning" | "unknown", "note": "one sentence explanation" },
-        "format_size": { "status": "pass" | "fail" | "warning" | "unknown", "note": "one sentence explanation" }
+        "copy_creative_alignment": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
+        "promo_month_date": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
+        "url_cta": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
+        "grammar_typos": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
+        "ai_enhancements": { "status": "warning" | "unknown", "note": "≤25 words" },
+        "format_size": { "status": "pass" | "fail" | "warning" | "unknown", "note": "≤25 words" }
       },
-      "summary": "one sentence overall summary for this unit"
+      "summary": "≤25 words"
     }
   ],
-  "critical_issues": ["list only the most urgent problems — keep empty if none"],
-  "notes": "optional top-level note, or empty string"
+  "critical_issues": ["one issue per item, ≤20 words each — only the most urgent, max 5 total"],
+  "notes": ""
 }`;
 
 type AdUnit = {
@@ -400,7 +402,7 @@ export async function POST(request: Request) {
     }
 
     const message = await client.messages.create({
-      model: "claude-opus-4-6",
+      model: "claude-sonnet-4-6",
       max_tokens: 16000,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: messageContent }],
@@ -480,7 +482,7 @@ export async function POST(request: Request) {
     // Merge batch results
     const allUnits = batchResults.flatMap((r) => r.units);
     const allCritical = batchResults.flatMap((r) => r.critical_issues);
-    const allNotes = batchResults.map((r) => r.notes).filter(Boolean).join(" | ");
+    const allNotes = "";
 
     const statusPriority = (s: string) => (s === "fail" ? 2 : s === "warning" ? 1 : 0);
     const worstStatus = (allUnits as { status?: string }[]).reduce(
