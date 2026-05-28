@@ -5,6 +5,9 @@ import sharp from "sharp";
 import { getOAuthClient } from "@/lib/google-auth";
 import { resolveAdId, fetchAdContent, type AiEnhancement, type FormatInfo } from "@/lib/meta-api";
 
+// Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
+export const maxDuration = 300;
+
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const SYSTEM_PROMPT = `You are a QA reviewer for social media ads at a digital marketing agency. Your job is to check each ad unit against the work order provided.
@@ -409,12 +412,29 @@ export async function POST(request: Request) {
       }
     }
 
-    const message = await client.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 16000,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: messageContent }],
-    });
+    // Retry up to 3 times on 429 rate-limit errors with exponential backoff.
+    let message: Anthropic.Message | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        message = await client.messages.create({
+          model: "claude-sonnet-4-6",
+          max_tokens: 16000,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: "user", content: messageContent }],
+        });
+        break;
+      } catch (err) {
+        const isRateLimit = err instanceof Error && err.message.includes("rate_limit");
+        if (isRateLimit && attempt < 2) {
+          const wait = (attempt + 1) * 15_000; // 15s, then 30s
+          console.log(`[qa] Rate limited — waiting ${wait / 1000}s before retry ${attempt + 2}/3`);
+          await new Promise((r) => setTimeout(r, wait));
+        } else {
+          throw err;
+        }
+      }
+    }
+    if (!message) throw new Error("Failed to get response from Claude after retries.");
 
     if (message.stop_reason === "max_tokens") {
       throw new Error(
@@ -486,8 +506,6 @@ export async function POST(request: Request) {
       console.log(`[qa] Batch ${i + 1}/${batches.length}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
       const result = await runBatch(b.units, b.driveImages);
       batchResults.push(result);
-      // Brief pause between batches to stay under the token-per-minute rate limit
-      if (i < batches.length - 1) await new Promise((r) => setTimeout(r, 3000));
     }
 
     // Merge batch results
