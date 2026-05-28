@@ -1,5 +1,8 @@
 const GRAPH_API = "https://graph.facebook.com/v23.0";
 
+// Tracks how many fetchAdContent calls are in-flight at any given moment
+let _concurrentAdFetches = 0;
+
 export type CampaignAd = {
   id: string;
   name: string;
@@ -360,16 +363,23 @@ export async function fetchAdContent(
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
 
+  _concurrentAdFetches++;
+  const concurrentAtStart = _concurrentAdFetches;
+  const fetchStart = Date.now();
+
   let data: AdResponse;
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     data = await res.json();
   } catch (err) {
+    _concurrentAdFetches--;
     return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null, formatInfo: null, creativeImageUrls: [], manualCheckItems: MANUAL_CHECK_ITEMS };
   }
 
+  _concurrentAdFetches--;
+
   if (data.error) {
-    console.error(`Meta API error for ad ${adId}:`, data.error);
+    console.error(`[meta-api] ad=${adId} code=${data.error.code} concurrent_at_request=${concurrentAtStart} elapsed_ms=${Date.now() - fetchStart} fbtrace_id=${data.error.fbtrace_id ?? "n/a"} message="${data.error.message}"`);
     const code = data.error.code;
     const msg = data.error.message ?? "Unknown Meta API error";
 
