@@ -130,27 +130,33 @@ async function readDriveFolder(
 
       // Download viewable images so the QA model can actually inspect them.
       // PSDs, PDFs, video and audio are skipped (not viewable) — filename only.
-      if (
-        images &&
-        images.length < MAX_DRIVE_IMAGES &&
-        VIEWABLE_IMAGE_MIME.has(file.mimeType)
-      ) {
-        try {
-          const imgRes = await drive.files.get(
-            { fileId: file.id, alt: "media", supportsAllDrives: true },
-            { responseType: "arraybuffer" }
-          );
-          const buf = Buffer.from(imgRes.data as ArrayBuffer);
-          if (buf.length <= MAX_IMAGE_BYTES) {
-            images.push({
-              name: file.name ?? "creative",
-              mediaType: file.mimeType,
-              data: buf.toString("base64"),
-            });
+      if (images && VIEWABLE_IMAGE_MIME.has(file.mimeType)) {
+        if (images.length >= MAX_DRIVE_IMAGES) {
+          console.log(`[fetch-doc] SKIP image "${file.name}" — image cap reached (${MAX_DRIVE_IMAGES}); not cross-referenced.`);
+        } else {
+          try {
+            const imgRes = await drive.files.get(
+              { fileId: file.id, alt: "media", supportsAllDrives: true },
+              { responseType: "arraybuffer" }
+            );
+            const buf = Buffer.from(imgRes.data as ArrayBuffer);
+            if (buf.length <= MAX_IMAGE_BYTES) {
+              images.push({
+                name: file.name ?? "creative",
+                mediaType: file.mimeType,
+                data: buf.toString("base64"),
+              });
+              console.log(`[fetch-doc] DOWNLOADED image "${file.name}" (${file.mimeType}, ${(buf.length / 1024).toFixed(0)} KB) → cross-referenced [${images.length}/${MAX_DRIVE_IMAGES}].`);
+            } else {
+              console.log(`[fetch-doc] SKIP image "${file.name}" — ${(buf.length / 1_000_000).toFixed(1)} MB exceeds ${(MAX_IMAGE_BYTES / 1_000_000).toFixed(1)} MB limit; not cross-referenced.`);
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : "unknown error";
+            console.log(`[fetch-doc] SKIP image "${file.name}" — download failed: ${msg}`);
           }
-        } catch {
-          // ignore — filename is already recorded above
         }
+      } else if (images) {
+        console.log(`[fetch-doc] SKIP asset "${file.name}" — type ${file.mimeType} not viewable; filename only, not cross-referenced.`);
       }
       continue;
     }
