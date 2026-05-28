@@ -379,7 +379,11 @@ export async function fetchAdContent(
   _concurrentAdFetches--;
 
   if (data.error) {
-    console.error(`[meta-api] ad=${adId} code=${data.error.code} concurrent_at_request=${concurrentAtStart} elapsed_ms=${Date.now() - fetchStart} fbtrace_id=${data.error.fbtrace_id ?? "n/a"} message="${data.error.message}"`);
+    const errorLabel = data.error.code === 100 ? "MISSING_PERMISSION"
+      : data.error.code === 190 ? "INVALID_TOKEN"
+      : data.error.code === 12  ? "BAD_AD_ID"
+      : `CODE_${data.error.code}`;
+    console.error(`[meta-api] [${errorLabel}] ad=${adId} elapsed_ms=${Date.now() - fetchStart} fbtrace_id=${data.error.fbtrace_id ?? "n/a"} | ${data.error.message}`);
     const code = data.error.code;
     const msg = data.error.message ?? "Unknown Meta API error";
 
