@@ -1032,7 +1032,7 @@ export default function QAPage() {
                     </div>
                   )}
                   {manualNote && (
-                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 w-full md:max-w-md">
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 w-full">
                       <p className="text-xs font-semibold text-amber-700 mb-1">
                         Manual review
                       </p>
