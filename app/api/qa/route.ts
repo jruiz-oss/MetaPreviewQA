@@ -24,12 +24,19 @@ You may also receive labeled source documents pulled from Google Drive links in 
 
 When these labeled documents are present, treat them as the primary source of truth over the WO summary text. Cross-reference each ad unit's actual copy and creative against the specific document provided for that purpose. Be explicit about what matches and what doesn't.
 
+CRITICAL — IMAGE READING RULES (read before doing any visual check):
+- An image's content is ONLY the pixels in that image. Never infer, assume, or describe text, dates, numbers, logos, or visual elements that you cannot actually see rendered in the pixels.
+- Only report text (offers, dates, disclaimers, headlines) if it is literally legible in the image. If text is too small, blurry, or cut off to read with confidence, say it is "not legible" and set the check to "warning" — do NOT guess what it says.
+- NEVER attribute text from the COPY DOCUMENT, CREATIVE DOCUMENT, or WORK ORDER to the image. Those are separate text sources. A date or phrase appearing in a document does NOT mean it appears in the creative, and vice versa.
+- When you report that the image "says" or "shows" something, it must be something you can actually read in the pixels. If you are describing what should be there per the copy doc, say so explicitly rather than claiming the image shows it.
+- Do not fabricate differences. Only flag a mismatch between the image and a document when you can actually read the conflicting text in the image.
+
 Review each ad unit on six criteria:
 1. copy_creative_alignment — Does the ad copy exactly match the approved copy doc? You may receive images from two sources:
    - APPROVED CREATIVE FROM DRIVE: the design files the client signed off on (labeled with their filenames). These are what the live ad is supposed to match.
    - LIVE META CREATIVE: the image(s) actually live in the Meta ad, shown per ad unit below.
    When images are provided, visually inspect the creative: check that any text overlaid on the image (headline, offer text, dates, disclaimers) matches the approved copy, verify the visual theme and imagery match the creative spec, and flag anything in the visual that contradicts the brief (wrong colors, missing/wrong logo, wrong offer amount, stale date visible in the image, etc.). When BOTH a Drive approved image and a live Meta image are present, compare them directly and flag any difference between the approved creative and what is live — match Drive assets to ad units by filename/concept and size (e.g. "1080x1920 V2", "Tier Credit Multiplier", "Carousel"). If only one source is present, check what you can. If no images are provided at all, note that visual creative could not be checked. Be specific about any differences.
-2. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references.
+2. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references. Only evaluate dates you can actually read — from the API copy text, the copy doc, or text legibly visible in the image. Never report a date as appearing in the creative unless you can literally read it in the pixels.
 3. url_cta — Does the ad's destination URL match the approved URL exactly? Does the CTA match what was specified?
 4. grammar_typos — Any grammar errors, typos, or awkward phrasing?
 5. ai_enhancements — Are any Meta Advantage+ AI enhancements turned ON? You will receive two pieces of data:
@@ -116,14 +123,16 @@ type FetchedImage = { name: string; mediaType: ImageMediaType; data: string };
 const MAX_IMAGE_BYTES = 4_500_000;
 
 // Resize an image buffer so its longest side is ≤ MAX_SIDE px.
-// Claude can fully read text and visual details at 768px; sending 1080px originals
-// is wasteful and expensive (more tokens). JPEG at quality 75 keeps it lean.
-const MAX_SIDE = 768;
+// QA must read small overlay text — offer amounts, dates, disclaimers — so we keep
+// images near Claude's optimal vision resolution (~1568px long edge). The old 768px
+// at q75 blurred small text into an illegible smear, which caused the model to GUESS
+// at dates/copy that weren't actually legible (hallucinated date/text findings).
+const MAX_SIDE = 1568;
 async function resizeForClaude(buf: Buffer): Promise<{ buf: Buffer; mediaType: ImageMediaType }> {
   try {
     const resized = await sharp(buf)
       .resize(MAX_SIDE, MAX_SIDE, { fit: "inside", withoutEnlargement: true })
-      .jpeg({ quality: 75 })
+      .jpeg({ quality: 88 })
       .toBuffer();
     return { buf: resized, mediaType: "image/jpeg" };
   } catch {
@@ -536,6 +545,23 @@ export async function POST(request: Request) {
       }
     }
     if (!message) throw new Error("Failed to get response from Claude after retries.");
+
+    // Token-usage log — added to monitor cost/latency after raising image
+    // resolution to 1568px (bigger images = more input tokens per run).
+    // Sonnet 4.6 pricing per million tokens: $3 input, $15 output,
+    // $3.75 cache write, $0.30 cache read. Cost here is an estimate.
+    {
+      const u = message.usage;
+      const inTok = u.input_tokens ?? 0;
+      const outTok = u.output_tokens ?? 0;
+      const cacheWrite = u.cache_creation_input_tokens ?? 0;
+      const cacheRead = u.cache_read_input_tokens ?? 0;
+      const estCost =
+        (inTok * 3 + outTok * 15 + cacheWrite * 3.75 + cacheRead * 0.3) / 1_000_000;
+      console.log(
+        `[qa] TOKENS input=${inTok} output=${outTok} cache_write=${cacheWrite} cache_read=${cacheRead} | ~$${estCost.toFixed(4)} (est)`
+      );
+    }
 
     if (message.stop_reason === "max_tokens") {
       throw new Error(
