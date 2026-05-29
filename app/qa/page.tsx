@@ -1052,15 +1052,11 @@ export default function QAPage() {
                 className="bg-white rounded-2xl border border-gray-200 overflow-hidden"
               >
                 <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-gray-100">
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex items-center gap-3">
                     <h3 className="text-sm font-semibold text-gray-900">
                       {unit.name}
                     </h3>
-                    {unit.adId && (
-                      <div className="mt-1.5">
-                        <AdIdBadge adId={unit.adId} />
-                      </div>
-                    )}
+                    {unit.adId && <AdIdBadge adId={unit.adId} />}
                   </div>
                   <StatusBadge status={unit.status} />
                 </div>
