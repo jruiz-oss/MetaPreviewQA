@@ -24,7 +24,7 @@ export async function POST(request: Request) {
 
   if (ads.length === 0) {
     return NextResponse.json(
-      { error: "No active ads found under this campaign ID." },
+      { error: "No ads found under this campaign ID." },
       { status: 404 }
     );
   }

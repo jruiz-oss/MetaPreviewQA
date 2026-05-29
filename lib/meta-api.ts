@@ -1,8 +1,5 @@
 const GRAPH_API = "https://graph.facebook.com/v23.0";
 
-// Tracks how many fetchAdContent calls are in-flight at any given moment
-let _concurrentAdFetches = 0;
-
 export type CampaignAd = {
   id: string;
   name: string;
@@ -29,33 +26,47 @@ export type FormatInfo = {
 };
 
 /**
- * Fetches all ads under a campaign ID from the Meta Graph API.
- * Returns up to 200 ads (paginates once if needed).
+ * Fetches all ads under a campaign ID from the Meta Graph API, following
+ * pagination so campaigns with more than one page of ads are fully loaded.
+ * A hard page cap prevents an unbounded loop on very large accounts; if the cap
+ * is hit, whatever was collected is returned (a QA run on a partial set is
+ * better than failing, and the cap is well above any realistic campaign size).
  */
+const MAX_AD_PAGES = 10; // 10 pages × 200 = up to 2000 ads
 export async function fetchCampaignAdsList(
   campaignId: string,
   accessToken: string
 ): Promise<{ ads: CampaignAd[]; error: string | null }> {
-  const url = `${GRAPH_API}/${campaignId}/ads?fields=id,name&limit=200&access_token=${accessToken}`;
+  let url: string | null =
+    `${GRAPH_API}/${campaignId}/ads?fields=id,name&limit=200&access_token=${accessToken}`;
+  const ads: CampaignAd[] = [];
 
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    const data = await res.json();
+    for (let page = 0; url && page < MAX_AD_PAGES; page++) {
+      const res: Response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      const data: {
+        data?: { id: string; name: string }[];
+        paging?: { next?: string };
+        error?: { code?: number; message?: string };
+      } = await res.json();
 
-    if (data.error) {
-      const code = data.error.code;
-      const msg = data.error.message ?? "Unknown Meta API error";
-      let friendly = `Meta API error (code ${code}): ${msg}`;
-      if (code === 190) friendly = `Access token invalid or expired. Regenerate META_ACCESS_TOKEN.`;
-      else if (code === 100) friendly = `Invalid campaign ID or bad request. Check the ID and try again.`;
-      else if (code === 200) friendly = `Token missing required permissions (needs ads_read or ads_management).`;
-      return { ads: [], error: friendly };
+      if (data.error) {
+        const code = data.error.code;
+        const msg = data.error.message ?? "Unknown Meta API error";
+        let friendly = `Meta API error (code ${code}): ${msg}`;
+        if (code === 190) friendly = `Access token invalid or expired. Regenerate META_ACCESS_TOKEN.`;
+        else if (code === 100) friendly = `Invalid campaign ID or bad request. Check the ID and try again.`;
+        else if (code === 200) friendly = `Token missing required permissions (needs ads_read or ads_management).`;
+        return { ads: [], error: friendly };
+      }
+
+      for (const ad of (data.data ?? []) as { id: string; name: string }[]) {
+        ads.push({ id: ad.id, name: ad.name });
+      }
+
+      // Follow the cursor Meta returns; absent when there are no more pages.
+      url = data.paging?.next ?? null;
     }
-
-    const ads: CampaignAd[] = (data.data ?? []).map((ad: { id: string; name: string }) => ({
-      id: ad.id,
-      name: ad.name,
-    }));
 
     return { ads, error: null };
   } catch (err) {
@@ -404,8 +415,6 @@ export async function fetchAdContent(
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
 
-  _concurrentAdFetches++;
-  const concurrentAtStart = _concurrentAdFetches;
   const fetchStart = Date.now();
 
   let data: AdResponse;
@@ -413,11 +422,8 @@ export async function fetchAdContent(
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     data = await res.json();
   } catch (err) {
-    _concurrentAdFetches--;
     return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null, formatInfo: null, creativeImageUrls: [], manualCheckItems: MANUAL_CHECK_ITEMS };
   }
-
-  _concurrentAdFetches--;
 
   if (data.error) {
     const errorLabel = data.error.code === 100 ? "MISSING_PERMISSION"

@@ -197,13 +197,15 @@ export async function POST(request: Request) {
     );
   }
 
-  const accessToken = process.env.META_ACCESS_TOKEN;
+  const accessToken: string | undefined = process.env.META_ACCESS_TOKEN;
   if (!accessToken) {
     return NextResponse.json(
       { error: "META_ACCESS_TOKEN environment variable is not set." },
       { status: 500 }
     );
   }
+  // Narrowed alias so the (hoisted) resolveUnit closure sees a guaranteed string.
+  const metaToken: string = accessToken;
 
   if (!process.env.ANTHROPIC_API_KEY) {
     return NextResponse.json(
@@ -228,7 +230,7 @@ export async function POST(request: Request) {
       };
     }
 
-    const { content, error, aiEnhancements, formatInfo, creativeImageUrls, manualCheckItems } = await fetchAdContent(adId, accessToken);
+    const { content, error, aiEnhancements, formatInfo, creativeImageUrls, manualCheckItems } = await fetchAdContent(adId, metaToken);
 
     // Download live Meta images server-side so we can pass them as base64
     // (Meta CDN URLs are blocked by robots.txt when passed directly to Claude).

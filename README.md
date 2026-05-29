@@ -76,4 +76,4 @@ Every push to `main` auto-deploys. Done.
 - **Preview link access:** Links must be publicly viewable without a Meta login. If a link requires login, Claude will flag it as unverifiable and mark that check as a warning.
 - **No database:** Stateless by design — nothing is saved. Each QA run is independent.
 - **Auth:** Single shared password stored as an env variable. The cookie lasts 30 days per device.
-- **Model:** Uses `claude-opus-4-6` by default. You can swap to `claude-sonnet-4-6` in `app/api/qa/route.ts` for faster (slightly less thorough) results.
+- **Model:** Uses `claude-sonnet-4-6` by default (set in `app/api/qa/route.ts`).
