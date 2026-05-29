@@ -1,7 +1,24 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+
+// Loads an external script once and resolves when ready. Used to pull the PDF
+// libraries (html2canvas + jsPDF) from a CDN only when the user actually clicks
+// "Download PDF", so they don't add to the app bundle.
+function loadScript(src: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) {
+      resolve();
+      return;
+    }
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(s);
+  });
+}
 
 type AdUnit = {
   id: string;
@@ -217,6 +234,9 @@ export default function QAPage() {
   const [error, setError] = useState("");
   // Progress across per-campaign QA requests (done / total campaigns).
   const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
+  // PDF export: ref wraps the results block we capture; flag drives button state.
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   // Campaign import state — supports multiple campaigns
   type FilterScope = "ad" | "adset" | "both";
@@ -576,6 +596,52 @@ export default function QAPage() {
 
     if (errors.length > 0) setError(errors.join("  "));
     setLoading(false);
+  }
+
+  // Capture the rendered results block as an image and save it as a multi-page
+  // PDF — a visual snapshot the reviewer can send to the team. Libraries load
+  // from CDN on first click.
+  async function downloadPdf() {
+    if (!resultsRef.current || downloadingPdf) return;
+    setDownloadingPdf(true);
+    try {
+      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js");
+      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
+      const html2canvas = (window as any).html2canvas;
+      const { jsPDF } = (window as any).jspdf;
+      if (!html2canvas || !jsPDF) throw new Error("PDF tools failed to load — check your connection and try again.");
+
+      const canvas = await html2canvas(resultsRef.current, {
+        scale: 2,
+        backgroundColor: "#f8f8f6",
+        useCORS: true,
+        logging: false,
+      });
+
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+      const pageW = pdf.internal.pageSize.getWidth();
+      const pageH = pdf.internal.pageSize.getHeight();
+      // Scale the capture to page width, then slice it across as many pages as needed.
+      const imgW = pageW;
+      const imgH = (canvas.height * imgW) / canvas.width;
+      let heightLeft = imgH;
+      let position = 0;
+      pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
+      heightLeft -= pageH;
+      while (heightLeft > 0) {
+        position -= pageH;
+        pdf.addPage();
+        pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
+        heightLeft -= pageH;
+      }
+      const stamp = new Date().toISOString().slice(0, 10);
+      pdf.save(`vera-qa-results-${stamp}.pdf`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not generate PDF.");
+    } finally {
+      setDownloadingPdf(false);
+    }
   }
 
   function reset() {
@@ -980,6 +1046,38 @@ export default function QAPage() {
               </div>
             )}
 
+            {/* Top bar — download the whole results view as a PDF to share. */}
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium tracking-widest text-gray-400 uppercase">
+                QA results
+              </p>
+              <button
+                onClick={downloadPdf}
+                disabled={downloadingPdf || loading}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                title={loading ? "Wait for all campaigns to finish" : "Download results as PDF"}
+              >
+                {downloadingPdf ? (
+                  <>
+                    <span className="inline-block w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Preparing…
+                  </>
+                ) : (
+                  <>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    Download PDF
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Everything inside this wrapper is captured into the PDF. */}
+            <div ref={resultsRef} className="space-y-5">
+
             {/* Overall status */}
             <div className="bg-white rounded-2xl border border-gray-200 p-6 flex items-center justify-between">
               <div>
@@ -1143,6 +1241,7 @@ export default function QAPage() {
                 )}
               </div>
             ))}
+            </div>
           </div>
         )}
       </main>
