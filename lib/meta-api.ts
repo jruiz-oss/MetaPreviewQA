@@ -196,6 +196,13 @@ const UNRELIABLE_API_KEYS = new Set([
   "translate_voiceover",
 ]);
 
+// Enhancements that are intentionally always left ON and should NOT be flagged by QA.
+// They still appear in the enhancements list (marked "allowed"), but being ON does not
+// trigger a warning/critical flag.
+export const ALLOWED_ENHANCEMENT_KEYS = new Set<string>([
+  "inline_comment", // "Relevant Comments" — always on by policy
+]);
+
 // Items from the QA checklist that have no reliable API field in degrees_of_freedom_spec.
 // These must be verified manually inside Meta Ads Manager.
 export const MANUAL_CHECK_ITEMS: string[] = [

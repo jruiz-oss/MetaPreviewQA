@@ -4,7 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { google } from "googleapis";
 import sharp from "sharp";
 import { getOAuthClient } from "@/lib/google-auth";
-import { resolveAdId, fetchAdContent, type AiEnhancement, type FormatInfo } from "@/lib/meta-api";
+import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, type AiEnhancement, type FormatInfo } from "@/lib/meta-api";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
 export const maxDuration = 300;
@@ -36,8 +36,9 @@ Review each ad unit on six criteria:
    (a) API-checked enhancements: a list of enhancements and their on/off status fetched directly from the Meta API.
    (b) Manual check required: a list of enhancements that cannot be read from the API and must be verified by a human inside Meta Ads Manager.
    Evaluation rules:
-   - If any API-checked enhancement is ON: status = "warning", note = name all ON enhancements, then add "Manual check also required in Ads Manager for: [list the manual items]."
-   - If all API-checked enhancements are OFF: status = "warning", note = "All API-readable enhancements are off. The following must still be verified manually in Ads Manager: [list the manual items]."
+   - Enhancements marked "(allowed ...)" are intentionally enabled. Treat them as acceptable: do NOT name them, do NOT include the word "ON" for them, and do NOT let them trigger a warning. Ignore them entirely.
+   - If any non-allowed API-checked enhancement is ON: status = "warning", note = name all ON (non-allowed) enhancements, then add "Manual check also required in Ads Manager for: [list the manual items]."
+   - If all non-allowed API-checked enhancements are OFF (allowed ones may be on): status = "warning", note = "All API-readable enhancements are off. The following must still be verified manually in Ads Manager: [list the manual items]."
    - If API enhancement data is absent: status = "unknown", note = "API enhancement data unavailable. The following must be verified manually in Ads Manager: [list the manual items]."
    Never return "pass" for ai_enhancements — manual items always require a human to verify.
 6. format_size — Do the creative asset dimensions match the intended format(s) for this ad?
@@ -382,9 +383,13 @@ export async function POST(request: Request) {
       ? `\nEnhancements requiring manual verification in Ads Manager:\n${manualItems.map(i => `  - ${i}`).join("\n")}`
       : "";
     if (enhancements && enhancements.length > 0) {
-      const lines = enhancements.map(
-        (e) => `  - ${e.label}: ${e.status === "on" ? "ON ⚠️" : "off"}`
-      );
+      const lines = enhancements.map((e) => {
+        if (e.status !== "on") return `  - ${e.label}: off`;
+        // Allowed enhancements are intentionally always on — do not flag them.
+        return ALLOWED_ENHANCEMENT_KEYS.has(e.key)
+          ? `  - ${e.label}: on (allowed — intentionally enabled, do NOT flag or mention)`
+          : `  - ${e.label}: ON ⚠️`;
+      });
       enhancementsBlock = `\nMeta Advantage+ AI enhancements (from API):\n${lines.join("\n")}${manualList}`;
     } else {
       enhancementsBlock = `\nMeta Advantage+ AI enhancements: not available for this ad.${manualList}`;
