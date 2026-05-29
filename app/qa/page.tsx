@@ -272,12 +272,20 @@ export default function QAPage() {
     error: string;
     skipNote: string;    // post-load summary of what was filtered out
   };
+  // Default the created-since cutoff to ~30 days ago. We never QA old ads through
+  // Vera, so pre-filling this means one less field to think about — the user can
+  // still change or clear it for the rare backfill case.
+  function defaultSinceDate(): string {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().slice(0, 10); // YYYY-MM-DD
+  }
   const newCampaignRow = (id: string): CampaignRow => ({
     id,
     campaignId: "",
     filter: "",
     filterScope: "ad",
-    sinceDate: "",
+    sinceDate: defaultSinceDate(),
     loading: false,
     loaded: false,
     error: "",
