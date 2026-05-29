@@ -206,34 +206,40 @@ export default function QAPage() {
   const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
 
   // Campaign import state — supports multiple campaigns
+  type FilterScope = "ad" | "adset" | "both";
   type CampaignRow = {
     id: string;
     campaignId: string;
     filter: string;
+    filterScope: FilterScope;
     loading: boolean;
     loaded: boolean;
     error: string;
   };
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([
-    { id: "c1", campaignId: "", filter: "", loading: false, loaded: false, error: "" },
+    { id: "c1", campaignId: "", filter: "", filterScope: "ad", loading: false, loaded: false, error: "" },
   ]);
 
   function addCampaignRow() {
     setCampaigns((prev) => [
       ...prev,
-      { id: String(Date.now()), campaignId: "", filter: "", loading: false, loaded: false, error: "" },
+      { id: String(Date.now()), campaignId: "", filter: "", filterScope: "ad", loading: false, loaded: false, error: "" },
     ]);
   }
 
   function removeCampaignRow(id: string) {
     if (campaigns.length <= 1) {
-      setCampaigns([{ id: "c1", campaignId: "", filter: "", loading: false, loaded: false, error: "" }]);
+      setCampaigns([{ id: "c1", campaignId: "", filter: "", filterScope: "ad", loading: false, loaded: false, error: "" }]);
     } else {
       setCampaigns((prev) => prev.filter((c) => c.id !== id));
     }
   }
 
-  function updateCampaignRow(id: string, field: "campaignId" | "filter", value: string) {
+  function updateCampaignRow(
+    id: string,
+    field: "campaignId" | "filter" | "filterScope",
+    value: string
+  ) {
     setCampaigns((prev) =>
       prev.map((c) => (c.id === id ? { ...c, [field]: value, error: "", loaded: false } : c))
     );
@@ -396,16 +402,23 @@ export default function QAPage() {
       if (!res.ok) throw new Error(data.error ?? "Failed to load campaign ads");
 
       const keyword = row.filter.trim().toLowerCase();
+      const scope = row.filterScope;
       const filtered = keyword
-        ? data.ads.filter((ad: { id: string; name: string }) =>
-            ad.name.toLowerCase().includes(keyword)
-          )
+        ? data.ads.filter((ad: { id: string; name: string; adsetName?: string }) => {
+            const adMatch = ad.name.toLowerCase().includes(keyword);
+            const adsetMatch = (ad.adsetName ?? "").toLowerCase().includes(keyword);
+            if (scope === "ad") return adMatch;
+            if (scope === "adset") return adsetMatch;
+            return adMatch || adsetMatch;
+          })
         : data.ads;
 
       if (filtered.length === 0) {
+        const where =
+          scope === "ad" ? "ad name" : scope === "adset" ? "ad set name" : "ad or ad set name";
         throw new Error(
           keyword
-            ? `No ads matched "${row.filter.trim()}" — try a different keyword.`
+            ? `No ads matched "${row.filter.trim()}" in ${where} — try a different keyword or scope.`
             : "No ads found in this campaign."
         );
       }
@@ -562,7 +575,7 @@ export default function QAPage() {
       { id: "2", name: "", link: "" },
     ]);
     setCampaigns([
-      { id: "c1", campaignId: "", filter: "", loading: false, loaded: false, error: "" },
+      { id: "c1", campaignId: "", filter: "", filterScope: "ad", loading: false, loaded: false, error: "" },
     ]);
     setResult(null);
     setError("");
@@ -782,16 +795,17 @@ export default function QAPage() {
 
               {/* Campaign import — multi-campaign */}
               <div className="mb-5 pb-5 border-b border-gray-100 space-y-2">
-                <div className="grid grid-cols-[1fr_auto_auto_32px] gap-2 px-1 mb-1">
+                <div className="grid grid-cols-[1fr_auto_auto_auto_32px] gap-2 px-1 mb-1">
                   <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">Campaign ID</span>
                   <span className="text-xs font-medium text-gray-400 uppercase tracking-wide w-40">Filter (optional)</span>
+                  <span className="text-xs font-medium text-gray-400 uppercase tracking-wide w-32">Match on</span>
                   <span />
                   <span />
                 </div>
 
                 {campaigns.map((row) => (
                   <div key={row.id} className="space-y-1">
-                    <div className="grid grid-cols-[1fr_auto_auto_32px] gap-2 items-center">
+                    <div className="grid grid-cols-[1fr_auto_auto_auto_32px] gap-2 items-center">
                       <input
                         type="text"
                         value={row.campaignId}
@@ -806,6 +820,15 @@ export default function QAPage() {
                         placeholder="e.g. june"
                         className="w-40 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
                       />
+                      <select
+                        value={row.filterScope}
+                        onChange={(e) => updateCampaignRow(row.id, "filterScope", e.target.value)}
+                        className="w-32 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                      >
+                        <option value="ad">Ad name</option>
+                        <option value="adset">Ad set name</option>
+                        <option value="both">Either</option>
+                      </select>
                       <button
                         onClick={() => loadFromCampaign(row.id)}
                         disabled={row.loading || row.loaded || !row.campaignId.trim()}

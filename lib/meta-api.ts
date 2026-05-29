@@ -3,6 +3,7 @@ const GRAPH_API = "https://graph.facebook.com/v23.0";
 export type CampaignAd = {
   id: string;
   name: string;
+  adsetName: string;
 };
 
 export type PlacementInfo = {
@@ -38,14 +39,14 @@ export async function fetchCampaignAdsList(
   accessToken: string
 ): Promise<{ ads: CampaignAd[]; error: string | null }> {
   let url: string | null =
-    `${GRAPH_API}/${campaignId}/ads?fields=id,name&limit=200&access_token=${accessToken}`;
+    `${GRAPH_API}/${campaignId}/ads?fields=id,name,adset{name}&limit=200&access_token=${accessToken}`;
   const ads: CampaignAd[] = [];
 
   try {
     for (let page = 0; url && page < MAX_AD_PAGES; page++) {
       const res: Response = await fetch(url, { signal: AbortSignal.timeout(10000) });
       const data: {
-        data?: { id: string; name: string }[];
+        data?: { id: string; name: string; adset?: { name?: string } }[];
         paging?: { next?: string };
         error?: { code?: number; message?: string };
       } = await res.json();
@@ -60,8 +61,12 @@ export async function fetchCampaignAdsList(
         return { ads: [], error: friendly };
       }
 
-      for (const ad of (data.data ?? []) as { id: string; name: string }[]) {
-        ads.push({ id: ad.id, name: ad.name });
+      for (const ad of (data.data ?? []) as {
+        id: string;
+        name: string;
+        adset?: { name?: string };
+      }[]) {
+        ads.push({ id: ad.id, name: ad.name, adsetName: ad.adset?.name ?? "" });
       }
 
       // Follow the cursor Meta returns; absent when there are no more pages.
