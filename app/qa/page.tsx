@@ -38,6 +38,8 @@ type DriveImage = {
 type CheckResult = {
   status: "pass" | "fail" | "warning" | "unknown";
   note: string;
+  text_in_approved?: string | null;
+  text_in_live?: string | null;
 };
 
 // Identical ad versions are QA'd once and reported as a single result. `group`
@@ -205,6 +207,8 @@ function CheckRow({ label, result }: { label: string; result: CheckResult }) {
     warning: "text-amber-600",
     unknown: "text-gray-400",
   };
+  const hasImageText = result.text_in_approved != null || result.text_in_live != null;
+
   return (
     <div className="flex items-start gap-3 py-2.5 border-b border-gray-100 last:border-0">
       <span className={`font-semibold text-sm w-4 shrink-0 mt-0.5 ${colors[result.status] ?? colors.unknown}`}>
@@ -214,6 +218,23 @@ function CheckRow({ label, result }: { label: string; result: CheckResult }) {
         <p className="text-sm font-medium text-gray-700">{label}</p>
         {result.note && (
           <p className="text-sm text-gray-500 mt-0.5">{result.note}</p>
+        )}
+        {hasImageText && (
+          <details className="mt-1.5">
+            <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-600 select-none">
+              Image text extracted
+            </summary>
+            <div className="mt-1.5 grid grid-cols-2 gap-2 text-xs">
+              <div className="rounded bg-gray-50 border border-gray-200 p-2">
+                <p className="font-medium text-gray-500 mb-1">Approved (Drive)</p>
+                <p className="text-gray-700 whitespace-pre-wrap">{result.text_in_approved ?? "—"}</p>
+              </div>
+              <div className="rounded bg-gray-50 border border-gray-200 p-2">
+                <p className="font-medium text-gray-500 mb-1">Live (Meta)</p>
+                <p className="text-gray-700 whitespace-pre-wrap">{result.text_in_live ?? "—"}</p>
+              </div>
+            </div>
+          </details>
         )}
       </div>
     </div>

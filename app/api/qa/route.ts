@@ -35,7 +35,9 @@ Review each ad unit on six criteria:
 1. copy_creative_alignment — Does the ad copy exactly match the approved copy doc? You may receive images from two sources:
    - APPROVED CREATIVE FROM DRIVE: the design files the client signed off on (labeled with their filenames). These are what the live ad is supposed to match.
    - LIVE META CREATIVE: the image(s) actually live in the Meta ad, shown per ad unit below.
-   When images are provided, visually inspect the creative: check that any text overlaid on the image (headline, offer text, dates, disclaimers) matches the approved copy, verify the visual theme and imagery match the creative spec, and flag anything in the visual that contradicts the brief (wrong colors, missing/wrong logo, wrong offer amount, stale date visible in the image, etc.). When BOTH a Drive approved image and a live Meta image are present, compare them directly and flag any difference between the approved creative and what is live — match Drive assets to ad units by filename/concept and size (e.g. "1080x1920 V2", "Tier Credit Multiplier", "Carousel"). If only one source is present, check what you can. If no images are provided at all, note that visual creative could not be checked. Be specific about any differences.
+   When images are provided, follow this two-step process:
+   STEP 1 — TEXT EXTRACTION: Before comparing anything, read each image and list every piece of text you can literally see in the pixels (headlines, offer amounts, dates, disclaimers, CTAs, fine print). Record this separately for the approved Drive image and the live Meta image in the text_in_approved and text_in_live fields. If text is too small or blurry to read with confidence, write "not legible" for that item. If no image is present for a source, write null.
+   STEP 2 — COMPARISON: With the extracted text in hand, compare the two lists. Flag any difference — a word, number, date, or phrase that appears in one but not the other, or differs between them. Also check visual theme, colors, logo, and layout match. Match Drive assets to ad units by filename/concept and size (e.g. "1080x1920 V2", "Carousel"). If only one source is present, check what you can. If no images at all, note that visual creative could not be checked.
 2. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references. Only evaluate dates you can actually read — from the API copy text, the copy doc, or text legibly visible in the image. Never report a date as appearing in the creative unless you can literally read it in the pixels.
 3. url_cta — Does the ad's destination URL match the approved URL exactly? Does the CTA match what was specified?
 4. grammar_typos — Any grammar errors, typos, or awkward phrasing?
@@ -82,7 +84,7 @@ IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exac
       "name": "string",
       "status": "pass" | "fail" | "warning",
       "checks": {
-        "copy_creative_alignment": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
+        "copy_creative_alignment": { "status": "pass" | "fail" | "warning", "note": "≤25 words", "text_in_approved": "all legible text from approved Drive image, or null", "text_in_live": "all legible text from live Meta image, or null" },
         "promo_month_date": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
         "url_cta": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
         "grammar_typos": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
