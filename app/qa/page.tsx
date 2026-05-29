@@ -23,6 +23,12 @@ type CheckResult = {
   note: string;
 };
 
+// Identical ad versions are QA'd once and reported as a single result. `group`
+// lists every ad unit (name + ad ID) that shares this result; for a one-off ad
+// it's just the ad itself. Units that differ on any checked field have a
+// different fingerprint server-side, so they arrive as their own UnitResult.
+type GroupMember = { name: string; adId?: string | null };
+
 type UnitResult = {
   name: string;
   adId?: string | null;
@@ -36,6 +42,8 @@ type UnitResult = {
     format_size: CheckResult;
   };
   summary: string;
+  group?: GroupMember[];
+  groupSize?: number;
 };
 
 type QAResult = {
@@ -81,7 +89,12 @@ function consolidateCriticalIssues(units: UnitResult[]): ConsolidatedIssue[] {
   >();
 
   for (const unit of units) {
-    const name = unit.name || "Unnamed";
+    // A consolidated result covers every ad in its group — count them all so
+    // "affects N ads" reflects the real ad count, not the representative alone.
+    const names =
+      unit.group && unit.group.length
+        ? unit.group.map((m) => m.name || "Unnamed")
+        : [unit.name || "Unnamed"];
     for (const key of CRITICAL_ORDER) {
       const check = unit.checks?.[key];
       if (!check) continue;
@@ -94,7 +107,7 @@ function consolidateCriticalIssues(units: UnitResult[]): ConsolidatedIssue[] {
 
       if (!buckets.has(key)) buckets.set(key, { units: [], noteCounts: new Map() });
       const b = buckets.get(key)!;
-      if (!b.units.includes(name)) b.units.push(name);
+      for (const name of names) if (!b.units.includes(name)) b.units.push(name);
       const note = check.note?.trim();
       if (note) b.noteCounts.set(note, (b.noteCounts.get(note) ?? 0) + 1);
     }
@@ -1075,15 +1088,45 @@ export default function QAPage() {
                 key={i}
                 className="bg-white rounded-2xl border border-gray-200 overflow-hidden"
               >
-                <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-gray-100">
-                  <div className="min-w-0 flex items-center gap-3">
-                    <h3 className="text-sm font-semibold text-gray-900">
-                      {unit.name}
-                    </h3>
-                    {unit.adId && <AdIdBadge adId={unit.adId} />}
-                  </div>
-                  <StatusBadge status={unit.status} />
-                </div>
+                {(() => {
+                  // The result may cover several identical ad versions. Show the
+                  // name once, then a badge per ad ID it applies to. A single ad
+                  // falls back to its own name + ID.
+                  const members =
+                    unit.group && unit.group.length
+                      ? unit.group
+                      : [{ name: unit.name, adId: unit.adId }];
+                  const grouped = members.length > 1;
+                  return (
+                    <div className="flex items-start justify-between gap-3 px-6 py-4 border-b border-gray-100">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h3 className="text-sm font-semibold text-gray-900">
+                            {unit.name}
+                          </h3>
+                          {grouped && (
+                            <span className="text-xs font-medium text-gray-500 bg-gray-100 rounded-full px-2 py-0.5">
+                              ×{members.length} identical ads
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-wrap mt-1.5">
+                          {members
+                            .filter((m) => m.adId)
+                            .map((m) => (
+                              <AdIdBadge key={m.adId} adId={m.adId as string} />
+                            ))}
+                        </div>
+                        {grouped && (
+                          <p className="text-xs text-gray-400 mt-1.5">
+                            Same copy, creative & settings — checked once, applies to all {members.length}.
+                          </p>
+                        )}
+                      </div>
+                      <StatusBadge status={unit.status} />
+                    </div>
+                  );
+                })()}
                 <div className="px-6 py-2">
                   {Object.entries(unit.checks).map(([key, check]) => (
                     <CheckRow

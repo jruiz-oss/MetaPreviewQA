@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { createHash } from "crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { google } from "googleapis";
 import sharp from "sharp";
@@ -567,24 +568,96 @@ export async function POST(request: Request) {
     };
   }
 
-  // --- Build batches: ONE ad unit per Claude call ---
+  // --- Deduplicate identical ad versions before QA ---
+  // Campaigns often ship the same creative as several near-identical ad units
+  // (e.g. three carousels that are the same copy + creative). QA'ing each one
+  // separately is pure waste: identical input → identical result, at 3x the
+  // tokens and time. We fingerprint every unit from the EXACT data that feeds
+  // the model — copy/creative content, AI-enhancement states, format/placement,
+  // manual items, the actual live creative image bytes (hashed), the matched
+  // approved Drive assets, and the format-relevant tokens in the name — then run
+  // QA on only ONE representative per group and clone its result to the rest.
+  // Accuracy is preserved because any unit that differs on ANY checked field
+  // gets a different fingerprint, so it does NOT collapse: it stays its own
+  // group and its ad ID is reported individually. Naming-only differences
+  // (Carousel 1 vs 2 vs 3, V1/V2/V3) are normalized away so true duplicates
+  // still merge.
+
+  // Pull only the format-discriminating tokens out of a name. The model uses the
+  // ad name solely as a hint for the format/size check (Story/Feed/Reel/1x1/
+  // 9x16…), so two units differing only by a version/index number are
+  // QA-equivalent and should fingerprint the same.
+  function nameSignature(name: string): string {
+    return tokenize(name)
+      .filter((t) => !/^v?\d+$/.test(t)) // drop pure numbers and v1/v2/v3 tags
+      .sort()
+      .join(" ");
+  }
+
+  const sha1 = (s: string) => createHash("sha1").update(s).digest("hex");
+
+  // A unit's fingerprint is the JSON of everything that determines its QA
+  // outcome. Live creative images are identified by a hash of their actual
+  // bytes (not the Meta CDN URL, which carries per-request tokens) so two ads
+  // with pixel-identical creative collapse while any visual difference splits.
+  function fingerprintForUnit(i: number): string {
+    const u = unitContents[i];
+    const enh = (u as { aiEnhancements?: AiEnhancement[] | null }).aiEnhancements ?? [];
+    const manual = (u as { manualCheckItems?: string[] }).manualCheckItems ?? [];
+    const liveImgs = (u as { creativeImages?: FetchedImage[] }).creativeImages ?? [];
+    return JSON.stringify({
+      content: u.content ?? null,
+      note: u.note ?? null,
+      enh: enh.map((e) => `${e.label}:${e.status}`).sort(),
+      manual: [...manual].sort(),
+      fmt: (u as { formatInfo?: FormatInfo | null }).formatInfo ?? null,
+      liveImgHashes: liveImgs.map((img) => sha1(img.data)).sort(),
+      driveImgs: refsPerUnit[i].map((r) => r.name).sort(),
+      nameSig: nameSignature(u.name ?? ""),
+    });
+  }
+
+  // Assign each unit to a group keyed by fingerprint; the first unit with a
+  // given fingerprint is that group's representative (the one we actually QA).
+  const fpToRep = new Map<string, number>();
+  const repOfUnit: number[] = new Array(unitContents.length);
+  const repIndices: number[] = [];
+  for (let i = 0; i < unitContents.length; i++) {
+    const fp = fingerprintForUnit(i);
+    if (!fpToRep.has(fp)) {
+      fpToRep.set(fp, i);
+      repIndices.push(i);
+    }
+    repOfUnit[i] = fpToRep.get(fp)!;
+  }
+
+  // Members (original unit indices) per representative, preserving input order.
+  const membersOfRep = new Map<number, number[]>();
+  for (let i = 0; i < unitContents.length; i++) {
+    const rep = repOfUnit[i];
+    if (!membersOfRep.has(rep)) membersOfRep.set(rep, []);
+    membersOfRep.get(rep)!.push(i);
+  }
+
+  // --- Build batches: ONE representative ad unit per Claude call ---
   // Bundling several units + up to a dozen images into one multimodal call was
   // the real cause of the 300s timeouts: vision input + large output generation
   // is slow, so a heavy campaign's few big calls could each take 100s+. A single
   // unit (its text + its 1-2 live images + its matched Drive images) is a small,
   // fast call (~5-15s). Many of these run concurrently and fail in isolation,
-  // keeping every request comfortably under Vercel's limit. driveImagesForUnit
-  // also means each unit only carries ITS matched Drive images — no more
-  // re-sending the whole approved set in every batch.
+  // keeping every request comfortably under Vercel's limit. We only call Claude
+  // for representatives — duplicate versions reuse the representative's result.
   type Batch = { units: (typeof unitContents); driveImages: FetchedImage[] };
-  const batches: Batch[] = unitContents.map((unit, i) => ({
-    units: [unit],
+  const batches: Batch[] = repIndices.map((i) => ({
+    units: [unitContents[i]],
     driveImages: refsPerUnit[i]
       .map((r) => driveByName.get(r.name))
       .filter((x): x is FetchedImage => !!x),
   }));
 
-  console.log(`[qa] Running ${batches.length} per-unit call(s) for ${unitContents.length} ad unit(s).`);
+  console.log(
+    `[qa] ${unitContents.length} ad unit(s) → ${batches.length} unique version(s); running ${batches.length} Claude call(s) (saved ${unitContents.length - batches.length}).`
+  );
 
   // Run per-unit calls concurrently with a cap. Kept deliberately low: each call
   // carries images (token-heavy), so firing 5 at once spiked us past the
@@ -611,8 +684,25 @@ export async function POST(request: Request) {
       Array.from({ length: Math.min(MAX_CONCURRENT_BATCHES, batches.length) }, () => worker())
     );
 
-    // Merge batch results
-    const allUnits = batchResults.flatMap((r) => r.units);
+    // Merge batch results. Each batch is one representative, so batchResults[k]
+    // holds the QA result for repIndices[k]. Emit ONE result unit per group,
+    // carrying the representative's checks plus the full list of ad units the
+    // result covers (name + ad ID) so the report can render a single
+    // consolidated card and list every ad ID it applies to.
+    const allUnits = repIndices.map((repIdx, k) => {
+      const base = (batchResults[k]?.units?.[0] ?? {}) as Record<string, unknown>;
+      const group = (membersOfRep.get(repIdx) ?? [repIdx]).map((i) => ({
+        name: unitContents[i].name || "Unnamed",
+        adId: unitContents[i].adId ?? null,
+      }));
+      return {
+        ...base,
+        name: unitContents[repIdx].name || "Unnamed",
+        adId: unitContents[repIdx].adId ?? null,
+        group,
+        groupSize: group.length,
+      };
+    });
     const allCritical = batchResults.flatMap((r) => r.critical_issues);
     const allNotes = "";
 
