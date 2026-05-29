@@ -1075,6 +1075,7 @@ export default function QAPage() {
                           className="h-3.5 w-3.5 rounded border-gray-300 text-gray-900 focus:ring-gray-900"
                         />
                         Active ads only
+                        <span className="text-gray-400">(paused campaign still loads)</span>
                       </label>
                       <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 select-none">
                         Created since

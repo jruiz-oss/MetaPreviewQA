@@ -68,10 +68,13 @@ export async function fetchCampaignAdsList(
   const sinceMs = options.sinceDate ? Date.parse(options.sinceDate) : NaN;
   const hasSince = !Number.isNaN(sinceMs);
 
-  // Request effective_status + created_time so filtering happens on real signals,
-  // not a keyword that "june" also matches in last year's ad set names.
+  // Request the ad's OWN status and the ad set's OWN status (configured toggles),
+  // alongside effective_status (for display) + created_time. "Active" for QA is
+  // judged on the ad + ad set toggles only — a paused CAMPAIGN is deliberately
+  // ignored, because for these QA runs the campaign is almost always paused while
+  // the ads/ad sets staged inside it are switched on.
   let url: string | null =
-    `${GRAPH_API}/${campaignId}/ads?fields=id,name,adset{name},effective_status,created_time&limit=200&access_token=${accessToken}`;
+    `${GRAPH_API}/${campaignId}/ads?fields=id,name,status,effective_status,created_time,adset{name,status}&limit=200&access_token=${accessToken}`;
   const ads: CampaignAd[] = [];
   let totalFetched = 0;
   let skippedInactive = 0;
@@ -84,7 +87,8 @@ export async function fetchCampaignAdsList(
         data?: {
           id: string;
           name: string;
-          adset?: { name?: string };
+          status?: string;
+          adset?: { name?: string; status?: string };
           effective_status?: string;
           created_time?: string;
         }[];
@@ -106,9 +110,16 @@ export async function fetchCampaignAdsList(
         totalFetched++;
         const effectiveStatus = ad.effective_status ?? "UNKNOWN";
         const createdTime = ad.created_time ?? "";
+        const adOn = (ad.status ?? "") === "ACTIVE";
+        const adsetOn = (ad.adset?.status ?? "") === "ACTIVE";
 
-        // Drop anything not actively serving when active-only is on.
-        if (activeOnly && effectiveStatus !== "ACTIVE") {
+        // "Active" = the ad and its ad set are both toggled on. A paused campaign
+        // is intentionally NOT a reason to skip — these QA runs happen while the
+        // campaign is still paused. So an ad whose effective_status is
+        // CAMPAIGN_PAUSED still comes through as long as its own + ad set toggles
+        // are ACTIVE. Ad-level or ad-set-level pauses (the stale past-promo case)
+        // are still skipped.
+        if (activeOnly && !(adOn && adsetOn)) {
           skippedInactive++;
           continue;
         }
