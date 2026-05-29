@@ -157,7 +157,7 @@ function StatusBadge({ status }: { status: string }) {
     unknown: "N/A",
   };
   return (
-    <span className={`pdf-badge text-xs font-medium px-2 py-0.5 rounded-full ${styles[status] ?? styles.unknown}`}>
+    <span className={`pdf-badge text-xs font-medium px-2.5 py-1 rounded-full leading-none ${styles[status] ?? styles.unknown}`}>
       {labels[status] ?? status}
     </span>
   );
@@ -705,13 +705,37 @@ export default function QAPage() {
         onclone: (doc: Document) => {
           const style = doc.createElement("style");
           style.textContent = `
+            /* Pills / badges — html2canvas struggles with inline-flex + small
+               padded text (mispositions content, clips rounded bg). Flatten to
+               inline-block with an explicit line-height so the text sits squarely
+               inside the pill without overflowing. */
             .pdf-badge {
-              display: inline-flex !important;
-              align-items: center !important;
-              line-height: 1 !important;
-              padding-top: 3px !important;
-              padding-bottom: 3px !important;
+              display: inline-block !important;
+              line-height: 1.6 !important;
+              padding-top: 2px !important;
+              padding-bottom: 2px !important;
+              vertical-align: middle !important;
             }
+            /* AdIdBadge is a button with inline-flex + gap. Collapse it the same
+               way and add spacing between the ID text and the copy icon manually. */
+            button.pdf-badge {
+              display: inline-block !important;
+            }
+            button.pdf-badge > span + span {
+              margin-left: 4px !important;
+            }
+            /* Tailwind's space-y-* emits margin-top on siblings via a CSS selector.
+               html2canvas sometimes collapses these margins; be explicit. */
+            .space-y-5 > * + * {
+              margin-top: 1.25rem !important;
+            }
+            .space-y-3 > * + * {
+              margin-top: 0.75rem !important;
+            }
+            /* Flex gaps inside cards can collapse in the snapshot — convert to margin. */
+            .gap-3 { gap: 0.75rem !important; }
+            .gap-2 { gap: 0.5rem !important; }
+            .gap-1\\.5 { gap: 0.375rem !important; }
           `;
           doc.head.appendChild(style);
         },
@@ -1341,7 +1365,7 @@ export default function QAPage() {
                             {unit.name}
                           </h3>
                           {grouped && (
-                            <span className="pdf-badge text-xs font-medium text-gray-500 bg-gray-100 rounded-full px-2 py-0.5">
+                            <span className="pdf-badge text-xs font-medium text-gray-500 bg-gray-100 rounded-full px-2.5 py-1 leading-none">
                               ×{members.length} identical ads
                             </span>
                           )}
