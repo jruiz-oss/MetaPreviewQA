@@ -601,16 +601,18 @@ export async function POST(request: Request) {
 
   const sha1 = (s: string) => createHash("sha1").update(s).digest("hex");
 
-  // A unit's fingerprint is the JSON of everything that determines its QA
+  // A unit's fingerprint is built from everything that determines its QA
   // outcome. Live creative images are identified by a hash of their actual
   // bytes (not the Meta CDN URL, which carries per-request tokens) so two ads
   // with pixel-identical creative collapse while any visual difference splits.
-  function fingerprintForUnit(i: number): string {
+  // We return the parts separately so we can log a per-FIELD hash and see
+  // exactly which field makes two "identical" ads diverge.
+  function fingerprintParts(i: number): Record<string, unknown> {
     const u = unitContents[i];
     const enh = (u as { aiEnhancements?: AiEnhancement[] | null }).aiEnhancements ?? [];
     const manual = (u as { manualCheckItems?: string[] }).manualCheckItems ?? [];
     const liveImgs = (u as { creativeImages?: FetchedImage[] }).creativeImages ?? [];
-    return JSON.stringify({
+    return {
       content: u.content ?? null,
       note: u.note ?? null,
       enh: enh.map((e) => `${e.label}:${e.status}`).sort(),
@@ -619,7 +621,10 @@ export async function POST(request: Request) {
       liveImgHashes: liveImgs.map((img) => sha1(img.data)).sort(),
       driveImgs: refsPerUnit[i].map((r) => r.name).sort(),
       nameSig: nameSignature(u.name ?? ""),
-    });
+    };
+  }
+  function fingerprintForUnit(i: number): string {
+    return JSON.stringify(fingerprintParts(i));
   }
 
   // Assign each unit to a group keyed by fingerprint; the first unit with a
@@ -635,6 +640,28 @@ export async function POST(request: Request) {
     }
     repOfUnit[i] = fpToRep.get(fp)!;
   }
+
+  // --- DEBUG: per-field fingerprint hashes ---------------------------------
+  // For each unit, log a short hash of every fingerprint field plus the raw
+  // small fields. To find why two "identical" ads don't merge, compare their
+  // lines: every field hash will match EXCEPT the one(s) that actually differ.
+  // Remove this block once dedup behaviour is confirmed in production.
+  const shortHash = (v: unknown) => sha1(JSON.stringify(v)).slice(0, 8);
+  for (let i = 0; i < unitContents.length; i++) {
+    const p = fingerprintParts(i);
+    const fieldHashes = Object.fromEntries(
+      Object.entries(p).map(([k, v]) => [k, shortHash(v)])
+    );
+    console.log(
+      `[qa][fp] unit#${i} "${unitContents[i].name}" adId=${unitContents[i].adId ?? "?"} ` +
+        `→ group#${repOfUnit[i]} | fields=${JSON.stringify(fieldHashes)} | ` +
+        `nameSig="${p.nameSig}" liveImgs=${(p.liveImgHashes as string[]).length} ` +
+        `driveImgs=${JSON.stringify(p.driveImgs)} contentLen=${(unitContents[i].content ?? "").length}`
+    );
+  }
+  console.log(
+    `[qa][fp] grouped ${unitContents.length} unit(s) into ${repIndices.length} unique version(s).`
+  );
 
   // Members (original unit indices) per representative, preserving input order.
   const membersOfRep = new Map<number, number[]>();
