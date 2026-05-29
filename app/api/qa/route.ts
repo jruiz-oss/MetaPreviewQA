@@ -483,9 +483,16 @@ export async function POST(request: Request) {
       }
     }
 
-    // Retry up to 3 times on 429 rate-limit errors with exponential backoff.
+    // Retry on 429 rate-limit errors. Improvements over the old loop:
+    //  - More attempts (5 vs 3) so transient spikes recover instead of failing.
+    //  - Respect the server's `retry-after` header when present — it tells us
+    //    exactly how long until tokens replenish, so we don't retry too early.
+    //  - Exponential backoff (5s,10s,20s,40s, capped 60s) when no header.
+    //  - Random jitter so concurrent workers don't retry in lockstep and
+    //    collide again (the old fixed 15s/30s caused exactly that thundering herd).
+    const MAX_ATTEMPTS = 5;
     let message: Anthropic.Message | undefined;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
         message = await client.messages.create({
           model: "claude-sonnet-4-6",
@@ -500,10 +507,22 @@ export async function POST(request: Request) {
         });
         break;
       } catch (err) {
-        const isRateLimit = err instanceof Error && err.message.includes("rate_limit");
-        if (isRateLimit && attempt < 2) {
-          const wait = (attempt + 1) * 15_000; // 15s, then 30s
-          console.log(`[qa] Rate limited — waiting ${wait / 1000}s before retry ${attempt + 2}/3`);
+        const status = (err as { status?: number })?.status;
+        const isRateLimit =
+          status === 429 || (err instanceof Error && err.message.includes("rate_limit"));
+        if (isRateLimit && attempt < MAX_ATTEMPTS - 1) {
+          // Prefer the server's retry-after (seconds); else exponential backoff.
+          const headers = (err as { headers?: Record<string, string> })?.headers;
+          const retryAfter = headers ? Number(headers["retry-after"]) : NaN;
+          const base =
+            Number.isFinite(retryAfter) && retryAfter > 0
+              ? retryAfter * 1000
+              : Math.min(60_000, 5_000 * 2 ** attempt);
+          const jitter = Math.floor(Math.random() * 3_000);
+          const wait = base + jitter;
+          console.log(
+            `[qa] Rate limited — waiting ${(wait / 1000).toFixed(1)}s before retry ${attempt + 2}/${MAX_ATTEMPTS}`
+          );
           await new Promise((r) => setTimeout(r, wait));
         } else {
           throw err;
@@ -567,10 +586,12 @@ export async function POST(request: Request) {
 
   console.log(`[qa] Running ${batches.length} per-unit call(s) for ${unitContents.length} ad unit(s).`);
 
-  // Run per-unit calls concurrently with a cap. Each call is now small, so we
-  // can run more at once; the per-call 429 retry/backoff handles rate limits.
-  // Results stay ordered because each result is written back to its index.
-  const MAX_CONCURRENT_BATCHES = 5;
+  // Run per-unit calls concurrently with a cap. Kept deliberately low: each call
+  // carries images (token-heavy), so firing 5 at once spiked us past the
+  // per-minute input-token limit and threw 429s. At 2 concurrent the token rate
+  // stays well under the ceiling, and the hardened retry/backoff below absorbs
+  // any remaining bursts. Results stay ordered (written back to their index).
+  const MAX_CONCURRENT_BATCHES = 2;
 
   try {
     const batchResults: Awaited<ReturnType<typeof runBatch>>[] = new Array(batches.length);
