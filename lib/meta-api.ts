@@ -5,15 +5,12 @@ export type CampaignAd = {
   id: string;
   name: string;
   adsetName: string;
-  effectiveStatus: string; // ACTIVE, PAUSED, ADSET_PAUSED, CAMPAIGN_PAUSED, ARCHIVED, ...
-  createdTime: string;      // ISO timestamp the ad was created
+  createdTime: string; // ISO timestamp the ad was created
 };
 
 export type FetchAdsOptions = {
-  // When true (default), only ads whose effective_status is ACTIVE are returned.
-  // This is the main guard against stale ad sets from past months getting QA'd.
-  activeOnly?: boolean;
-  // Optional ISO date (YYYY-MM-DD). When set, ads created before this date are dropped.
+  // Optional ISO date (YYYY-MM-DD). When set, ads created before this date are
+  // dropped. This is the guard against stale past-promo ad sets getting QA'd.
   sinceDate?: string;
 };
 
@@ -22,7 +19,6 @@ export type FetchAdsResult = {
   error: string | null;
   // Counts so the UI can tell the user what was skipped and why.
   totalFetched: number;
-  skippedInactive: number;
   skippedOld: number;
 };
 
@@ -59,25 +55,17 @@ export async function fetchCampaignAdsList(
   accessToken: string,
   options: FetchAdsOptions = {}
 ): Promise<FetchAdsResult> {
-  // Active-only is the default. A campaign reused month over month accumulates
-  // paused ad sets from past promos; pulling those in QAs last year's June ads
-  // against this month's work order and reports false fails. Defaulting to
-  // ACTIVE keeps the run to what's actually serving.
-  const activeOnly = options.activeOnly ?? true;
-  // Optional hard date floor on ad creation. Parsed once; invalid input is ignored.
+  // Filtering is purely by ad creation date. A campaign reused month over month
+  // accumulates ad sets from past promos; without a date floor those get QA'd
+  // against the current work order and report false fails. Set a cutoff (e.g.
+  // the start of this promo month) and only ads created on/after it come through.
   const sinceMs = options.sinceDate ? Date.parse(options.sinceDate) : NaN;
   const hasSince = !Number.isNaN(sinceMs);
 
-  // Request the ad's OWN status and the ad set's OWN status (configured toggles),
-  // alongside effective_status (for display) + created_time. "Active" for QA is
-  // judged on the ad + ad set toggles only — a paused CAMPAIGN is deliberately
-  // ignored, because for these QA runs the campaign is almost always paused while
-  // the ads/ad sets staged inside it are switched on.
   let url: string | null =
-    `${GRAPH_API}/${campaignId}/ads?fields=id,name,status,effective_status,created_time,adset{name,status}&limit=200&access_token=${accessToken}`;
+    `${GRAPH_API}/${campaignId}/ads?fields=id,name,adset{name},created_time&limit=200&access_token=${accessToken}`;
   const ads: CampaignAd[] = [];
   let totalFetched = 0;
-  let skippedInactive = 0;
   let skippedOld = 0;
 
   try {
@@ -87,9 +75,7 @@ export async function fetchCampaignAdsList(
         data?: {
           id: string;
           name: string;
-          status?: string;
-          adset?: { name?: string; status?: string };
-          effective_status?: string;
+          adset?: { name?: string };
           created_time?: string;
         }[];
         paging?: { next?: string };
@@ -103,26 +89,13 @@ export async function fetchCampaignAdsList(
         if (code === 190) friendly = `Access token invalid or expired. Regenerate META_ACCESS_TOKEN.`;
         else if (code === 100) friendly = `Invalid campaign ID or bad request. Check the ID and try again.`;
         else if (code === 200) friendly = `Token missing required permissions (needs ads_read or ads_management).`;
-        return { ads: [], error: friendly, totalFetched, skippedInactive, skippedOld };
+        return { ads: [], error: friendly, totalFetched, skippedOld };
       }
 
       for (const ad of data.data ?? []) {
         totalFetched++;
-        const effectiveStatus = ad.effective_status ?? "UNKNOWN";
         const createdTime = ad.created_time ?? "";
-        const adOn = (ad.status ?? "") === "ACTIVE";
-        const adsetOn = (ad.adset?.status ?? "") === "ACTIVE";
 
-        // "Active" = the ad and its ad set are both toggled on. A paused campaign
-        // is intentionally NOT a reason to skip — these QA runs happen while the
-        // campaign is still paused. So an ad whose effective_status is
-        // CAMPAIGN_PAUSED still comes through as long as its own + ad set toggles
-        // are ACTIVE. Ad-level or ad-set-level pauses (the stale past-promo case)
-        // are still skipped.
-        if (activeOnly && !(adOn && adsetOn)) {
-          skippedInactive++;
-          continue;
-        }
         // Drop ads created before the cutoff date when one is set.
         if (hasSince) {
           const createdMs = createdTime ? Date.parse(createdTime) : NaN;
@@ -136,7 +109,6 @@ export async function fetchCampaignAdsList(
           id: ad.id,
           name: ad.name,
           adsetName: ad.adset?.name ?? "",
-          effectiveStatus,
           createdTime,
         });
       }
@@ -145,9 +117,9 @@ export async function fetchCampaignAdsList(
       url = data.paging?.next ?? null;
     }
 
-    return { ads, error: null, totalFetched, skippedInactive, skippedOld };
+    return { ads, error: null, totalFetched, skippedOld };
   } catch (err) {
-    return { ads: [], error: `Network error: ${(err as Error).message}`, totalFetched, skippedInactive, skippedOld };
+    return { ads: [], error: `Network error: ${(err as Error).message}`, totalFetched, skippedOld };
   }
 }
 

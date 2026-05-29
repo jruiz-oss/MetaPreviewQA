@@ -2,9 +2,8 @@ import { NextResponse } from "next/server";
 import { fetchCampaignAdsList } from "@/lib/meta-api";
 
 export async function POST(request: Request) {
-  const { campaignId, activeOnly, sinceDate } = (await request.json()) as {
+  const { campaignId, sinceDate } = (await request.json()) as {
     campaignId: string;
-    activeOnly?: boolean;
     sinceDate?: string;
   };
 
@@ -20,27 +19,26 @@ export async function POST(request: Request) {
     );
   }
 
-  const { ads, error, totalFetched, skippedInactive, skippedOld } =
-    await fetchCampaignAdsList(campaignId.trim(), accessToken, {
-      activeOnly: activeOnly ?? true,
-      sinceDate: sinceDate?.trim() || undefined,
-    });
+  const { ads, error, totalFetched, skippedOld } = await fetchCampaignAdsList(
+    campaignId.trim(),
+    accessToken,
+    { sinceDate: sinceDate?.trim() || undefined }
+  );
 
   if (error) {
     return NextResponse.json({ error }, { status: 400 });
   }
 
   if (ads.length === 0) {
-    // Distinguish "campaign is empty" from "everything was filtered out" so the
-    // user knows to relax the active-only toggle or date cutoff rather than
-    // doubting the campaign ID.
-    const filteredOut = skippedInactive + skippedOld;
+    // Distinguish "campaign is empty" from "everything was filtered out by the
+    // date cutoff" so the user knows to relax the date rather than doubting the
+    // campaign ID.
     const msg =
-      filteredOut > 0
-        ? `No ads matched the filters — ${skippedInactive} inactive and ${skippedOld} created before the cutoff were skipped (${totalFetched} total in campaign). Turn off "Active only" or clear the date to include them.`
+      skippedOld > 0
+        ? `No ads matched — ${skippedOld} of ${totalFetched} were created before the cutoff date. Move the date earlier or clear it to include them.`
         : "No ads found under this campaign ID.";
     return NextResponse.json({ error: msg }, { status: 404 });
   }
 
-  return NextResponse.json({ ads, totalFetched, skippedInactive, skippedOld });
+  return NextResponse.json({ ads, totalFetched, skippedOld });
 }

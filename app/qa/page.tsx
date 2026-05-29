@@ -266,7 +266,6 @@ export default function QAPage() {
     campaignId: string;
     filter: string;
     filterScope: FilterScope;
-    activeOnly: boolean; // default true — skip paused/archived (stale past-promo) ad sets
     sinceDate: string;   // optional YYYY-MM-DD created-since cutoff
     loading: boolean;
     loaded: boolean;
@@ -278,7 +277,6 @@ export default function QAPage() {
     campaignId: "",
     filter: "",
     filterScope: "ad",
-    activeOnly: true,
     sinceDate: "",
     loading: false,
     loaded: false,
@@ -468,7 +466,6 @@ export default function QAPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           campaignId: row.campaignId.trim(),
-          activeOnly: row.activeOnly,
           sinceDate: row.sinceDate.trim() || undefined,
         }),
       });
@@ -511,14 +508,10 @@ export default function QAPage() {
         return nonEmpty.length > 0 ? [...nonEmpty, ...imported] : imported;
       });
 
-      const skippedInactive = data.skippedInactive ?? 0;
       const skippedOld = data.skippedOld ?? 0;
-      const skipParts: string[] = [];
-      if (skippedInactive > 0) skipParts.push(`${skippedInactive} inactive`);
-      if (skippedOld > 0) skipParts.push(`${skippedOld} created before cutoff`);
       const skipNote =
         `Loaded ${imported.length} ad${imported.length === 1 ? "" : "s"}` +
-        (skipParts.length ? ` · skipped ${skipParts.join(" + ")}` : "");
+        (skippedOld > 0 ? ` · skipped ${skippedOld} created before cutoff` : "");
 
       setCampaigns((prev) =>
         prev.map((c) => (c.id === rowId ? { ...c, loading: false, loaded: true, skipNote } : c))
@@ -1061,24 +1054,12 @@ export default function QAPage() {
                         ×
                       </button>
                     </div>
-                    {/* Active-only toggle + optional created-since cutoff. Active-only
-                        defaults ON so reused campaigns don't pull stale paused ad sets
-                        from past promos into the QA run. */}
+                    {/* Optional created-since cutoff. Set this to the start of the
+                        current promo so reused campaigns don't pull stale ad sets
+                        from past months into the QA run. */}
                     <div className="flex items-center flex-wrap gap-x-4 gap-y-1.5 pl-1">
-                      <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={row.activeOnly}
-                          onChange={(e) =>
-                            patchCampaignRow(row.id, { activeOnly: e.target.checked })
-                          }
-                          className="h-3.5 w-3.5 rounded border-gray-300 text-gray-900 focus:ring-gray-900"
-                        />
-                        Active ads only
-                        <span className="text-gray-400">(paused campaign still loads)</span>
-                      </label>
                       <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 select-none">
-                        Created since
+                        Only ads created since
                         <input
                           type="date"
                           value={row.sinceDate}
