@@ -515,21 +515,34 @@ export default function QAPage() {
     const filledUnits = units.filter((u) => u.link.trim());
     if (filledUnits.length === 0) return;
 
-    // Group units by the campaign they were imported from. Manually-typed units
-    // (no campaignId) form one extra group so they're still checked. Each group
-    // becomes its own /api/qa request, keeping every request small and well under
-    // Vercel's 300s limit, and letting results stream in campaign-by-campaign.
-    const groupsMap = new Map<string, AdUnit[]>();
+    // Split units into small fixed-size chunks. A whole campaign (e.g. 17+ ad
+    // units) in one /api/qa request makes the server run that many Claude calls
+    // at concurrency 2 inside a single function — which blows past Vercel's 300s
+    // limit and returns 504. Chunking to a few units keeps each request to a
+    // handful of Claude calls (~20-60s), safely under the limit, and lets
+    // results stream in chunk-by-chunk. Units are grouped by campaign first so a
+    // chunk's units share an origin (keeps within-chunk dedup meaningful) and the
+    // label stays readable.
+    const CHUNK_SIZE = 3;
+    const byCampaign = new Map<string, AdUnit[]>();
     for (const u of filledUnits) {
       const key = u.campaignId ?? "__manual__";
-      if (!groupsMap.has(key)) groupsMap.set(key, []);
-      groupsMap.get(key)!.push(u);
+      if (!byCampaign.has(key)) byCampaign.set(key, []);
+      byCampaign.get(key)!.push(u);
     }
-    const groups = Array.from(groupsMap.entries()).map(([key, us]) => ({
-      key,
-      label: key === "__manual__" ? "Manually added units" : `Campaign ${key}`,
-      units: us,
-    }));
+    const groups: { key: string; label: string; units: AdUnit[] }[] = [];
+    for (const [key, us] of Array.from(byCampaign.entries())) {
+      const campaignLabel = key === "__manual__" ? "Manually added units" : `Campaign ${key}`;
+      const chunkCount = Math.ceil(us.length / CHUNK_SIZE);
+      for (let c = 0; c < chunkCount; c++) {
+        const chunk = us.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE);
+        groups.push({
+          key: `${key}#${c}`,
+          label: chunkCount > 1 ? `${campaignLabel} (part ${c + 1}/${chunkCount})` : campaignLabel,
+          units: chunk,
+        });
+      }
+    }
 
     setLoading(true);
     setResult({ overall_status: "pass", units: [], critical_issues: [], notes: "" });
