@@ -70,7 +70,7 @@ export async function fetchCampaignAdsList(
 
   try {
     for (let page = 0; url && page < MAX_AD_PAGES; page++) {
-      const res: Response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      const res: Response = await fetch(url, { signal: AbortSignal.timeout(10000), cache: "no-store" });
       const data: {
         data?: {
           id: string;
@@ -336,7 +336,7 @@ export type FetchResult = {
 async function fetchAdsetPlacements(adsetId: string, accessToken: string): Promise<PlacementInfo | null> {
   try {
     const url = `${GRAPH_API}/${adsetId}?fields=targeting&access_token=${accessToken}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
     const data = await res.json();
     if (data.error || !data.targeting) return null;
     const t = data.targeting;
@@ -380,7 +380,7 @@ async function fetchBatchImageDimensions(
   try {
     const hashParam = encodeURIComponent(JSON.stringify(hashes));
     const url = `${GRAPH_API}/act_${accountId}/adimages?hashes=${hashParam}&fields=width,height,hash,url,permalink_url&access_token=${accessToken}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000), cache: "no-store" });
     const data = await res.json();
     if (data.error || !data.data?.length) return result;
     for (const img of data.data as Array<{ hash?: string; width?: number; height?: number; url?: string; permalink_url?: string }>) {
@@ -401,7 +401,7 @@ async function fetchBatchImageDimensions(
 async function fetchVideoDimensions(videoId: string, accessToken: string): Promise<ImageDimensions | null> {
   try {
     const url = `${GRAPH_API}/${videoId}?fields=format&access_token=${accessToken}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
     const data = await res.json();
     if (data.error || !data.format?.length) return null;
     type VideoFormat = { filter?: string; width?: number; height?: number };
@@ -438,7 +438,7 @@ async function fetchMusicStatus(
 ): Promise<"on" | "off" | "unknown"> {
   try {
     const url = `${GRAPH_API}/${adId}?fields=creative{asset_feed_spec{audios{type}}}&access_token=${accessToken}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
     const data = await res.json();
     if (data.error) return "unknown";
     const afs = data.creative?.asset_feed_spec;
@@ -476,7 +476,7 @@ export async function fetchAdContent(
 
   let data: AdResponse;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000), cache: "no-store" });
     data = await res.json();
   } catch (err) {
     return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null, formatInfo: null, creativeImageUrls: [], manualCheckItems: MANUAL_CHECK_ITEMS };

@@ -146,7 +146,7 @@ async function resizeForClaude(buf: Buffer): Promise<{ buf: Buffer; mediaType: I
 // Download a URL-based image server-side, resize, and return as base64.
 async function downloadUrlImage(url: string): Promise<FetchedImage | null> {
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) {
       console.log(`[qa] SKIP live Meta image — HTTP ${res.status} for ${url}`);
       return null;
