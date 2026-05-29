@@ -655,6 +655,7 @@ export default function QAPage() {
             {/* Label + cycling check name */}
             <div className="text-center space-y-3">
               <p className="text-sm font-semibold text-gray-900 tracking-wide">Running QA check</p>
+              <p className="text-xs text-gray-400">This usually takes 2–5 minutes. Hang tight.</p>
               <div style={{ height: 22, overflow: "hidden", position: "relative" }}>
                 <p key={checkIdx} className="qa-check-label text-sm text-gray-400">
                   Checking: {CHECK_NAMES[checkIdx]}
