@@ -4,6 +4,25 @@ export type CampaignAd = {
   id: string;
   name: string;
   adsetName: string;
+  effectiveStatus: string; // ACTIVE, PAUSED, ADSET_PAUSED, CAMPAIGN_PAUSED, ARCHIVED, ...
+  createdTime: string;      // ISO timestamp the ad was created
+};
+
+export type FetchAdsOptions = {
+  // When true (default), only ads whose effective_status is ACTIVE are returned.
+  // This is the main guard against stale ad sets from past months getting QA'd.
+  activeOnly?: boolean;
+  // Optional ISO date (YYYY-MM-DD). When set, ads created before this date are dropped.
+  sinceDate?: string;
+};
+
+export type FetchAdsResult = {
+  ads: CampaignAd[];
+  error: string | null;
+  // Counts so the UI can tell the user what was skipped and why.
+  totalFetched: number;
+  skippedInactive: number;
+  skippedOld: number;
 };
 
 export type PlacementInfo = {
@@ -36,17 +55,38 @@ export type FormatInfo = {
 const MAX_AD_PAGES = 10; // 10 pages × 200 = up to 2000 ads
 export async function fetchCampaignAdsList(
   campaignId: string,
-  accessToken: string
-): Promise<{ ads: CampaignAd[]; error: string | null }> {
+  accessToken: string,
+  options: FetchAdsOptions = {}
+): Promise<FetchAdsResult> {
+  // Active-only is the default. A campaign reused month over month accumulates
+  // paused ad sets from past promos; pulling those in QAs last year's June ads
+  // against this month's work order and reports false fails. Defaulting to
+  // ACTIVE keeps the run to what's actually serving.
+  const activeOnly = options.activeOnly ?? true;
+  // Optional hard date floor on ad creation. Parsed once; invalid input is ignored.
+  const sinceMs = options.sinceDate ? Date.parse(options.sinceDate) : NaN;
+  const hasSince = !Number.isNaN(sinceMs);
+
+  // Request effective_status + created_time so filtering happens on real signals,
+  // not a keyword that "june" also matches in last year's ad set names.
   let url: string | null =
-    `${GRAPH_API}/${campaignId}/ads?fields=id,name,adset{name}&limit=200&access_token=${accessToken}`;
+    `${GRAPH_API}/${campaignId}/ads?fields=id,name,adset{name},effective_status,created_time&limit=200&access_token=${accessToken}`;
   const ads: CampaignAd[] = [];
+  let totalFetched = 0;
+  let skippedInactive = 0;
+  let skippedOld = 0;
 
   try {
     for (let page = 0; url && page < MAX_AD_PAGES; page++) {
       const res: Response = await fetch(url, { signal: AbortSignal.timeout(10000) });
       const data: {
-        data?: { id: string; name: string; adset?: { name?: string } }[];
+        data?: {
+          id: string;
+          name: string;
+          adset?: { name?: string };
+          effective_status?: string;
+          created_time?: string;
+        }[];
         paging?: { next?: string };
         error?: { code?: number; message?: string };
       } = await res.json();
@@ -58,24 +98,44 @@ export async function fetchCampaignAdsList(
         if (code === 190) friendly = `Access token invalid or expired. Regenerate META_ACCESS_TOKEN.`;
         else if (code === 100) friendly = `Invalid campaign ID or bad request. Check the ID and try again.`;
         else if (code === 200) friendly = `Token missing required permissions (needs ads_read or ads_management).`;
-        return { ads: [], error: friendly };
+        return { ads: [], error: friendly, totalFetched, skippedInactive, skippedOld };
       }
 
-      for (const ad of (data.data ?? []) as {
-        id: string;
-        name: string;
-        adset?: { name?: string };
-      }[]) {
-        ads.push({ id: ad.id, name: ad.name, adsetName: ad.adset?.name ?? "" });
+      for (const ad of data.data ?? []) {
+        totalFetched++;
+        const effectiveStatus = ad.effective_status ?? "UNKNOWN";
+        const createdTime = ad.created_time ?? "";
+
+        // Drop anything not actively serving when active-only is on.
+        if (activeOnly && effectiveStatus !== "ACTIVE") {
+          skippedInactive++;
+          continue;
+        }
+        // Drop ads created before the cutoff date when one is set.
+        if (hasSince) {
+          const createdMs = createdTime ? Date.parse(createdTime) : NaN;
+          if (Number.isNaN(createdMs) || createdMs < sinceMs) {
+            skippedOld++;
+            continue;
+          }
+        }
+
+        ads.push({
+          id: ad.id,
+          name: ad.name,
+          adsetName: ad.adset?.name ?? "",
+          effectiveStatus,
+          createdTime,
+        });
       }
 
       // Follow the cursor Meta returns; absent when there are no more pages.
       url = data.paging?.next ?? null;
     }
 
-    return { ads, error: null };
+    return { ads, error: null, totalFetched, skippedInactive, skippedOld };
   } catch (err) {
-    return { ads: [], error: `Network error: ${(err as Error).message}` };
+    return { ads: [], error: `Network error: ${(err as Error).message}`, totalFetched, skippedInactive, skippedOld };
   }
 }
 

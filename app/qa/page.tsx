@@ -266,27 +266,45 @@ export default function QAPage() {
     campaignId: string;
     filter: string;
     filterScope: FilterScope;
+    activeOnly: boolean; // default true — skip paused/archived (stale past-promo) ad sets
+    sinceDate: string;   // optional YYYY-MM-DD created-since cutoff
     loading: boolean;
     loaded: boolean;
     error: string;
+    skipNote: string;    // post-load summary of what was filtered out
   };
-  const [campaigns, setCampaigns] = useState<CampaignRow[]>([
-    { id: "c1", campaignId: "", filter: "", filterScope: "ad", loading: false, loaded: false, error: "" },
-  ]);
+  const newCampaignRow = (id: string): CampaignRow => ({
+    id,
+    campaignId: "",
+    filter: "",
+    filterScope: "ad",
+    activeOnly: true,
+    sinceDate: "",
+    loading: false,
+    loaded: false,
+    error: "",
+    skipNote: "",
+  });
+  const [campaigns, setCampaigns] = useState<CampaignRow[]>([newCampaignRow("c1")]);
 
   function addCampaignRow() {
-    setCampaigns((prev) => [
-      ...prev,
-      { id: String(Date.now()), campaignId: "", filter: "", filterScope: "ad", loading: false, loaded: false, error: "" },
-    ]);
+    setCampaigns((prev) => [...prev, newCampaignRow(String(Date.now()))]);
   }
 
   function removeCampaignRow(id: string) {
     if (campaigns.length <= 1) {
-      setCampaigns([{ id: "c1", campaignId: "", filter: "", filterScope: "ad", loading: false, loaded: false, error: "" }]);
+      setCampaigns([newCampaignRow("c1")]);
     } else {
       setCampaigns((prev) => prev.filter((c) => c.id !== id));
     }
+  }
+
+  function patchCampaignRow(id: string, patch: Partial<CampaignRow>) {
+    setCampaigns((prev) =>
+      prev.map((c) =>
+        c.id === id ? { ...c, ...patch, error: "", loaded: false, skipNote: "" } : c
+      )
+    );
   }
 
   function updateCampaignRow(
@@ -294,9 +312,7 @@ export default function QAPage() {
     field: "campaignId" | "filter" | "filterScope",
     value: string
   ) {
-    setCampaigns((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, [field]: value, error: "", loaded: false } : c))
-    );
+    patchCampaignRow(id, { [field]: value } as Partial<CampaignRow>);
   }
 
   function addUnit() {
@@ -450,7 +466,11 @@ export default function QAPage() {
       const res = await fetch("/api/campaign-ads", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ campaignId: row.campaignId.trim() }),
+        body: JSON.stringify({
+          campaignId: row.campaignId.trim(),
+          activeOnly: row.activeOnly,
+          sinceDate: row.sinceDate.trim() || undefined,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to load campaign ads");
@@ -491,8 +511,17 @@ export default function QAPage() {
         return nonEmpty.length > 0 ? [...nonEmpty, ...imported] : imported;
       });
 
+      const skippedInactive = data.skippedInactive ?? 0;
+      const skippedOld = data.skippedOld ?? 0;
+      const skipParts: string[] = [];
+      if (skippedInactive > 0) skipParts.push(`${skippedInactive} inactive`);
+      if (skippedOld > 0) skipParts.push(`${skippedOld} created before cutoff`);
+      const skipNote =
+        `Loaded ${imported.length} ad${imported.length === 1 ? "" : "s"}` +
+        (skipParts.length ? ` · skipped ${skipParts.join(" + ")}` : "");
+
       setCampaigns((prev) =>
-        prev.map((c) => (c.id === rowId ? { ...c, loading: false, loaded: true } : c))
+        prev.map((c) => (c.id === rowId ? { ...c, loading: false, loaded: true, skipNote } : c))
       );
     } catch (err) {
       setCampaigns((prev) =>
@@ -724,9 +753,7 @@ export default function QAPage() {
       { id: "1", name: "", link: "" },
       { id: "2", name: "", link: "" },
     ]);
-    setCampaigns([
-      { id: "c1", campaignId: "", filter: "", filterScope: "ad", loading: false, loaded: false, error: "" },
-    ]);
+    setCampaigns([newCampaignRow("c1")]);
     setResult(null);
     setError("");
     setProgress({ done: 0, total: 0 });
@@ -1010,6 +1037,46 @@ export default function QAPage() {
                         ×
                       </button>
                     </div>
+                    {/* Active-only toggle + optional created-since cutoff. Active-only
+                        defaults ON so reused campaigns don't pull stale paused ad sets
+                        from past promos into the QA run. */}
+                    <div className="flex items-center flex-wrap gap-x-4 gap-y-1.5 pl-1">
+                      <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={row.activeOnly}
+                          onChange={(e) =>
+                            patchCampaignRow(row.id, { activeOnly: e.target.checked })
+                          }
+                          className="h-3.5 w-3.5 rounded border-gray-300 text-gray-900 focus:ring-gray-900"
+                        />
+                        Active ads only
+                      </label>
+                      <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 select-none">
+                        Created since
+                        <input
+                          type="date"
+                          value={row.sinceDate}
+                          onChange={(e) =>
+                            patchCampaignRow(row.id, { sinceDate: e.target.value })
+                          }
+                          className="px-2 py-1 rounded-lg border border-gray-200 bg-gray-50 text-xs text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
+                        />
+                        {row.sinceDate && (
+                          <button
+                            type="button"
+                            onClick={() => patchCampaignRow(row.id, { sinceDate: "" })}
+                            className="text-gray-400 hover:text-gray-700"
+                            title="Clear date"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </label>
+                    </div>
+                    {row.skipNote && !row.error && (
+                      <p className="text-xs text-emerald-700 pl-1">{row.skipNote}</p>
+                    )}
                     {row.error && (
                       <p className="text-xs text-red-600 pl-1">{row.error}</p>
                     )}
