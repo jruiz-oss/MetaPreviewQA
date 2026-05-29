@@ -264,6 +264,7 @@ type CreativeFields = {
     videos?: Array<{ video_id?: string; url?: string; thumbnail_url?: string }>;
     audios?: Array<{ type?: string }>; // non-empty = Add Music is ON (music lives here, not in degrees_of_freedom_spec)
     ad_formats?: string[];
+    optimization_type?: string; // ASSET_CUSTOMIZATION | PLACEMENT | LANGUAGE | REGULAR | FORMAT_AUTOMATION
   };
 };
 
@@ -422,7 +423,7 @@ export async function fetchAdContent(
     // Permission, and because Graph fails the whole request on a single forbidden field, that
     // one field would fail the entire ad read. Music status is fetched separately in
     // fetchMusicStatus() so it degrades to "unknown" instead of nuking the creative read.
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},ad_formats},degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},ad_formats,optimization_type},degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -518,21 +519,87 @@ export async function fetchAdContent(
   const adFormats = data.creative?.asset_feed_spec?.ad_formats ?? [];
   const formatInfo: FormatInfo = { placements, creativeDimensions, adFormats };
 
-  // Collect image/thumbnail URLs for visual QA (deduplicated, max 6)
+  // --- Select which creative images to send for visual QA -----------------
+  // A single-image ad serves ONE creative, but its asset_feed_spec.images pool
+  // can still contain several assets: legitimate per-placement SIZE variants
+  // (1:1, 4:5, 9:16) AND stale leftovers from earlier creative edits. OCR'ing
+  // the stale ones makes the model report offers/dates that are not in the live
+  // ad — the "text nowhere to be found" false positives. Carousels genuinely
+  // have many images (their cards), so they must NOT be collapsed.
+  //
+  // Fix: for non-carousel ads, dedupe candidate images by exact WxH. Distinct
+  // sizes (all current) are kept; same-size duplicates (the stale smell)
+  // collapse to one, preferring the concrete published image when present.
+  const isCarousel =
+    !!data.creative?.object_story_spec?.link_data?.child_attachments?.length ||
+    adFormats.some((f) => f.toUpperCase().includes("CAROUSEL"));
+
+  type ImgCandidate = { url: string; hash?: string; width?: number; height?: number };
+  const feedImageCandidates: ImgCandidate[] = [];
+  for (const img of data.creative?.asset_feed_spec?.images ?? []) {
+    const dims = img.hash ? dimMap.get(img.hash) : undefined;
+    const url = img.url ?? dims?.url;
+    if (url) feedImageCandidates.push({ url, hash: img.hash, width: dims?.width, height: dims?.height });
+  }
+  // Hash-based single-image ads (object_story_spec / top-level image_hash) carry no URL
+  // in the creative spec — pull the viewable URL resolved from the AdImages endpoint so
+  // these statics still get a visual check.
+  for (const hash of allHashes) {
+    const dims = dimMap.get(hash);
+    if (dims?.url && !feedImageCandidates.some((c) => c.hash === hash)) {
+      feedImageCandidates.push({ url: dims.url, hash, width: dims.width, height: dims.height });
+    }
+  }
+
+  const publishedHash = singleHash; // the concrete published image, when the ad has one
+
+  let chosenImageCandidates: ImgCandidate[];
+  if (isCarousel) {
+    chosenImageCandidates = feedImageCandidates; // keep every card
+  } else {
+    // Dedupe by exact WxH. Within a size bucket prefer the published image,
+    // else the first seen. Images with unknown dimensions are each kept (we
+    // can't prove they're duplicates) and de-duplicated by URL below.
+    const bySize = new Map<string, ImgCandidate>();
+    const unknownDim: ImgCandidate[] = [];
+    for (const c of feedImageCandidates) {
+      if (c.width && c.height) {
+        const key = `${c.width}x${c.height}`;
+        const existing = bySize.get(key);
+        if (!existing) bySize.set(key, c);
+        else if (publishedHash && c.hash === publishedHash) bySize.set(key, c);
+      } else {
+        unknownDim.push(c);
+      }
+    }
+    chosenImageCandidates = [...Array.from(bySize.values()), ...unknownDim];
+  }
+
+  // Build the final URL list: chosen images first, then video thumbnails.
+  const MAX_QA_IMAGES = 6;
   const seenUrls = new Set<string>();
   const creativeImageUrls: string[] = [];
   function addUrl(u: string | undefined | null) {
-    if (u && !seenUrls.has(u) && creativeImageUrls.length < 6) {
+    if (u && !seenUrls.has(u) && creativeImageUrls.length < MAX_QA_IMAGES) {
       seenUrls.add(u);
       creativeImageUrls.push(u);
     }
   }
-  for (const img of data.creative?.asset_feed_spec?.images ?? []) addUrl(img.url);
+  for (const c of chosenImageCandidates) addUrl(c.url);
   for (const vid of data.creative?.asset_feed_spec?.videos ?? []) addUrl(vid.thumbnail_url);
-  // Hash-based single-image ads (object_story_spec / top-level image_hash) carry no URL
-  // in the creative spec — pull the viewable URL resolved from the AdImages endpoint so
-  // these statics still get a visual check.
-  for (const hash of allHashes) addUrl(dimMap.get(hash)?.url);
+
+  // Diagnostic: shows how the image pool was reduced, with sizes — confirms in
+  // production whether the extra images were stale same-size dupes or legit
+  // per-placement size variants. Remove once dedup behaviour is confirmed.
+  const optType = data.creative?.asset_feed_spec?.optimization_type ?? "n/a";
+  const poolSizes = feedImageCandidates
+    .map((c) => (c.width && c.height ? `${c.width}x${c.height}` : "??"))
+    .join(",");
+  console.log(
+    `[meta-api][img] ad=${adId} name="${data.name ?? ""}" carousel=${isCarousel} ` +
+      `optimization_type=${optType} pool=${feedImageCandidates.length} [${poolSizes}] ` +
+      `published_hash=${publishedHash ? "yes" : "no"} → chosen=${creativeImageUrls.length}`
+  );
 
   return {
     content: formatted,

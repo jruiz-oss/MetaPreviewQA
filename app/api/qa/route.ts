@@ -73,7 +73,7 @@ For each check, assign one of:
 - "warning" — possible issue or couldn't fully verify
 - "unknown" — data not available (only valid for ai_enhancements and format_size)
 
-BREVITY IS REQUIRED. Every "note" and "summary" field must be a single sentence of 25 words or fewer. Do not list multiple issues in one note — pick the most important one. Do not use numbered lists inside note fields.
+BE CONCISE BUT COMPLETE. Keep notes tight — roughly one short sentence per issue. If a check has more than one genuine problem, report ALL of them in that check's note (separate with "; "), most important first. Never drop a real issue for the sake of brevity — missing a defect is worse than a slightly longer note. Keep "summary" to one sentence. Do not use numbered lists inside note fields.
 
 IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exact structure:
 
@@ -514,6 +514,16 @@ export async function POST(request: Request) {
         message = await client.messages.create({
           model: "claude-sonnet-4-6",
           max_tokens: 16000,
+          // Extended thinking: give the model a private scratchpad to do the
+          // multi-step work this QA demands (extract all legible text from each
+          // image, then diff the two; reason about dates/format) BEFORE it
+          // commits to JSON. This materially cuts missed mismatches and
+          // hallucinated findings. Thinking tokens bill as output — the
+          // intentional "spend a little more for accuracy" trade.
+          // NOTE: the API requires temperature=1 (the default) whenever
+          // thinking is enabled, so temperature is intentionally not set.
+          // budget_tokens must be < max_tokens.
+          thinking: { type: "enabled", budget_tokens: 3000 },
           // Cache the large, unchanging system prompt so it is billed at full
           // price only once (~5 min TTL); subsequent batches/runs read it at
           // ~10% cost. cache_control marks the end of the cached prefix.
@@ -571,7 +581,11 @@ export async function POST(request: Request) {
       );
     }
 
-    const raw = message.content[0].type === "text" ? message.content[0].text : "";
+    // With extended thinking enabled, the first content block is a "thinking"
+    // block — the JSON we want lives in the (usually last) "text" block, so
+    // find it explicitly rather than assuming content[0].
+    const textBlock = message.content.find((b) => b.type === "text");
+    const raw = textBlock && textBlock.type === "text" ? textBlock.text : "";
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON object found in model response");
 
