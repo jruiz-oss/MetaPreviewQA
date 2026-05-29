@@ -212,37 +212,55 @@ export async function POST(request: Request) {
     );
   }
 
-  // Resolve each unit: extract ad ID → fetch from Meta API
-  const unitContents = await Promise.all(
-    units.map(async (unit) => {
-      const adId = await resolveAdId(unit.link);
-      if (!adId) {
-        return {
-          ...unit,
-          content: null,
-          note: "Could not extract an ad ID from this URL.",
-        };
-      }
-
-      const { content, error, aiEnhancements, formatInfo, creativeImageUrls, manualCheckItems } = await fetchAdContent(adId, accessToken);
-
-      // Download live Meta images server-side so we can pass them as base64
-      // (Meta CDN URLs are blocked by robots.txt when passed directly to Claude).
-      const creativeImages: FetchedImage[] = (
-        await Promise.all((creativeImageUrls ?? []).map(downloadUrlImage))
-      ).filter((img): img is FetchedImage => img !== null);
-
+  // Resolve each unit: extract ad ID → fetch from Meta API.
+  // Each fetchAdContent fans out to several Meta sub-requests, so resolving every
+  // unit at once would fire hundreds/thousands of concurrent requests on a large
+  // campaign and trip Meta's rate limits. Run through a bounded worker pool
+  // instead; results are written back by index to preserve unit order.
+  async function resolveUnit(unit: AdUnit) {
+    const adId = await resolveAdId(unit.link);
+    if (!adId) {
       return {
         ...unit,
-        content,
-        aiEnhancements,
-        formatInfo,
-        creativeImageUrls,
-        creativeImages,
-        manualCheckItems,
-        note: content ? null : (error ?? "Meta API returned no content."),
+        adId: null,
+        content: null,
+        note: "Could not extract an ad ID from this URL.",
       };
-    })
+    }
+
+    const { content, error, aiEnhancements, formatInfo, creativeImageUrls, manualCheckItems } = await fetchAdContent(adId, accessToken);
+
+    // Download live Meta images server-side so we can pass them as base64
+    // (Meta CDN URLs are blocked by robots.txt when passed directly to Claude).
+    const creativeImages: FetchedImage[] = (
+      await Promise.all((creativeImageUrls ?? []).map(downloadUrlImage))
+    ).filter((img): img is FetchedImage => img !== null);
+
+    return {
+      ...unit,
+      adId,
+      content,
+      aiEnhancements,
+      formatInfo,
+      creativeImageUrls,
+      creativeImages,
+      manualCheckItems,
+      note: content ? null : (error ?? "Meta API returned no content."),
+    };
+  }
+
+  const MAX_CONCURRENT_META_FETCHES = 8;
+  const unitContents: Awaited<ReturnType<typeof resolveUnit>>[] = new Array(units.length);
+  let nextUnitIndex = 0;
+  const metaWorker = async (): Promise<void> => {
+    while (true) {
+      const i = nextUnitIndex++;
+      if (i >= units.length) return;
+      unitContents[i] = await resolveUnit(units[i]);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(MAX_CONCURRENT_META_FETCHES, units.length) }, () => metaWorker())
   );
 
   // Build labeled source docs section
@@ -510,8 +528,19 @@ export async function POST(request: Request) {
       throw parseErr;
     }
 
+    // Attach the resolved ad ID to each result unit so the report can show a
+    // copy/paste-able ID. The model output isn't trusted to echo it — we map by
+    // index back to the batch's input units (one unit per batch here), falling
+    // back to the first unit's ID for any extra result units the model emits.
+    const resultUnits = (parsed.units ?? []).map(
+      (u: Record<string, unknown>, idx: number) => ({
+        ...u,
+        adId: batchUnits[idx]?.adId ?? batchUnits[0]?.adId ?? null,
+      })
+    );
+
     return {
-      units: parsed.units ?? [],
+      units: resultUnits,
       critical_issues: parsed.critical_issues ?? [],
       notes: parsed.notes ?? "",
     };
