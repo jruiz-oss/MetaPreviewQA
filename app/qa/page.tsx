@@ -157,7 +157,7 @@ function StatusBadge({ status }: { status: string }) {
     unknown: "N/A",
   };
   return (
-    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${styles[status] ?? styles.unknown}`}>
+    <span className={`pdf-badge text-xs font-medium px-2 py-0.5 rounded-full ${styles[status] ?? styles.unknown}`}>
       {labels[status] ?? status}
     </span>
   );
@@ -184,7 +184,7 @@ function AdIdBadge({ adId }: { adId: string }) {
       type="button"
       onClick={copy}
       title="Copy ad ID"
-      className="group inline-flex items-center gap-1.5 rounded-md bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-600 hover:bg-gray-200 select-all"
+      className="pdf-badge group inline-flex items-center gap-1.5 rounded-md bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-600 hover:bg-gray-200 select-all"
     >
       <span>{adId}</span>
       <span className="text-gray-400 group-hover:text-gray-600 select-none">
@@ -619,6 +619,25 @@ export default function QAPage() {
     setLoading(false);
   }
 
+  // Derive a filename-safe WO identifier from the pasted WO text. Looks for an
+  // explicit work-order number ("WO #1234", "WO-1234", "Work Order 1234", "WO1234")
+  // first; otherwise falls back to the first non-empty line (e.g. campaign name),
+  // truncated. Returns "" if nothing usable is found.
+  function woFileSlug(text: string): string {
+    if (!text) return "";
+    const num = text.match(/\b(?:w\.?o\.?|work\s*order|job)\b[\s#:.-]*([a-z0-9][a-z0-9-]{1,20})/i);
+    let raw = num ? `WO-${num[1]}` : "";
+    if (!raw) {
+      const firstLine = text.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";
+      raw = firstLine.slice(0, 40);
+    }
+    return raw
+      .replace(/https?:\/\/\S+/g, "")
+      .replace(/[^a-z0-9]+/gi, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40);
+  }
+
   // Capture the rendered results block as an image and save it as a multi-page
   // PDF — a visual snapshot the reviewer can send to the team. Libraries load
   // from CDN on first click.
@@ -637,6 +656,23 @@ export default function QAPage() {
         backgroundColor: "#f8f8f6",
         useCORS: true,
         logging: false,
+        // html2canvas mis-positions text in tight, padded pills (renders it
+        // shifted up, poking out of the rounded background). Inject a capture-
+        // only stylesheet that vertically centers badge text with a relaxed
+        // line-height. Only affects the clone used for capture, not the app.
+        onclone: (doc: Document) => {
+          const style = doc.createElement("style");
+          style.textContent = `
+            .pdf-badge {
+              display: inline-flex !important;
+              align-items: center !important;
+              line-height: 1 !important;
+              padding-top: 3px !important;
+              padding-bottom: 3px !important;
+            }
+          `;
+          doc.head.appendChild(style);
+        },
       });
 
       const imgData = canvas.toDataURL("image/png");
@@ -657,7 +693,8 @@ export default function QAPage() {
         heightLeft -= pageH;
       }
       const stamp = new Date().toISOString().slice(0, 10);
-      pdf.save(`vera-qa-results-${stamp}.pdf`);
+      const woSlug = woFileSlug(wo);
+      pdf.save(`vera-qa-${woSlug ? `${woSlug}-` : "results-"}${stamp}.pdf`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not generate PDF.");
     } finally {
@@ -1224,7 +1261,7 @@ export default function QAPage() {
                             {unit.name}
                           </h3>
                           {grouped && (
-                            <span className="text-xs font-medium text-gray-500 bg-gray-100 rounded-full px-2 py-0.5">
+                            <span className="pdf-badge text-xs font-medium text-gray-500 bg-gray-100 rounded-full px-2 py-0.5">
                               ×{members.length} identical ads
                             </span>
                           )}
