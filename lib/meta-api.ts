@@ -1,3 +1,4 @@
+// Meta Graph API base. Bump this comment to trigger a fresh deploy when needed.
 const GRAPH_API = "https://graph.facebook.com/v23.0";
 
 export type CampaignAd = {
