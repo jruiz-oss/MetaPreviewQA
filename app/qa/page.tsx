@@ -975,12 +975,37 @@ export default function QAPage() {
             {(() => {
               const allIssues = consolidateCriticalIssues(result.units);
               if (allIssues.length === 0) return null;
-              // Advantage+ AI enhancements aren't hard failures — they need a
-              // manual look in Ads Manager. Split them into their own yellow
-              // "Manual review" panel beside the red critical issues.
+
+              // Split the Advantage+ AI-enhancements note. Enhancements the API
+              // confirmed ON are a real finding and stay in the red Critical
+              // issues card. The trailing "must be checked manually in Ads
+              // Manager" reminder is the only part that moves to the small
+              // yellow side note — anything that's purely manual goes yellow.
               const manualLabel = CHECK_LABELS.ai_enhancements;
-              const issues = allIssues.filter((i) => i.label !== manualLabel);
-              const manual = allIssues.filter((i) => i.label === manualLabel);
+              const manualRe =
+                /\s*(Manual check also required|The following must (?:still )?be verified manually|API enhancement data unavailable)/i;
+
+              const issues: ConsolidatedIssue[] = [];
+              let manualNote = "";
+              for (const issue of allIssues) {
+                if (issue.label !== manualLabel) {
+                  issues.push(issue);
+                  continue;
+                }
+                const m = issue.detail.match(manualRe);
+                if (m && m.index !== undefined) {
+                  const before = issue.detail.slice(0, m.index).trim();
+                  manualNote = issue.detail.slice(m.index).trim();
+                  // Keep in red only if something was actually detected ON.
+                  if (/\bON\b/.test(before)) {
+                    issues.push({ ...issue, detail: before });
+                  }
+                } else {
+                  // No manual tail — treat the whole thing as a finding.
+                  issues.push(issue);
+                }
+              }
+
               return (
                 <div className="flex flex-col md:flex-row gap-4 items-start">
                   {issues.length > 0 && (
@@ -1006,27 +1031,14 @@ export default function QAPage() {
                       </ul>
                     </div>
                   )}
-                  {manual.length > 0 && (
-                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 flex-1 min-w-0 md:max-w-sm">
-                      <p className="text-sm font-semibold text-amber-700 mb-2">
+                  {manualNote && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 shrink-0 md:w-60 md:max-w-xs">
+                      <p className="text-xs font-semibold text-amber-700 mb-1">
                         Manual review
                       </p>
-                      <ul className="space-y-2">
-                        {manual.map((issue, i) => (
-                          <li key={i} className="text-sm text-amber-700 flex gap-2">
-                            <span className="shrink-0">•</span>
-                            <span>
-                              <span className="font-medium">{issue.label}</span>
-                              {issue.detail ? ` — ${issue.detail}` : ""}
-                              <span className="block text-xs text-amber-600/80 mt-0.5">
-                                Affects {issue.units.length}{" "}
-                                {issue.units.length === 1 ? "ad" : "ads"}:{" "}
-                                {issue.units.join(", ")}
-                              </span>
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
+                      <p className="text-xs text-amber-700/90 leading-snug">
+                        {manualNote}
+                      </p>
                     </div>
                   )}
                 </div>
