@@ -25,6 +25,7 @@ type CheckResult = {
 
 type UnitResult = {
   name: string;
+  adId?: string | null;
   status: "pass" | "fail" | "warning";
   checks: {
     copy_creative_alignment: CheckResult;
@@ -127,6 +128,37 @@ function StatusBadge({ status }: { status: string }) {
     <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${styles[status] ?? styles.unknown}`}>
       {labels[status] ?? status}
     </span>
+  );
+}
+
+// Small monospace ad ID with a one-click copy button, so reviewers can grab the
+// exact ID to double-check an ad in Ads Manager without retyping it.
+function AdIdBadge({ adId }: { adId: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(adId);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API unavailable (e.g. non-secure context) — the text is still
+      // selectable, so the user can copy manually.
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      title="Copy ad ID"
+      className="group inline-flex items-center gap-1.5 rounded-md bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-600 hover:bg-gray-200 select-all"
+    >
+      <span>{adId}</span>
+      <span className="text-gray-400 group-hover:text-gray-600 select-none">
+        {copied ? "✓" : "⧉"}
+      </span>
+    </button>
   );
 }
 
@@ -941,29 +973,62 @@ export default function QAPage() {
                 with the list of affected ad units, instead of repeating the
                 same issue once per ad. */}
             {(() => {
-              const issues = consolidateCriticalIssues(result.units);
-              if (issues.length === 0) return null;
+              const allIssues = consolidateCriticalIssues(result.units);
+              if (allIssues.length === 0) return null;
+              // Advantage+ AI enhancements aren't hard failures — they need a
+              // manual look in Ads Manager. Split them into their own yellow
+              // "Manual review" panel beside the red critical issues.
+              const manualLabel = CHECK_LABELS.ai_enhancements;
+              const issues = allIssues.filter((i) => i.label !== manualLabel);
+              const manual = allIssues.filter((i) => i.label === manualLabel);
               return (
-                <div className="bg-red-50 border border-red-200 rounded-2xl p-5">
-                  <p className="text-sm font-semibold text-red-700 mb-2">
-                    Critical issues
-                  </p>
-                  <ul className="space-y-2">
-                    {issues.map((issue, i) => (
-                      <li key={i} className="text-sm text-red-600 flex gap-2">
-                        <span className="shrink-0">•</span>
-                        <span>
-                          <span className="font-medium">{issue.label}</span>
-                          {issue.detail ? ` — ${issue.detail}` : ""}
-                          <span className="block text-xs text-red-500/80 mt-0.5">
-                            Affects {issue.units.length}{" "}
-                            {issue.units.length === 1 ? "ad" : "ads"}:{" "}
-                            {issue.units.join(", ")}
-                          </span>
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
+                <div className="flex flex-col md:flex-row gap-4 items-start">
+                  {issues.length > 0 && (
+                    <div className="bg-red-50 border border-red-200 rounded-2xl p-5 flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-red-700 mb-2">
+                        Critical issues
+                      </p>
+                      <ul className="space-y-2">
+                        {issues.map((issue, i) => (
+                          <li key={i} className="text-sm text-red-600 flex gap-2">
+                            <span className="shrink-0">•</span>
+                            <span>
+                              <span className="font-medium">{issue.label}</span>
+                              {issue.detail ? ` — ${issue.detail}` : ""}
+                              <span className="block text-xs text-red-500/80 mt-0.5">
+                                Affects {issue.units.length}{" "}
+                                {issue.units.length === 1 ? "ad" : "ads"}:{" "}
+                                {issue.units.join(", ")}
+                              </span>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {manual.length > 0 && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 flex-1 min-w-0 md:max-w-sm">
+                      <p className="text-sm font-semibold text-amber-700 mb-2">
+                        Manual review
+                      </p>
+                      <ul className="space-y-2">
+                        {manual.map((issue, i) => (
+                          <li key={i} className="text-sm text-amber-700 flex gap-2">
+                            <span className="shrink-0">•</span>
+                            <span>
+                              <span className="font-medium">{issue.label}</span>
+                              {issue.detail ? ` — ${issue.detail}` : ""}
+                              <span className="block text-xs text-amber-600/80 mt-0.5">
+                                Affects {issue.units.length}{" "}
+                                {issue.units.length === 1 ? "ad" : "ads"}:{" "}
+                                {issue.units.join(", ")}
+                              </span>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               );
             })()}
@@ -974,10 +1039,17 @@ export default function QAPage() {
                 key={i}
                 className="bg-white rounded-2xl border border-gray-200 overflow-hidden"
               >
-                <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-                  <h3 className="text-sm font-semibold text-gray-900">
-                    {unit.name}
-                  </h3>
+                <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-gray-100">
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-semibold text-gray-900">
+                      {unit.name}
+                    </h3>
+                    {unit.adId && (
+                      <div className="mt-1.5">
+                        <AdIdBadge adId={unit.adId} />
+                      </div>
+                    )}
+                  </div>
                   <StatusBadge status={unit.status} />
                 </div>
                 <div className="px-6 py-2">
