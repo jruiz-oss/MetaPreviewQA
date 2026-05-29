@@ -1007,9 +1007,9 @@ export default function QAPage() {
               }
 
               return (
-                <div className="flex flex-col md:flex-row gap-4 items-start">
+                <div className="flex flex-col gap-3 items-start">
                   {issues.length > 0 && (
-                    <div className="bg-red-50 border border-red-200 rounded-2xl p-5 flex-1 min-w-0">
+                    <div className="bg-red-50 border border-red-200 rounded-2xl p-5 w-full">
                       <p className="text-sm font-semibold text-red-700 mb-2">
                         Critical issues
                       </p>
@@ -1032,7 +1032,7 @@ export default function QAPage() {
                     </div>
                   )}
                   {manualNote && (
-                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 shrink-0 md:w-60 md:max-w-xs">
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 w-full md:max-w-md">
                       <p className="text-xs font-semibold text-amber-700 mb-1">
                         Manual review
                       </p>
