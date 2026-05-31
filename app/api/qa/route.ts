@@ -189,16 +189,24 @@ const MAX_IMAGE_BYTES = 4_500_000;
 // at q75 blurred small text into an illegible smear, which caused the model to GUESS
 // at dates/copy that weren't actually legible (hallucinated date/text findings).
 const MAX_SIDE = 1568;
-async function resizeForClaude(buf: Buffer): Promise<{ buf: Buffer; mediaType: ImageMediaType }> {
+async function resizeForClaude(buf: Buffer): Promise<{ buf: Buffer; mediaType: ImageMediaType } | null> {
   try {
+    // Validate it's actually a raster image first. A non-image (HTML error page,
+    // a tracking pixel, a preview-scrape false positive) has no decodable
+    // metadata and must NOT be sent to Claude — doing so returns a 400
+    // "Could not process image" that fails the entire batch. The previous
+    // version fell back to passing the raw bytes through, which is exactly what
+    // caused that crash. Now: if it can't be decoded, we skip it (return null).
+    const meta = await sharp(buf).metadata();
+    if (!meta.width || !meta.height) return null;
     const resized = await sharp(buf)
       .resize(MAX_SIDE, MAX_SIDE, { fit: "inside", withoutEnlargement: true })
       .jpeg({ quality: 88 })
       .toBuffer();
     return { buf: resized, mediaType: "image/jpeg" };
   } catch {
-    // If sharp fails (unsupported format etc.) fall back to original
-    return { buf, mediaType: "image/jpeg" };
+    // Unsupported / corrupt / not-an-image — skip rather than send invalid bytes.
+    return null;
   }
 }
 
@@ -211,7 +219,12 @@ async function downloadUrlImage(url: string): Promise<FetchedImage | null> {
       return null;
     }
     const rawBuf = Buffer.from(await res.arrayBuffer());
-    const { buf, mediaType } = await resizeForClaude(rawBuf);
+    const resized = await resizeForClaude(rawBuf);
+    if (!resized) {
+      console.log(`[qa] SKIP live Meta image — not a decodable image: ${url}`);
+      return null;
+    }
+    const { buf, mediaType } = resized;
     const name = url.split("/").pop()?.split("?")[0] ?? "meta-creative.jpg";
     console.log(`[qa] DOWNLOADED live Meta image "${name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${(buf.length / 1024).toFixed(0)} KB resized).`);
     return { name, mediaType, data: buf.toString("base64") };
@@ -240,7 +253,12 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<FetchedImage[
           { responseType: "arraybuffer" }
         );
         const rawBuf = Buffer.from(res.data as ArrayBuffer);
-        const { buf, mediaType: resizedType } = await resizeForClaude(rawBuf);
+        const resized = await resizeForClaude(rawBuf);
+        if (!resized) {
+          console.log(`[qa] SKIP image "${ref.name}" — not a decodable image.`);
+          return null;
+        }
+        const { buf, mediaType: resizedType } = resized;
         console.log(`[qa] DOWNLOADED image "${ref.name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${(buf.length / 1024).toFixed(0)} KB resized) → cross-referenced.`);
         return { name: ref.name, mediaType: resizedType, data: buf.toString("base64") };
       } catch (err) {
