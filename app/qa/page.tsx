@@ -780,8 +780,11 @@ export default function QAPage() {
       </header>
 
       <main className="max-w-3xl mx-auto px-6 py-8">
-        {loading && (!result || result.units.length === 0) ? (
+        {loading ? (
           /* ── QA Running Animation ─────────────────────────── */
+          /* Stays up for the ENTIRE run (all campaigns) so partial results
+             never render as a finished-looking verdict. Results appear all at
+             once when loading flips false. */
           <div className="flex flex-col items-center justify-center min-h-[62vh] gap-8 select-none">
             {/* Orbital ring system */}
             <div className="relative flex items-center justify-center" style={{ width: 160, height: 160 }}>
@@ -824,6 +827,11 @@ export default function QAPage() {
             <div className="text-center space-y-3">
               <p className="text-sm font-semibold text-gray-900 tracking-wide">Running QA check</p>
               <p className="text-xs text-gray-400">This usually takes 2–5 minutes. Hang tight.</p>
+              {progress.total > 0 && (
+                <p className="text-sm font-semibold text-gray-700">
+                  {progress.done} of {progress.total} campaigns done
+                </p>
+              )}
               <div style={{ height: 22, overflow: "hidden", position: "relative" }}>
                 <p key={checkIdx} className="qa-check-label text-sm text-gray-400">
                   Checking: {CHECK_NAMES[checkIdx]}
@@ -1099,16 +1107,6 @@ export default function QAPage() {
         ) : (
           /* Results */
           <div className="space-y-5">
-            {/* Progressive run banner — shown while remaining campaigns finish */}
-            {loading && progress.total > 0 && (
-              <div className="bg-blue-50 border border-blue-200 rounded-2xl px-5 py-3 flex items-center gap-3">
-                <span className="shrink-0 inline-block w-4 h-4 border-2 border-blue-300 border-t-blue-700 rounded-full animate-spin" />
-                <p className="text-sm text-blue-700">
-                  Checking campaigns… {progress.done} of {progress.total} done. Results appear below as each finishes.
-                </p>
-              </div>
-            )}
-
             {/* Any per-campaign errors (some campaigns may fail while others succeed) */}
             {error && (
               <div className="bg-red-50 border border-red-200 rounded-2xl px-5 py-3 text-sm text-red-700">
