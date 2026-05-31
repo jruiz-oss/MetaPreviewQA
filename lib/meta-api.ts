@@ -308,11 +308,19 @@ type CreativeFields = {
     titles?: Array<{ text?: string }>;
     call_to_action_types?: string[];
     link_urls?: Array<{ website_url?: string }>;
-    images?: Array<{ hash?: string; url?: string }>; // width/height not a valid sub-field — use AdImages endpoint
+    images?: Array<{ hash?: string; url?: string; adlabels?: Array<{ name?: string }> }>; // width/height not a valid sub-field — use AdImages endpoint
     videos?: Array<{ video_id?: string; url?: string; thumbnail_url?: string }>;
     audios?: Array<{ type?: string }>; // non-empty = Add Music is ON (music lives here, not in degrees_of_freedom_spec)
     ad_formats?: string[];
     optimization_type?: string; // ASSET_CUSTOMIZATION | PLACEMENT | LANGUAGE | REGULAR | FORMAT_AUTOMATION
+    // Maps which asset actually serves for which placement. Only images referenced
+    // by a rule are live; images present in images[] but referenced by NO rule are
+    // stale leftovers from an earlier edit (the source of the phantom "April" reads).
+    asset_customization_rules?: Array<{
+      image_label?: { name?: string };
+      customization_spec?: Record<string, unknown>;
+      priority?: number;
+    }>;
   };
 };
 
@@ -504,7 +512,7 @@ export async function fetchAdContent(
     // Permission, and because Graph fails the whole request on a single forbidden field, that
     // one field would fail the entire ad read. Music status is fetched separately in
     // fetchMusicStatus() so it degrades to "unknown" instead of nuking the creative read.
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,effective_object_story_id,image_url,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments{name,description,link,call_to_action,image_hash,picture}},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},ad_formats,optimization_type},degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,effective_object_story_id,image_url,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments{name,description,link,call_to_action,image_hash,picture}},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url,adlabels{name}},videos{video_id,thumbnail_url},ad_formats,optimization_type,asset_customization_rules{image_label{name},customization_spec,priority}},degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -621,9 +629,36 @@ export async function fetchAdContent(
     !!data.creative?.object_story_spec?.link_data?.child_attachments?.length ||
     adFormats.some((f) => f.toUpperCase().includes("CAROUSEL"));
 
+  // --- Drop stale (un-served) pool assets via asset_customization_rules ----
+  // The effective-post / image_url anchors return nothing on these dynamic
+  // PLACEMENT ads, so we still landed on the stale pool. asset_customization_rules
+  // are Meta's own map of which image serves for which placement (by image
+  // label). An image present in images[] but referenced by NO rule is a stale
+  // leftover from an earlier edit — exactly the old "April" assets. When rules
+  // exist AND images carry labels, keep only the live (rule-referenced) images.
+  const rawFeedImages = data.creative?.asset_feed_spec?.images ?? [];
+  const customizationRules = data.creative?.asset_feed_spec?.asset_customization_rules ?? [];
+  const liveLabels = new Set(
+    customizationRules.map((r) => r.image_label?.name).filter(Boolean) as string[]
+  );
+  const imgLabelNames = (img: { adlabels?: Array<{ name?: string }> }) =>
+    (img.adlabels ?? []).map((l) => l.name).filter(Boolean) as string[];
+  const anyImageLabeled = rawFeedImages.some((img) => imgLabelNames(img).length > 0);
+  const liveImageHashes = new Set<string>();
+  if (liveLabels.size > 0 && anyImageLabeled) {
+    for (const img of rawFeedImages) {
+      if (img.hash && imgLabelNames(img).some((n) => liveLabels.has(n))) liveImageHashes.add(img.hash);
+    }
+  }
+  // Only apply the filter when it confidently identifies ≥1 live image — never
+  // narrow to empty (that would drop the whole comparison).
+  const rulesFilterActive = liveImageHashes.size > 0;
+
   type ImgCandidate = { url: string; hash?: string; width?: number; height?: number };
   const feedImageCandidates: ImgCandidate[] = [];
-  for (const img of data.creative?.asset_feed_spec?.images ?? []) {
+  for (const img of rawFeedImages) {
+    // Skip assets the customization rules don't reference — stale leftovers.
+    if (rulesFilterActive && (!img.hash || !liveImageHashes.has(img.hash))) continue;
     const dims = img.hash ? dimMap.get(img.hash) : undefined;
     const url = img.url ?? dims?.url;
     if (url) feedImageCandidates.push({ url, hash: img.hash, width: dims?.width, height: dims?.height });
@@ -712,12 +747,30 @@ export async function fetchAdContent(
       liveSource = "creative_image_url";
     }
 
-    // 4. Last resort: the (possibly stale) pool — flagged so a bad finding is
-    //    traceable to a pool read in the logs.
+    // 4. Last resort: the pool. If the customization-rules filter narrowed it to
+    //    the live assets, that's now reliable; otherwise it may still be stale.
     if (!servingUrls.length) {
-      liveSource = isCarousel ? "carousel_pool_fallback" : "pool_fallback";
+      liveSource = rulesFilterActive
+        ? "pool_rules_filtered"
+        : isCarousel
+        ? "carousel_pool_fallback"
+        : "pool_fallback";
     }
   }
+
+  // --- DIAGNOSTIC: raw stale-asset signals -------------------------------
+  // When live_source is still *_fallback, this line shows WHY: whether the ad
+  // exposes an effective_object_story_id, whether creative.image_url is present,
+  // and whether asset_customization_rules + image adlabels exist to filter on.
+  // If rules/labels are absent, the pool can't be filtered and we need a
+  // different ground-truth source (e.g. the ad /previews endpoint).
+  console.log(
+    `[meta-api][stale-dbg] ad=${adId} story_id=${data.creative?.effective_object_story_id ? "yes" : "no"} ` +
+      `creative_image_url=${data.creative?.image_url ? "yes" : "no"} ` +
+      `serving_urls=${servingUrls.length} rules=${customizationRules.length} ` +
+      `labeled_images=${rawFeedImages.filter((i) => imgLabelNames(i).length).length}/${rawFeedImages.length} ` +
+      `live_hashes=${liveImageHashes.size} rules_filter_active=${rulesFilterActive}`
+  );
 
   // Build the final URL list: serving image (when resolved) else chosen pool
   // images, then video thumbnails.
