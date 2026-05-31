@@ -1,6 +1,27 @@
 // Meta Graph API base. Bump this comment to trigger a fresh deploy when needed.
 const GRAPH_API = "https://graph.facebook.com/v23.0";
 
+// ───────────────────────────────────────────────────────────────────────────
+// FEATURE FLAG — placement/date-aware creative selection.
+//
+// When TRUE: for the live-creative visual check we STOP anchoring to the
+// effective_object_story_id (the last *published* post — which on paused,
+// edited-but-not-relaunched ads is frozen on the PREVIOUS promo's creative and
+// is the root cause of Vera reporting "old creative"). Instead we read the
+// rule-filtered asset_feed_spec image pool and tag each image with the
+// placement(s) it serves and the date its asset label was created, so the QA
+// model can report a genuinely-stale asset as a real, explained finding rather
+// than a phantom.
+//
+// When FALSE: behaviour is byte-for-byte the original effective-post anchor.
+// ⇒ To fully revert this experiment: set this to false (keeps the code), OR
+//   `git checkout main` to remove the branch entirely.
+const PLACEMENT_AWARE_CREATIVE = true;
+
+// An asset more than this many days older than the NEWEST asset in the same ad
+// is treated as a likely leftover from an earlier promo cycle and called out.
+const STALE_ASSET_AGE_GAP_DAYS = 25;
+
 export type CampaignAd = {
   id: string;
   name: string;
@@ -333,12 +354,23 @@ type AdResponse = {
   error?: { message?: string; code?: number; fbtrace_id?: string };
 };
 
+// Per-image context for the visual QA. Aligned by `url` to creativeImageUrls.
+// Only populated when PLACEMENT_AWARE_CREATIVE is on; empty otherwise so the
+// flag-off path is unchanged.
+export type CreativeImageContext = {
+  url: string;
+  placement: string | null;   // human-readable placement(s) this asset serves, when resolvable
+  assetDate: string | null;   // ISO date the asset label was created, when resolvable
+  staleNote: string | null;   // set when this asset is much older than the newest in the ad
+};
+
 export type FetchResult = {
   content: string | null;
   error: string | null;
   aiEnhancements: AiEnhancement[] | null;
   formatInfo: FormatInfo | null; // null only on hard API error
   creativeImageUrls: string[]; // image/thumbnail URLs for visual QA
+  creativeImageContext: CreativeImageContext[]; // per-image placement/date tags (empty when flag off)
   manualCheckItems: string[]; // checklist items that cannot be read from the API — must be verified in Ads Manager
 };
 
@@ -528,6 +560,82 @@ async function fetchServingImageUrls(storyId: string, accessToken: string): Prom
 }
 
 
+// ─── Placement/date-aware helpers (used only when PLACEMENT_AWARE_CREATIVE) ──
+
+// Asset labels are named like "placement_asset_<hex>_<unixMillis>". The trailing
+// number is the millisecond timestamp the asset/label was created. Returns that
+// epoch-ms value, or null if the name doesn't carry one.
+function assetLabelDateMs(labelName: string | undefined | null): number | null {
+  if (!labelName) return null;
+  const m = labelName.match(/_(\d{13})(?:$|\D)/); // 13-digit ms timestamp
+  if (!m) return null;
+  const ms = Number(m[1]);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// Turns a customization_spec (the placement targeting on an asset_customization_rule)
+// into a short human-readable placement description, e.g. "Instagram: story, reels".
+function describePlacement(spec: Record<string, unknown> | undefined): string | null {
+  if (!spec) return null;
+  const parts: string[] = [];
+  const pp = (spec.publisher_platforms as string[] | undefined) ?? [];
+  const fb = (spec.facebook_positions as string[] | undefined) ?? [];
+  const ig = (spec.instagram_positions as string[] | undefined) ?? [];
+  const ms = (spec.messenger_positions as string[] | undefined) ?? [];
+  const an = (spec.audience_network_positions as string[] | undefined) ?? [];
+  if (fb.length) parts.push(`Facebook: ${fb.join(", ")}`);
+  if (ig.length) parts.push(`Instagram: ${ig.join(", ")}`);
+  if (ms.length) parts.push(`Messenger: ${ms.join(", ")}`);
+  if (an.length) parts.push(`Audience Network: ${an.join(", ")}`);
+  if (!parts.length && pp.length) parts.push(pp.join(", "));
+  if (!parts.length) return "default / all remaining placements";
+  return parts.join("; ");
+}
+
+type AssetFeedSpecLike = NonNullable<CreativeFields["asset_feed_spec"]>;
+
+// Builds a map of image-hash → { placements, dateMs } from asset_feed_spec.
+// Placement comes from whichever asset_customization_rule references the image's
+// label (statics: image_label; carousels: image_label on child_attachments).
+// dateMs comes from the image's own adlabel name timestamp.
+function buildHashContext(
+  feed: AssetFeedSpecLike | undefined
+): Map<string, { placements: string[]; dateMs: number | null }> {
+  const ctx = new Map<string, { placements: string[]; dateMs: number | null }>();
+  if (!feed) return ctx;
+
+  // label name → image hash (an image can carry several labels)
+  const labelToHash = new Map<string, string>();
+  for (const img of feed.images ?? []) {
+    if (!img.hash) continue;
+    let dateMs: number | null = null;
+    for (const l of img.adlabels ?? []) {
+      if (l.name) {
+        labelToHash.set(l.name, img.hash);
+        dateMs = dateMs ?? assetLabelDateMs(l.name);
+      }
+    }
+    if (!ctx.has(img.hash)) ctx.set(img.hash, { placements: [], dateMs });
+  }
+
+  // Walk customization rules; attach the rule's placement to the image its
+  // image_label points at. Carousel rules use carousel_label (a card set, not a
+  // single image) so we can't map them to one hash — those just keep their date.
+  for (const rule of feed.asset_customization_rules ?? []) {
+    const labelName = (rule.image_label as { name?: string } | undefined)?.name;
+    if (!labelName) continue;
+    const hash = labelToHash.get(labelName);
+    if (!hash) continue;
+    const placement = describePlacement(rule.customization_spec as Record<string, unknown> | undefined);
+    const entry = ctx.get(hash);
+    if (entry && placement && !entry.placements.includes(placement)) {
+      entry.placements.push(placement);
+    }
+  }
+
+  return ctx;
+}
+
 /**
  * Fetches ad creative content from the Meta Graph API.
  * Returns the formatted content, AI enhancement statuses, format info, and
@@ -558,7 +666,7 @@ export async function fetchAdContent(
     const res = await fetch(url, { signal: AbortSignal.timeout(10000), cache: "no-store" });
     data = await res.json();
   } catch (err) {
-    return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null, formatInfo: null, creativeImageUrls: [], manualCheckItems: MANUAL_CHECK_ITEMS };
+    return { content: null, error: `Network error contacting Meta API: ${(err as Error).message}`, aiEnhancements: null, formatInfo: null, creativeImageUrls: [], creativeImageContext: [], manualCheckItems: MANUAL_CHECK_ITEMS };
   }
 
   if (data.error) {
@@ -583,7 +691,7 @@ export async function fetchAdContent(
       friendly = `Token is missing required permissions (need ads_read or ads_management). Original: ${msg}`;
     }
 
-    return { content: null, error: friendly, aiEnhancements: null, formatInfo: null, creativeImageUrls: [], manualCheckItems: MANUAL_CHECK_ITEMS };
+    return { content: null, error: friendly, aiEnhancements: null, formatInfo: null, creativeImageUrls: [], creativeImageContext: [], manualCheckItems: MANUAL_CHECK_ITEMS };
   }
 
   const formatted = formatCreative(data);
@@ -752,7 +860,14 @@ export async function fetchAdContent(
   let servingUrls: string[] = [];
   let liveSource = isCarousel ? "carousel_pool" : "pool";
 
-  if (!poolIsTrustworthy) {
+  // FLAG: when placement-aware selection is on, we deliberately DO NOT anchor to
+  // the effective (last-published) post — on paused/edited ads it's the previous
+  // promo's creative. We read the rule-filtered pool instead and tag each image
+  // with its placement + date below. Setting PLACEMENT_AWARE_CREATIVE=false
+  // restores the original effective-post anchor exactly.
+  if (PLACEMENT_AWARE_CREATIVE) {
+    liveSource = isCarousel ? "pool_placement_aware_carousel" : "pool_placement_aware";
+  } else if (!poolIsTrustworthy) {
     // 1. Ground truth: the effective serving post. Carousel → live cards via
     //    subattachments; static → the served image.
     if (storyId) {
@@ -826,6 +941,40 @@ export async function fetchAdContent(
   }
   for (const vid of data.creative?.asset_feed_spec?.videos ?? []) addUrl(vid.thumbnail_url);
 
+  // --- Per-image placement + date context (flag-gated) --------------------
+  // Tag each chosen image with the placement(s) it serves and the date its
+  // asset was created, and flag any asset much older than the newest one in
+  // this ad as a likely previous-promo leftover. This is what lets the QA model
+  // say "the Story placement uses a Feb-dated asset" instead of silently
+  // surfacing old creative as a phantom. Empty when the flag is off.
+  const creativeImageContext: CreativeImageContext[] = [];
+  if (PLACEMENT_AWARE_CREATIVE) {
+    const hashContext = buildHashContext(data.creative?.asset_feed_spec);
+    const urlToHash = new Map<string, string>();
+    for (const c of feedImageCandidates) if (c.hash) urlToHash.set(c.url, c.hash);
+
+    // Newest asset date in this ad — the reference point for "stale".
+    let newestMs = -Infinity;
+    for (const { dateMs } of Array.from(hashContext.values())) {
+      if (dateMs && dateMs > newestMs) newestMs = dateMs;
+    }
+    const gapMs = STALE_ASSET_AGE_GAP_DAYS * 24 * 60 * 60 * 1000;
+
+    for (const url of creativeImageUrls) {
+      const hash = urlToHash.get(url);
+      const entry = hash ? hashContext.get(hash) : undefined;
+      const placement = entry && entry.placements.length ? entry.placements.join(" | ") : null;
+      const assetDate =
+        entry?.dateMs != null ? new Date(entry.dateMs).toISOString().slice(0, 10) : null;
+      let staleNote: string | null = null;
+      if (entry?.dateMs != null && Number.isFinite(newestMs) && newestMs - entry.dateMs > gapMs) {
+        const daysOlder = Math.round((newestMs - entry.dateMs) / (24 * 60 * 60 * 1000));
+        staleNote = `This asset is ~${daysOlder} days older than the newest asset in this ad — likely a leftover from a previous promo cycle. Verify it should still be here.`;
+      }
+      creativeImageContext.push({ url, placement, assetDate, staleNote });
+    }
+  }
+
   // Diagnostic: shows how the image pool was reduced, with sizes — confirms in
   // production whether the extra images were stale same-size dupes or legit
   // per-placement size variants. Remove once dedup behaviour is confirmed.
@@ -845,6 +994,7 @@ export async function fetchAdContent(
     aiEnhancements,
     formatInfo,
     creativeImageUrls,
+    creativeImageContext,
     manualCheckItems: MANUAL_CHECK_ITEMS,
   };
 }

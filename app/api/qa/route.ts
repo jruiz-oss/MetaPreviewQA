@@ -4,7 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { google } from "googleapis";
 import sharp from "sharp";
 import { getOAuthClient } from "@/lib/google-auth";
-import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, type AiEnhancement, type FormatInfo } from "@/lib/meta-api";
+import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
 export const maxDuration = 300;
@@ -178,7 +178,7 @@ type DriveImageRef = {
   mediaType: string;
 };
 
-type FetchedImage = { name: string; mediaType: ImageMediaType; data: string };
+type FetchedImage = { name: string; mediaType: ImageMediaType; data: string; context?: string | null };
 
 // Anthropic allows up to 5MB per image; cap a touch below that.
 const MAX_IMAGE_BYTES = 4_500_000;
@@ -211,7 +211,9 @@ async function resizeForClaude(buf: Buffer): Promise<{ buf: Buffer; mediaType: I
 }
 
 // Download a URL-based image server-side, resize, and return as base64.
-async function downloadUrlImage(url: string): Promise<FetchedImage | null> {
+// `context` (optional) is a human-readable placement/date note attached to this
+// specific live image so the QA prompt can label it; null when the flag is off.
+async function downloadUrlImage(url: string, context?: string | null): Promise<FetchedImage | null> {
   try {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) {
@@ -227,7 +229,7 @@ async function downloadUrlImage(url: string): Promise<FetchedImage | null> {
     const { buf, mediaType } = resized;
     const name = url.split("/").pop()?.split("?")[0] ?? "meta-creative.jpg";
     console.log(`[qa] DOWNLOADED live Meta image "${name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${(buf.length / 1024).toFixed(0)} KB resized).`);
-    return { name, mediaType, data: buf.toString("base64") };
+    return { name, mediaType, data: buf.toString("base64"), context: context ?? null };
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     console.log(`[qa] SKIP live Meta image — download failed: ${msg}`);
@@ -320,12 +322,23 @@ export async function POST(request: Request) {
       };
     }
 
-    const { content, error, aiEnhancements, formatInfo, creativeImageUrls, manualCheckItems } = await fetchAdContent(adId, metaToken);
+    const { content, error, aiEnhancements, formatInfo, creativeImageUrls, creativeImageContext, manualCheckItems } = await fetchAdContent(adId, metaToken);
+
+    // Build a per-URL context note (placement + asset date + stale flag) so each
+    // downloaded image can be labeled in the prompt. Empty when the flag is off.
+    const contextByUrl = new Map<string, string>();
+    for (const c of (creativeImageContext ?? []) as CreativeImageContext[]) {
+      const bits: string[] = [];
+      if (c.placement) bits.push(`serves placement(s): ${c.placement}`);
+      if (c.assetDate) bits.push(`asset uploaded: ${c.assetDate}`);
+      if (c.staleNote) bits.push(`⚠️ ${c.staleNote}`);
+      if (bits.length) contextByUrl.set(c.url, bits.join(" — "));
+    }
 
     // Download live Meta images server-side so we can pass them as base64
     // (Meta CDN URLs are blocked by robots.txt when passed directly to Claude).
     const creativeImages: FetchedImage[] = (
-      await Promise.all((creativeImageUrls ?? []).map(downloadUrlImage))
+      await Promise.all((creativeImageUrls ?? []).map((u) => downloadUrlImage(u, contextByUrl.get(u))))
     ).filter((img): img is FetchedImage => img !== null);
 
     return {
@@ -570,6 +583,12 @@ export async function POST(request: Request) {
     });
 
     for (const img of liveImages) {
+      // When placement/date context is present, label the image just before it
+      // so the model can attribute placement and flag a stale-dated asset as a
+      // real finding (rather than surfacing old creative as a phantom).
+      if (img.context) {
+        blocks.push({ type: "text", text: `\nLive Meta image — ${img.context}:` });
+      }
       blocks.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
     }
 
