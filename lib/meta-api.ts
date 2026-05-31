@@ -796,14 +796,20 @@ export async function fetchAdContent(
   // narrow to empty (that would drop the whole comparison).
   const rulesFilterActive = liveImageHashes.size > 0;
 
-  type ImgCandidate = { url: string; hash?: string; width?: number; height?: number };
+  type ImgCandidate = { url: string; hash?: string; width?: number; height?: number; dateMs?: number | null };
   const feedImageCandidates: ImgCandidate[] = [];
   for (const img of rawFeedImages) {
     // Skip assets the customization rules don't reference — stale leftovers.
     if (rulesFilterActive && (!img.hash || !liveImageHashes.has(img.hash))) continue;
     const dims = img.hash ? dimMap.get(img.hash) : undefined;
     const url = img.url ?? dims?.url;
-    if (url) feedImageCandidates.push({ url, hash: img.hash, width: dims?.width, height: dims?.height });
+    // The asset's creation date, parsed from its adlabel name (..._<unixMillis>).
+    // Used to prefer the newest asset per size so an old-promo leftover sharing a
+    // size with the current asset doesn't win the bucket.
+    const dateMs = (img.adlabels ?? [])
+      .map((l) => assetLabelDateMs(l.name))
+      .find((d): d is number => d != null) ?? null;
+    if (url) feedImageCandidates.push({ url, hash: img.hash, width: dims?.width, height: dims?.height, dateMs });
   }
   // Hash-based single-image ads (object_story_spec / top-level image_hash) carry no URL
   // in the creative spec — pull the viewable URL resolved from the AdImages endpoint so
@@ -821,17 +827,28 @@ export async function fetchAdContent(
   if (isCarousel) {
     chosenImageCandidates = feedImageCandidates; // keep every card
   } else {
-    // Dedupe by exact WxH. Within a size bucket prefer the published image,
-    // else the first seen. Images with unknown dimensions are each kept (we
-    // can't prove they're duplicates) and de-duplicated by URL below.
+    // Dedupe by exact WxH. Within a size bucket prefer the published image; when
+    // PLACEMENT_AWARE_CREATIVE is on also prefer the NEWEST-dated asset (this is
+    // the fix for an old-promo static — e.g. an "April" 1080x1080 — winning its
+    // size bucket over the current June asset just because it appears first in
+    // the pool). Flag off ⇒ original "first seen / published wins" behavior.
     const bySize = new Map<string, ImgCandidate>();
     const unknownDim: ImgCandidate[] = [];
     for (const c of feedImageCandidates) {
       if (c.width && c.height) {
         const key = `${c.width}x${c.height}`;
         const existing = bySize.get(key);
-        if (!existing) bySize.set(key, c);
-        else if (publishedHash && c.hash === publishedHash) bySize.set(key, c);
+        if (!existing) {
+          bySize.set(key, c);
+        } else if (publishedHash && c.hash === publishedHash) {
+          bySize.set(key, c);
+        } else if (
+          PLACEMENT_AWARE_CREATIVE &&
+          !(publishedHash && existing.hash === publishedHash) &&
+          (c.dateMs ?? -Infinity) > (existing.dateMs ?? -Infinity)
+        ) {
+          bySize.set(key, c);
+        }
       } else {
         unknownDim.push(c);
       }
