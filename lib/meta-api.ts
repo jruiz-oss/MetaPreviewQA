@@ -472,13 +472,39 @@ async function fetchMusicStatus(
  * on the wrong (stale) asset — so the QA reads a creative the ad doesn't serve.
  * The effective post reflects what's actually live, so we read its image instead.
  */
+// Exchanges the system-user / user token for a PAGE access token. Reading a
+// Page-owned post (an ad's effective_object_story_id is usually a dark post)
+// returns Meta error (#10) with a user/system-user token even when it carries
+// pages_read_engagement — the post node must be read with the Page's own token.
+// The system user can mint one as long as it has a task on the Page (it does).
+async function fetchPageAccessToken(pageId: string, accessToken: string): Promise<string | null> {
+  try {
+    const url = `${GRAPH_API}/${pageId}?fields=access_token&access_token=${accessToken}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
+    const data = await res.json();
+    if (data.error || !data.access_token) {
+      console.log(`[meta-api][pagetoken-dbg] page=${pageId} no token (${data.error?.code ?? "none"}: ${data.error?.message ?? "n/a"})`);
+      return null;
+    }
+    return data.access_token as string;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchServingImageUrls(storyId: string, accessToken: string): Promise<string[]> {
   try {
-    const url = `${GRAPH_API}/${storyId}?fields=full_picture,picture,attachments{media{image{src},source},subattachments{media{image{src},source}}}&access_token=${accessToken}`;
+    // effective_object_story_id is "{pageId}_{postId}". The post is Page-owned,
+    // so read it with the Page token (falling back to the original token if the
+    // exchange fails — e.g. the story isn't page-scoped).
+    const pageId = storyId.split("_")[0];
+    const pageToken = pageId ? await fetchPageAccessToken(pageId, accessToken) : null;
+    const tokenToUse = pageToken ?? accessToken;
+    const url = `${GRAPH_API}/${storyId}?fields=full_picture,picture,attachments{media{image{src},source},subattachments{media{image{src},source}}}&access_token=${tokenToUse}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
     const data = await res.json();
     if (data.error) {
-      console.log(`[meta-api][post-dbg] story=${storyId} ERROR code=${data.error.code} msg=${data.error.message}`);
+      console.log(`[meta-api][post-dbg] story=${storyId} page_token=${pageToken ? "yes" : "no"} ERROR code=${data.error.code} msg=${data.error.message}`);
       return [];
     }
     const urls: string[] = [];
