@@ -75,7 +75,7 @@ For each check, assign one of:
 
 BE CONCISE BUT COMPLETE. Keep notes tight — roughly one short sentence per issue. If a check has more than one genuine problem, report ALL of them in that check's note (separate with "; "), most important first. Never drop a real issue for the sake of brevity — missing a defect is worse than a slightly longer note. Keep "summary" to one sentence. Do not use numbered lists inside note fields.
 
-IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exact structure:
+IMPORTANT: Submit your review by calling the \`submit_qa_report\` tool. Put everything in the tool call — do not write any prose in the text response. The tool expects exactly this structure:
 
 {
   "overall_status": "pass" | "fail" | "warning",
@@ -97,6 +97,65 @@ IMPORTANT: Respond ONLY with valid JSON. No prose before or after. Use this exac
   "critical_issues": ["one issue per item, ≤20 words each — only the most urgent, max 5 total"],
   "notes": ""
 }`;
+
+// Status enum reused across every check in the tool schema.
+const STATUS_ENUM = { type: "string", enum: ["pass", "fail", "warning", "unknown"] } as const;
+const CHECK_SHAPE = {
+  type: "object",
+  properties: { status: STATUS_ENUM, note: { type: "string" } },
+} as const;
+
+// Structured-output tool. Having the model return its report through a
+// schema-validated tool call (instead of free-text JSON) means the API hands us
+// back a real object — there is no JSON string to parse, so an unescaped quote
+// inside a note can no longer corrupt and crash the whole batch (the old
+// "Expected ',' or '}'" failure). Caps on note length etc. stay enforced by the
+// prompt, not the schema, to avoid over-constraining the model.
+const QA_TOOL: Anthropic.Tool = {
+  name: "submit_qa_report",
+  description:
+    "Submit the completed QA review for all ad units in this batch. Call this exactly once.",
+  input_schema: {
+    type: "object",
+    properties: {
+      overall_status: { type: "string", enum: ["pass", "fail", "warning"] },
+      units: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            status: { type: "string", enum: ["pass", "fail", "warning"] },
+            checks: {
+              type: "object",
+              properties: {
+                copy_creative_alignment: {
+                  type: "object",
+                  properties: {
+                    status: STATUS_ENUM,
+                    note: { type: "string" },
+                    text_in_approved: { type: ["string", "null"] },
+                    text_in_live: { type: ["string", "null"] },
+                  },
+                },
+                promo_month_date: CHECK_SHAPE,
+                url_cta: CHECK_SHAPE,
+                grammar_typos: CHECK_SHAPE,
+                ai_enhancements: CHECK_SHAPE,
+                format_size: CHECK_SHAPE,
+              },
+            },
+            summary: { type: "string" },
+          },
+          required: ["name", "status", "checks", "summary"],
+        },
+      },
+      critical_issues: { type: "array", items: { type: "string" } },
+      notes: { type: "string" },
+    },
+    required: ["overall_status", "units"],
+  },
+};
 
 type AdUnit = {
   name: string;
@@ -339,13 +398,47 @@ export async function POST(request: Request) {
   const totalRefs = allDriveRefs.length;
   const idf = (t: string) => Math.log((totalRefs + 1) / ((docFreq.get(t) ?? 0) + 1));
 
-  function rankRefsForUnit(unitName: string): DriveImageRef[] {
+  // Is this AD UNIT a carousel? Name is the primary signal ("Carousel" in the
+  // name); the Meta-fetched content is a backup (formatCreative emits a
+  // "Carousel cards (" block for carousel ads).
+  function unitIsCarousel(unit: { name?: string | null; content?: string | null }): boolean {
+    if ((unit.name ?? "").toLowerCase().includes("carousel")) return true;
+    return (unit.content ?? "").toLowerCase().includes("carousel cards");
+  }
+  // Is this DRIVE FILE a carousel asset? Their carousel exports live in a
+  // "Carousels/" subfolder and carry "Carousel" in the filename.
+  const refIsCarousel = (name: string) => name.toLowerCase().includes("carousel");
+
+  function rankRefsForUnit(unit: { name?: string | null; content?: string | null }): DriveImageRef[] {
+    const unitName = unit.name ?? "";
     if (!allDriveRefs.length) return [];
     const unitTokens = new Set(tokenize(unitName));
     if (!unitTokens.size) return [];
 
-    const scored = allDriveRefs
-      .map((ref, i) => {
+    // FORMAT-TYPE GATE — the fix for static units being QA'd against carousel
+    // designs (and vice versa). Token overlap alone can't tell them apart when
+    // the only shared tokens are the campaign/month words that appear in every
+    // filename, so a static unit would pull in carousel files that genuinely
+    // exist in the folder → the model reads offer text off the wrong asset and
+    // reports it as a defect ("image has X" where X is from another creative).
+    //   - Carousel unit  → only carousel assets are eligible (fall back to all
+    //     if the folder has none, so we don't lose the comparison entirely).
+    //   - Non-carousel unit (static/story/feed/reel) → carousel assets are never
+    //     eligible. If that leaves nothing, we return no Drive image rather than
+    //     comparing against the wrong creative (the prompt handles "no approved
+    //     image" gracefully).
+    const carouselUnit = unitIsCarousel(unit);
+    let eligible = allDriveRefs.map((ref, i) => ({ ref, i }));
+    if (carouselUnit) {
+      const onlyCarousel = eligible.filter((x) => refIsCarousel(x.ref.name));
+      if (onlyCarousel.length) eligible = onlyCarousel;
+    } else {
+      eligible = eligible.filter((x) => !refIsCarousel(x.ref.name));
+    }
+    if (!eligible.length) return [];
+
+    const scored = eligible
+      .map(({ ref, i }) => {
         let score = 0;
         unitTokens.forEach((t) => {
           if (refTokenSets[i].has(t)) score += idf(t);
@@ -368,7 +461,7 @@ export async function POST(request: Request) {
 
   // Match first, then download ONLY the images actually used by some unit —
   // no point downloading 40 assets when a handful are referenced.
-  const refsPerUnit = unitContents.map((u) => rankRefsForUnit(u.name ?? ""));
+  const refsPerUnit = unitContents.map((u) => rankRefsForUnit(u));
   const neededIds = new Set<string>();
   for (const refs of refsPerUnit) for (const r of refs) neededIds.add(r.id);
   const downloadedDrive = await downloadDriveImages(allDriveRefs.filter((r) => neededIds.has(r.id)));
@@ -500,6 +593,20 @@ export async function POST(request: Request) {
       }
     }
 
+    // --- DEBUG: exactly which images the model is about to see ---------------
+    // The single most common cause of a phantom "image is wrong / has X" finding
+    // is the model being handed the WRONG approved Drive file (e.g. a carousel
+    // asset matched to a static unit) or a stale live pool image. Log the precise
+    // filenames going into this call so a bad finding can be traced to its input.
+    for (const unit of batchUnits) {
+      const liveNames = ((unit as { creativeImages?: FetchedImage[] }).creativeImages ?? []).map((i) => i.name);
+      console.log(
+        `[qa][sent] unit="${unit.name || "Unnamed"}" adId=${unit.adId ?? "?"} | ` +
+          `approvedDrive(${batchDriveImages.length})=[${batchDriveImages.map((d) => d.name).join(" | ")}] | ` +
+          `liveMeta(${liveNames.length})=[${liveNames.join(" | ")}]`
+      );
+    }
+
     // Retry on 429 rate-limit errors. Improvements over the old loop:
     //  - More attempts (5 vs 3) so transient spikes recover instead of failing.
     //  - Respect the server's `retry-after` header when present — it tells us
@@ -524,6 +631,14 @@ export async function POST(request: Request) {
           // thinking is enabled, so temperature is intentionally not set.
           // budget_tokens must be < max_tokens.
           thinking: { type: "enabled", budget_tokens: 3000 },
+          // Structured output: the model returns its report by calling this tool,
+          // so the result arrives as a validated object rather than free-text
+          // JSON we have to parse (and that used to crash on unescaped quotes).
+          // tool_choice stays "auto" because extended thinking does not allow a
+          // forced tool choice; the prompt instructs the model to call it, and a
+          // text-JSON fallback below covers the rare case it answers without it.
+          tools: [QA_TOOL],
+          tool_choice: { type: "auto" },
           // Cache the large, unchanging system prompt so it is billed at full
           // price only once (~5 min TTL); subsequent batches/runs read it at
           // ~10% cost. cache_control marks the end of the cached prefix.
@@ -581,20 +696,61 @@ export async function POST(request: Request) {
       );
     }
 
-    // With extended thinking enabled, the first content block is a "thinking"
-    // block — the JSON we want lives in the (usually last) "text" block, so
-    // find it explicitly rather than assuming content[0].
-    const textBlock = message.content.find((b) => b.type === "text");
-    const raw = textBlock && textBlock.type === "text" ? textBlock.text : "";
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON object found in model response");
+    // --- DEBUG: the model's private reasoning -------------------------------
+    // Surface the extended-thinking block so we can see HOW the model arrived at
+    // a finding — e.g. whether it confused two images, or read text off the wrong
+    // asset. This is the raw chain-of-thought for this batch.
+    {
+      const thinkBlock = message.content.find((b) => b.type === "thinking");
+      const thinkText =
+        thinkBlock && thinkBlock.type === "thinking" ? thinkBlock.thinking : "(no thinking block returned)";
+      console.log(`[qa][think] unit="${batchUnits.map((u) => u.name || "Unnamed").join(", ")}":\n${thinkText}`);
+    }
 
-    let parsed;
-    try {
-      parsed = JSON.parse(jsonMatch[0]);
-    } catch (parseErr) {
-      console.error("Raw model response (first 500 chars):", raw.slice(0, 500));
-      throw parseErr;
+    // Prefer the structured tool result. When the model calls submit_qa_report,
+    // its input is schema-validated by the API and handed back as a real object,
+    // so there is no JSON string to parse and no way for an unescaped quote in a
+    // note to corrupt the batch (the old crash). Fall back to extracting JSON
+    // from a text block only if the model answered without the tool.
+    type ParsedQa = {
+      units?: Record<string, unknown>[];
+      critical_issues?: string[];
+      notes?: string;
+    };
+    let parsed: ParsedQa;
+    const toolUse = message.content.find((b) => b.type === "tool_use");
+    if (toolUse && toolUse.type === "tool_use") {
+      parsed = (toolUse.input ?? {}) as ParsedQa;
+    } else {
+      // Fallback path: pull the JSON object out of a text block (legacy).
+      const textBlock = message.content.find((b) => b.type === "text");
+      const raw = textBlock && textBlock.type === "text" ? textBlock.text : "";
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("No tool call or JSON object found in model response");
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch (parseErr) {
+        console.error("Raw model response (first 500 chars):", raw.slice(0, 500));
+        throw parseErr;
+      }
+    }
+
+    // --- DEBUG: text the model claims it read from each image ---------------
+    // The two-step prompt records every legible string the model saw in the
+    // approved Drive image vs the live Meta image. Logging these side by side is
+    // the fastest way to catch a hallucinated finding: if text_in_approved shows
+    // an offer/date that isn't actually in that asset, the model invented it (or
+    // was handed the wrong file — cross-check against the [qa][sent] line above).
+    for (const u of (parsed.units ?? []) as Array<Record<string, unknown>>) {
+      const checks = u?.checks as Record<string, Record<string, unknown>> | undefined;
+      const cca = checks?.copy_creative_alignment;
+      if (cca) {
+        console.log(
+          `[qa][extract] "${String(u.name)}" status=${String(cca.status)} | ` +
+            `text_in_approved=${JSON.stringify(cca.text_in_approved ?? null)} | ` +
+            `text_in_live=${JSON.stringify(cca.text_in_live ?? null)}`
+        );
+      }
     }
 
     // Attach the resolved ad ID to each result unit so the report can show a
