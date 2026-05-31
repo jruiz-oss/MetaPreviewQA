@@ -257,12 +257,10 @@ export default function QAPage() {
   const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   // Campaign import state — supports multiple campaigns
-  type FilterScope = "ad" | "adset" | "both";
   type CampaignRow = {
     id: string;
     campaignId: string;
     filter: string;
-    filterScope: FilterScope;
     sinceDate: string;   // optional YYYY-MM-DD created-since cutoff
     loading: boolean;
     loaded: boolean;
@@ -281,7 +279,6 @@ export default function QAPage() {
     id,
     campaignId: "",
     filter: "",
-    filterScope: "adset",
     sinceDate: defaultSinceDate(),
     loading: false,
     loaded: false,
@@ -312,7 +309,7 @@ export default function QAPage() {
 
   function updateCampaignRow(
     id: string,
-    field: "campaignId" | "filter" | "filterScope",
+    field: "campaignId" | "filter",
     value: string
   ) {
     patchCampaignRow(id, { [field]: value } as Partial<CampaignRow>);
@@ -445,23 +442,18 @@ export default function QAPage() {
       if (!res.ok) throw new Error(data.error ?? "Failed to load campaign ads");
 
       const keyword = row.filter.trim().toLowerCase();
-      const scope = row.filterScope;
       const filtered = keyword
         ? data.ads.filter((ad: { id: string; name: string; adsetName?: string }) => {
             const adMatch = ad.name.toLowerCase().includes(keyword);
             const adsetMatch = (ad.adsetName ?? "").toLowerCase().includes(keyword);
-            if (scope === "ad") return adMatch;
-            if (scope === "adset") return adsetMatch;
             return adMatch || adsetMatch;
           })
         : data.ads;
 
       if (filtered.length === 0) {
-        const where =
-          scope === "ad" ? "ad name" : scope === "adset" ? "ad set name" : "ad or ad set name";
         throw new Error(
           keyword
-            ? `No ads matched "${row.filter.trim()}" in ${where} — try a different keyword or scope.`
+            ? `No ads matched "${row.filter.trim()}" in ad or ad set name — try a different keyword.`
             : "No ads found in this campaign."
         );
       }
@@ -958,17 +950,16 @@ export default function QAPage() {
 
               {/* Campaign import — multi-campaign */}
               <div className="mb-5 pb-5 border-b border-gray-100 space-y-2">
-                <div className="grid grid-cols-[1fr_auto_auto_auto_32px] gap-2 px-1 mb-1">
+                <div className="grid grid-cols-[1fr_auto_auto_32px] gap-2 px-1 mb-1">
                   <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">Campaign ID</span>
                   <span className="text-xs font-medium text-gray-400 uppercase tracking-wide w-40">Filter (optional)</span>
-                  <span className="text-xs font-medium text-gray-400 uppercase tracking-wide w-32">Match on</span>
                   <span />
                   <span />
                 </div>
 
                 {campaigns.map((row) => (
                   <div key={row.id} className="space-y-1">
-                    <div className="grid grid-cols-[1fr_auto_auto_auto_32px] gap-2 items-center">
+                    <div className="grid grid-cols-[1fr_auto_auto_32px] gap-2 items-center">
                       <input
                         type="text"
                         value={row.campaignId}
@@ -983,15 +974,6 @@ export default function QAPage() {
                         placeholder="e.g. june"
                         className="w-40 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
                       />
-                      <select
-                        value={row.filterScope}
-                        onChange={(e) => updateCampaignRow(row.id, "filterScope", e.target.value)}
-                        className="w-32 pl-3 pr-9 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent appearance-none bg-no-repeat bg-[right_0.75rem_center] bg-[length:1rem] bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2020%2020%22%3E%3Cpath%20stroke%3D%22%236b7280%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20stroke-width%3D%221.5%22%20d%3D%22M6%208l4%204%204-4%22/%3E%3C/svg%3E')]"
-                      >
-                        <option value="ad">Ad name</option>
-                        <option value="adset">Ad set name</option>
-                        <option value="both">Either</option>
-                      </select>
                       <button
                         onClick={() => loadFromCampaign(row.id)}
                         disabled={row.loading || row.loaded || !row.campaignId.trim()}
