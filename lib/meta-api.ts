@@ -269,6 +269,8 @@ type CreativeFields = {
   call_to_action_type?: string;
   link_url?: string;
   image_hash?: string;
+  effective_object_story_id?: string; // the actually-serving published post
+  image_url?: string; // primary serving image, when populated
   degrees_of_freedom_spec?: DegreesOfFreedomSpec;
   object_story_spec?: {
     link_data?: {
@@ -450,6 +452,39 @@ async function fetchMusicStatus(
 }
 
 /**
+ * Fetches the actual serving image URL(s) from an ad's effective published post.
+ *
+ * This is the ground truth of what an ad is really showing. We use it to bypass
+ * asset_feed_spec.images when that pool is unreliable: PLACEMENT-optimized ads
+ * keep a pool of size variants that can retain STALE assets from a previous edit
+ * (e.g. an old April creative left behind after the ad was updated to June).
+ * With no published image_hash to anchor on, picking from the pool by size lands
+ * on the wrong (stale) asset — so the QA reads a creative the ad doesn't serve.
+ * The effective post reflects what's actually live, so we read its image instead.
+ */
+async function fetchServingImageUrls(storyId: string, accessToken: string): Promise<string[]> {
+  try {
+    const url = `${GRAPH_API}/${storyId}?fields=full_picture,attachments{media{image{src}},subattachments{media{image{src}}}}&access_token=${accessToken}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
+    const data = await res.json();
+    if (data.error) return [];
+    const urls: string[] = [];
+    for (const a of data.attachments?.data ?? []) {
+      const src = a?.media?.image?.src;
+      if (src) urls.push(src);
+      for (const s of a?.subattachments?.data ?? []) {
+        const ssrc = s?.media?.image?.src;
+        if (ssrc) urls.push(ssrc);
+      }
+    }
+    if (!urls.length && data.full_picture) urls.push(data.full_picture);
+    return urls;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Fetches ad creative content from the Meta Graph API.
  * Returns the formatted content, AI enhancement statuses, format info, and
  * a list of checklist items that must be verified manually in Ads Manager.
@@ -467,7 +502,7 @@ export async function fetchAdContent(
     // Permission, and because Graph fails the whole request on a single forbidden field, that
     // one field would fail the entire ad read. Music status is fetched separately in
     // fetchMusicStatus() so it degrades to "unknown" instead of nuking the creative read.
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},ad_formats,optimization_type},degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,effective_object_story_id,image_url,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},ad_formats,optimization_type},degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -619,7 +654,33 @@ export async function fetchAdContent(
     chosenImageCandidates = [...Array.from(bySize.values()), ...unknownDim];
   }
 
-  // Build the final URL list: chosen images first, then video thumbnails.
+  // --- Anchor the live image to what is ACTUALLY serving ------------------
+  // The pool above is only trustworthy when it has one image per size. When a
+  // non-carousel ad has same-size duplicates AND no published image_hash, the
+  // pool likely retains stale assets from a previous edit and our size-pick can
+  // grab the wrong (old) one — making QA read a creative the ad doesn't serve.
+  // In that case, read the actual serving image from the effective published
+  // post (or creative.image_url) instead of guessing from the pool.
+  const sizeKeys = feedImageCandidates.map((c) => (c.width && c.height ? `${c.width}x${c.height}` : "??"));
+  const hasSameSizeDupes = sizeKeys.length > new Set(sizeKeys).size;
+  const staleRisk = !isCarousel && !publishedHash && hasSameSizeDupes;
+
+  let servingUrls: string[] = [];
+  let liveSource = isCarousel ? "carousel_pool" : "pool";
+  if (staleRisk) {
+    if (data.creative?.image_url) {
+      servingUrls = [data.creative.image_url];
+      liveSource = "creative_image_url";
+    } else if (data.creative?.effective_object_story_id) {
+      servingUrls = await fetchServingImageUrls(data.creative.effective_object_story_id, accessToken);
+      liveSource = servingUrls.length ? "effective_post" : "pool_fallback";
+    } else {
+      liveSource = "pool_fallback";
+    }
+  }
+
+  // Build the final URL list: serving image (when resolved) else chosen pool
+  // images, then video thumbnails.
   const MAX_QA_IMAGES = 6;
   const seenUrls = new Set<string>();
   const creativeImageUrls: string[] = [];
@@ -629,7 +690,11 @@ export async function fetchAdContent(
       creativeImageUrls.push(u);
     }
   }
-  for (const c of chosenImageCandidates) addUrl(c.url);
+  if (servingUrls.length) {
+    for (const u of servingUrls) addUrl(u);
+  } else {
+    for (const c of chosenImageCandidates) addUrl(c.url);
+  }
   for (const vid of data.creative?.asset_feed_spec?.videos ?? []) addUrl(vid.thumbnail_url);
 
   // Diagnostic: shows how the image pool was reduced, with sizes — confirms in
@@ -642,7 +707,7 @@ export async function fetchAdContent(
   console.log(
     `[meta-api][img] ad=${adId} name="${data.name ?? ""}" carousel=${isCarousel} ` +
       `optimization_type=${optType} pool=${feedImageCandidates.length} [${poolSizes}] ` +
-      `published_hash=${publishedHash ? "yes" : "no"} → chosen=${creativeImageUrls.length}`
+      `published_hash=${publishedHash ? "yes" : "no"} live_source=${liveSource} → chosen=${creativeImageUrls.length}`
   );
 
   return {
