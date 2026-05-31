@@ -735,13 +735,20 @@ export async function POST(request: Request) {
       }
     }
 
+    // Be defensive: a tool/JSON response can occasionally hand back `units` or
+    // `critical_issues` as something other than an array. `?? []` only guards
+    // null/undefined, so a non-array value slipped through and threw
+    // "(parsed.units ?? []).map is not a function", failing the whole batch.
+    const parsedUnits: Record<string, unknown>[] = Array.isArray(parsed.units) ? parsed.units : [];
+    const parsedCritical: string[] = Array.isArray(parsed.critical_issues) ? parsed.critical_issues : [];
+
     // --- DEBUG: text the model claims it read from each image ---------------
     // The two-step prompt records every legible string the model saw in the
     // approved Drive image vs the live Meta image. Logging these side by side is
     // the fastest way to catch a hallucinated finding: if text_in_approved shows
     // an offer/date that isn't actually in that asset, the model invented it (or
     // was handed the wrong file — cross-check against the [qa][sent] line above).
-    for (const u of (parsed.units ?? []) as Array<Record<string, unknown>>) {
+    for (const u of parsedUnits) {
       const checks = u?.checks as Record<string, Record<string, unknown>> | undefined;
       const cca = checks?.copy_creative_alignment;
       if (cca) {
@@ -757,7 +764,7 @@ export async function POST(request: Request) {
     // copy/paste-able ID. The model output isn't trusted to echo it — we map by
     // index back to the batch's input units (one unit per batch here), falling
     // back to the first unit's ID for any extra result units the model emits.
-    const resultUnits = (parsed.units ?? []).map(
+    const resultUnits = parsedUnits.map(
       (u: Record<string, unknown>, idx: number) => ({
         ...u,
         adId: batchUnits[idx]?.adId ?? batchUnits[0]?.adId ?? null,
@@ -766,8 +773,8 @@ export async function POST(request: Request) {
 
     return {
       units: resultUnits,
-      critical_issues: parsed.critical_issues ?? [],
-      notes: parsed.notes ?? "",
+      critical_issues: parsedCritical,
+      notes: typeof parsed.notes === "string" ? parsed.notes : "",
     };
   }
 
