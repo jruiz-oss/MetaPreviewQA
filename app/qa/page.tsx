@@ -246,10 +246,7 @@ export default function QAPage() {
   const [wo, setWo] = useState("");
   const [detectedDocs, setDetectedDocs] = useState<{ url: string; woLabel: string; content: string | null; images: DriveImage[]; error: string | null; loading: boolean }[]>([]);
   const [woDestinationUrl, setWoDestinationUrl] = useState<string | null>(null);
-  const [units, setUnits] = useState<AdUnit[]>([
-    { id: "1", name: "", link: "" },
-    { id: "2", name: "", link: "" },
-  ]);
+  const [units, setUnits] = useState<AdUnit[]>([]);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<QAResult | null>(null);
   const [error, setError] = useState("");
@@ -284,7 +281,7 @@ export default function QAPage() {
     id,
     campaignId: "",
     filter: "",
-    filterScope: "ad",
+    filterScope: "adset",
     sinceDate: defaultSinceDate(),
     loading: false,
     loaded: false,
@@ -321,42 +318,9 @@ export default function QAPage() {
     patchCampaignRow(id, { [field]: value } as Partial<CampaignRow>);
   }
 
-  function addUnit() {
-    setUnits((prev) => [
-      ...prev,
-      { id: String(Date.now()), name: "", link: "" },
-    ]);
-  }
-
+  // Drop a single ad from the loaded set (ads are loaded via Campaign ID import).
   function removeUnit(id: string) {
-    if (units.length <= 1) return;
     setUnits((prev) => prev.filter((u) => u.id !== id));
-  }
-
-  function extractAdId(input: string): string {
-    const trimmed = input.trim();
-    // Already a numeric ID
-    if (/^\d{10,}$/.test(trimmed)) return trimmed;
-    try {
-      const urlStr = trimmed.startsWith("http") ? trimmed : `https://${trimmed}`;
-      const url = new URL(urlStr);
-      const fromParams =
-        url.searchParams.get("id") ||
-        url.searchParams.get("ad_id") ||
-        url.searchParams.get("creative_id") ||
-        url.searchParams.get("selected_ad_ids");
-      if (fromParams) return fromParams.split(",")[0].trim();
-    } catch {
-      // not a URL, return as-is
-    }
-    return trimmed;
-  }
-
-  function updateUnit(id: string, field: "name" | "link", value: string) {
-    const resolved = field === "link" ? extractAdId(value) : value;
-    setUnits((prev) =>
-      prev.map((u) => (u.id === id ? { ...u, [field]: resolved } : u))
-    );
   }
 
   const GOOGLE_LINK_RE =
@@ -774,10 +738,7 @@ export default function QAPage() {
     setWo("");
     setDetectedDocs([]);
     setWoDestinationUrl(null);
-    setUnits([
-      { id: "1", name: "", link: "" },
-      { id: "2", name: "", link: "" },
-    ]);
+    setUnits([]);
     setCampaigns([newCampaignRow("c1")]);
     setResult(null);
     setError("");
@@ -991,7 +952,7 @@ export default function QAPage() {
                   Ad units
                 </h2>
                 <p className="text-sm text-gray-500 mt-0.5">
-                  Paste a <strong>Campaign ID</strong> above to auto-load all ads, or add them individually below using an Ad ID or Ads Manager URL.
+                  Paste a <strong>Campaign ID</strong> to auto-load all its ads.
                 </p>
               </div>
 
@@ -1105,59 +1066,34 @@ export default function QAPage() {
                 </button>
               </div>
 
-              {/* Column headers */}
-              <div className="grid grid-cols-[1fr_2fr_32px] gap-3 mb-2 px-1">
-                <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
-                  Ad unit name
-                </span>
-                <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
-                  Ad ID or URL
-                </span>
-                <span />
-              </div>
-
-              <div className="space-y-2">
-                {units.map((unit) => (
-                  <div
-                    key={unit.id}
-                    className="grid grid-cols-[1fr_2fr_32px] gap-3 items-center"
-                  >
-                    <input
-                      type="text"
-                      value={unit.name}
-                      onChange={(e) =>
-                        updateUnit(unit.id, "name", e.target.value)
-                      }
-                      placeholder="e.g. Static"
-                      className="px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
-                    />
-                    <input
-                      type="text"
-                      value={unit.link}
-                      onChange={(e) =>
-                        updateUnit(unit.id, "link", e.target.value)
-                      }
-                      placeholder="e.g. 120210001234567 or facebook.com/ads/preview/?id=..."
-                      className="px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent"
-                    />
-                    <button
-                      onClick={() => removeUnit(unit.id)}
-                      disabled={units.length <= 1}
-                      className="flex items-center justify-center w-8 h-8 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                      title="Remove"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-
-              <button
-                onClick={addUnit}
-                className="mt-3 w-full py-2.5 rounded-xl border border-dashed border-gray-300 text-sm text-gray-500 hover:text-gray-700 hover:border-gray-400 transition-colors"
-              >
-                + Add ad unit
-              </button>
+              {/* Loaded ads preview */}
+              {units.some((u) => u.link.trim()) && (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-gray-400 uppercase tracking-wide px-1">
+                    Loaded ads ({units.filter((u) => u.link.trim()).length})
+                  </p>
+                  {units
+                    .filter((u) => u.link.trim())
+                    .map((unit) => (
+                      <div
+                        key={unit.id}
+                        className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-sm text-gray-900 truncate">{unit.name || "Unnamed ad"}</p>
+                          <p className="text-xs font-mono text-gray-400 truncate">{unit.link}</p>
+                        </div>
+                        <button
+                          onClick={() => removeUnit(unit.id)}
+                          className="shrink-0 flex items-center justify-center w-8 h-8 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+                          title="Remove"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              )}
             </div>
 
             {error && (
