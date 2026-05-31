@@ -932,8 +932,29 @@ export async function POST(request: Request) {
         name: unitContents[i].name || "Unnamed",
         adId: unitContents[i].adId ?? null,
       }));
+      // A batch can occasionally return no usable unit (model emitted an empty
+      // or malformed `units` array), leaving `base` as `{}` — i.e. no `checks`
+      // and no `status`. The UI maps Object.entries(unit.checks) over every
+      // unit, so a unit without `checks` crashed the whole results page. Supply
+      // a safe default so a single bad unit degrades to a "couldn't verify"
+      // card instead of taking the report down.
+      const hasChecks =
+        base.checks !== null && typeof base.checks === "object";
+      const safeChecks = hasChecks
+        ? base.checks
+        : {
+            copy_creative_alignment: { status: "unknown", note: "No result returned for this ad — re-run the QA." },
+            promo_month_date: { status: "unknown", note: "No result returned." },
+            url_cta: { status: "unknown", note: "No result returned." },
+            grammar_typos: { status: "unknown", note: "No result returned." },
+            ai_enhancements: { status: "unknown", note: "No result returned." },
+            format_size: { status: "unknown", note: "No result returned." },
+          };
       return {
         ...base,
+        checks: safeChecks,
+        status: typeof base.status === "string" ? base.status : "warning",
+        summary: typeof base.summary === "string" ? base.summary : "",
         name: unitContents[repIdx].name || "Unnamed",
         adId: unitContents[repIdx].adId ?? null,
         group,

@@ -1294,13 +1294,25 @@ export default function QAPage() {
                   );
                 })()}
                 <div className="px-6 py-2">
-                  {Object.entries(unit.checks).map(([key, check]) => (
+                  {/* Guard against a unit that came back without a `checks`
+                      object (e.g. a batch whose model response had an empty/
+                      malformed units array). Object.entries(undefined) throws
+                      "Cannot convert undefined or null to object" and, inside
+                      this .map, takes the whole results page down. Fall back to
+                      an empty object so a single bad unit renders blank instead
+                      of crashing the report. */}
+                  {Object.entries(unit.checks ?? {}).map(([key, check]) => (
                     <CheckRow
                       key={key}
                       label={CHECK_LABELS[key] ?? key}
                       result={check}
                     />
                   ))}
+                  {!unit.checks && (
+                    <p className="text-sm text-amber-600 py-2.5">
+                      This ad unit came back without check details — re-run the QA for it.
+                    </p>
+                  )}
                 </div>
                 {unit.summary && (
                   <div className="px-6 py-3 bg-gray-50 border-t border-gray-100">

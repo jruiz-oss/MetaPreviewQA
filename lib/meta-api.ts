@@ -289,6 +289,8 @@ type CreativeFields = {
         description?: string;
         link?: string;
         call_to_action?: { type?: string; value?: { link?: string } };
+        image_hash?: string; // the configured card image — ground truth for a carousel card
+        picture?: string;    // viewable URL for the card, when image_hash isn't resolvable
       }>;
     };
     video_data?: {
@@ -502,7 +504,7 @@ export async function fetchAdContent(
     // Permission, and because Graph fails the whole request on a single forbidden field, that
     // one field would fail the entire ad read. Music status is fetched separately in
     // fetchMusicStatus() so it degrades to "unknown" instead of nuking the creative read.
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,effective_object_story_id,image_url,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},ad_formats,optimization_type},degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,effective_object_story_id,image_url,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments{name,description,link,call_to_action,image_hash,picture}},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url},videos{video_id,thumbnail_url},ad_formats,optimization_type},degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -556,7 +558,13 @@ export async function fetchAdContent(
   const singleHash =
     data.creative?.image_hash ??
     data.creative?.object_story_spec?.link_data?.image_hash;
-  const allHashes = Array.from(new Set([...feedHashes, ...(singleHash ? [singleHash] : [])]));
+  // Carousel card image hashes — the actually-configured cards. Resolving these
+  // to viewable URLs lets us QA the real cards instead of the asset_feed_spec
+  // pool (which retains stale assets from earlier creative edits).
+  const cardHashes = (data.creative?.object_story_spec?.link_data?.child_attachments ?? [])
+    .map((c) => c.image_hash)
+    .filter(Boolean) as string[];
+  const allHashes = Array.from(new Set([...feedHashes, ...cardHashes, ...(singleHash ? [singleHash] : [])]));
 
   const feedVideoIds = (data.creative?.asset_feed_spec?.videos ?? [])
     .map((v) => v.video_id)
@@ -655,27 +663,59 @@ export async function fetchAdContent(
   }
 
   // --- Anchor the live image to what is ACTUALLY serving ------------------
-  // The pool above is only trustworthy when it has one image per size. When a
-  // non-carousel ad has same-size duplicates AND no published image_hash, the
-  // pool likely retains stale assets from a previous edit and our size-pick can
-  // grab the wrong (old) one — making QA read a creative the ad doesn't serve.
-  // In that case, read the actual serving image from the effective published
-  // post (or creative.image_url) instead of guessing from the pool.
+  // PLACEMENT-optimized ads (optimization_type=PLACEMENT) keep a POOL of images
+  // in asset_feed_spec that retains STALE assets from earlier edits — e.g. an
+  // old "Opening April 9" creative left behind after the ad was updated to the
+  // June promo. With published_hash=no there's no single image to anchor on, so
+  // reading from the pool makes QA OCR a creative the ad no longer serves and
+  // report a phantom "old creative" mismatch. The effective published post is
+  // the ground truth of what's live, so prefer it — for carousels (its
+  // subattachments are the live cards) AND statics — and only fall back to the
+  // pool when nothing else resolves. Previously this anchor ran for non-carousel
+  // ads only, so carousels always read the raw (stale-prone) pool.
   const sizeKeys = feedImageCandidates.map((c) => (c.width && c.height ? `${c.width}x${c.height}` : "??"));
   const hasSameSizeDupes = sizeKeys.length > new Set(sizeKeys).size;
-  const staleRisk = !isCarousel && !publishedHash && hasSameSizeDupes;
+  // The pool is trustworthy only when it has one image per size AND a concrete
+  // published hash to anchor on. Otherwise treat it as stale-prone.
+  const poolIsTrustworthy = !!publishedHash && !hasSameSizeDupes;
 
+  const storyId = data.creative?.effective_object_story_id;
   let servingUrls: string[] = [];
   let liveSource = isCarousel ? "carousel_pool" : "pool";
-  if (staleRisk) {
-    if (data.creative?.image_url) {
+
+  if (!poolIsTrustworthy) {
+    // 1. Ground truth: the effective serving post. Carousel → live cards via
+    //    subattachments; static → the served image.
+    if (storyId) {
+      servingUrls = await fetchServingImageUrls(storyId, accessToken);
+      if (servingUrls.length) liveSource = "effective_post";
+    }
+
+    // 2. Carousel fallback: the configured card images (child_attachments) are
+    //    the real cards — still far more reliable than the asset_feed_spec pool.
+    if (!servingUrls.length && isCarousel) {
+      const cardUrls: string[] = [];
+      for (const card of data.creative?.object_story_spec?.link_data?.child_attachments ?? []) {
+        const resolved = card.image_hash ? dimMap.get(card.image_hash)?.url : undefined;
+        const url = resolved ?? card.picture;
+        if (url) cardUrls.push(url);
+      }
+      if (cardUrls.length) {
+        servingUrls = cardUrls;
+        liveSource = "carousel_cards";
+      }
+    }
+
+    // 3. Static fallback: the creative's own serving image URL.
+    if (!servingUrls.length && data.creative?.image_url) {
       servingUrls = [data.creative.image_url];
       liveSource = "creative_image_url";
-    } else if (data.creative?.effective_object_story_id) {
-      servingUrls = await fetchServingImageUrls(data.creative.effective_object_story_id, accessToken);
-      liveSource = servingUrls.length ? "effective_post" : "pool_fallback";
-    } else {
-      liveSource = "pool_fallback";
+    }
+
+    // 4. Last resort: the (possibly stale) pool — flagged so a bad finding is
+    //    traceable to a pool read in the logs.
+    if (!servingUrls.length) {
+      liveSource = isCarousel ? "carousel_pool_fallback" : "pool_fallback";
     }
   }
 
