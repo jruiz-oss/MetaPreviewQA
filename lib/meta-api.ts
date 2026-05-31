@@ -474,24 +474,78 @@ async function fetchMusicStatus(
  */
 async function fetchServingImageUrls(storyId: string, accessToken: string): Promise<string[]> {
   try {
-    const url = `${GRAPH_API}/${storyId}?fields=full_picture,attachments{media{image{src}},subattachments{media{image{src}}}}&access_token=${accessToken}`;
+    const url = `${GRAPH_API}/${storyId}?fields=full_picture,picture,attachments{media{image{src},source},subattachments{media{image{src},source}}}&access_token=${accessToken}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
     const data = await res.json();
-    if (data.error) return [];
+    if (data.error) {
+      console.log(`[meta-api][post-dbg] story=${storyId} ERROR code=${data.error.code} msg=${data.error.message}`);
+      return [];
+    }
     const urls: string[] = [];
     for (const a of data.attachments?.data ?? []) {
-      const src = a?.media?.image?.src;
+      const src = a?.media?.image?.src ?? a?.media?.source;
       if (src) urls.push(src);
       for (const s of a?.subattachments?.data ?? []) {
-        const ssrc = s?.media?.image?.src;
+        const ssrc = s?.media?.image?.src ?? s?.media?.source;
         if (ssrc) urls.push(ssrc);
       }
     }
     if (!urls.length && data.full_picture) urls.push(data.full_picture);
+    if (!urls.length && data.picture) urls.push(data.picture);
+    if (!urls.length) {
+      console.log(`[meta-api][post-dbg] story=${storyId} no images — raw=${JSON.stringify(data).slice(0, 400)}`);
+    }
     return urls;
   } catch {
     return [];
   }
+}
+
+/**
+ * Ground-truth fallback for dynamic / multi-advertiser PLACEMENT ads whose
+ * asset_feed_spec pool retains stale assets and whose effective post returns no
+ * images. Asks Meta to RENDER the ad via the /previews endpoint — the exact
+ * preview shown in Ads Manager — then pulls the real served image URL(s) out of
+ * the returned iframe HTML. This is what actually serves, so QA reads the live
+ * creative instead of a stale pool guess.
+ */
+async function fetchPreviewImageUrls(adId: string, accessToken: string): Promise<string[]> {
+  // A few formats cover feed + story + IG; first that yields images wins.
+  const formats = ["MOBILE_FEED_STANDARD", "INSTAGRAM_STANDARD", "FACEBOOK_STORY_MOBILE"];
+  const found: string[] = [];
+  for (const fmt of formats) {
+    try {
+      const url = `${GRAPH_API}/${adId}/previews?ad_format=${fmt}&access_token=${accessToken}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
+      const data = await res.json();
+      if (data.error) {
+        console.log(`[meta-api][preview-dbg] ad=${adId} fmt=${fmt} ERROR code=${data.error.code} msg=${data.error.message}`);
+        continue;
+      }
+      const body: string = data?.data?.[0]?.body ?? "";
+      // The body is an <iframe src="...preview_iframe.php?...&t=TOKEN">. Decode
+      // the HTML-escaped src and fetch it to get the rendered ad HTML.
+      const srcMatch = body.match(/src="([^"]+)"/);
+      if (!srcMatch) continue;
+      const iframeSrc = srcMatch[1].replace(/&amp;/g, "&");
+      const iframeRes = await fetch(iframeSrc, { signal: AbortSignal.timeout(8000), cache: "no-store" });
+      const html = await iframeRes.text();
+      // Pull image URLs from the rendered preview (Meta CDN hosts).
+      const imgMatches = Array.from(html.matchAll(/https:\\?\/\\?\/[^"'\s\\]*(?:scontent|fbcdn)[^"'\s\\]*/gi));
+      for (const m of imgMatches) {
+        const clean = m[0].replace(/\\\//g, "/").replace(/&amp;/g, "&");
+        // Skip tiny UI sprites / profile pics where identifiable; keep creative-sized assets.
+        if (!found.includes(clean)) found.push(clean);
+      }
+      if (found.length) {
+        console.log(`[meta-api][preview-dbg] ad=${adId} fmt=${fmt} → ${found.length} image url(s) from preview`);
+        return found;
+      }
+    } catch (err) {
+      console.log(`[meta-api][preview-dbg] ad=${adId} fmt=${fmt} threw ${(err as Error).message}`);
+    }
+  }
+  return found;
 }
 
 /**
@@ -747,7 +801,19 @@ export async function fetchAdContent(
       liveSource = "creative_image_url";
     }
 
-    // 4. Last resort: the pool. If the customization-rules filter narrowed it to
+    // 4. Rendered-preview fallback: ask Meta to render the ad (the Ads Manager
+    //    preview) and read the real served image from it. This is the reliable
+    //    ground truth for dynamic / multi-advertiser PLACEMENT ads where the
+    //    post exposes no images and the pool is stale.
+    if (!servingUrls.length) {
+      const previewUrls = await fetchPreviewImageUrls(adId, accessToken);
+      if (previewUrls.length) {
+        servingUrls = previewUrls;
+        liveSource = "ad_preview";
+      }
+    }
+
+    // 5. Last resort: the pool. If the customization-rules filter narrowed it to
     //    the live assets, that's now reliable; otherwise it may still be stale.
     if (!servingUrls.length) {
       liveSource = rulesFilterActive
