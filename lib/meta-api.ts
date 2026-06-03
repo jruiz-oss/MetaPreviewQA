@@ -854,6 +854,24 @@ export async function fetchAdContent(
       }
     }
     chosenImageCandidates = [...Array.from(bySize.values()), ...unknownDim];
+
+    // When placement-aware mode is on, additionally drop assets that are stale
+    // relative to the newest dated asset in the pool. The WxH dedup above keeps
+    // a unique-size asset even if it's the only one at that size — but a Reel
+    // (e.g. 1152×2048) from March is still stale creative even if nothing newer
+    // has that exact size. Same 25-day threshold used for titles and staleNote.
+    if (PLACEMENT_AWARE_CREATIVE) {
+      const newestCandMs = feedImageCandidates.reduce(
+        (max, c) => (c.dateMs != null && c.dateMs > max ? c.dateMs : max),
+        -Infinity
+      );
+      if (Number.isFinite(newestCandMs)) {
+        const staleThresholdMs = STALE_ASSET_AGE_GAP_DAYS * 24 * 60 * 60 * 1000;
+        chosenImageCandidates = chosenImageCandidates.filter(
+          (c) => c.dateMs == null || newestCandMs - c.dateMs <= staleThresholdMs
+        );
+      }
+    }
   }
 
   // --- Anchor the live image to what is ACTUALLY serving ------------------
