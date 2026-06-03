@@ -86,7 +86,8 @@ async function readDriveFolder(
   depth = 0,
   folderName?: string,
   images?: DriveImageRef[],
-  pathPrefix = ""
+  pathPrefix = "",
+  insideApprovalFolder = false  // true once we've entered an "approval"-named folder
 ): Promise<string> {
   const drive = google.drive({ version: "v3", auth });
   const docs = google.docs({ version: "v1", auth });
@@ -132,8 +133,12 @@ async function readDriveFolder(
 
       // Queue viewable images (by reference, not bytes) for server-side download
       // in the QA route. PSDs, PDFs, video and audio are skipped (not viewable).
+      // Images are ONLY collected from "For Approval" folders (or subfolders within
+      // them) — the "Creative" folder holds PSDs/concepts and must be ignored.
       if (images && VIEWABLE_IMAGE_MIME.has(file.mimeType)) {
-        if (images.length >= MAX_DRIVE_IMAGES) {
+        if (!insideApprovalFolder) {
+          console.log(`[fetch-doc] SKIP image "${file.name}" — not inside an approval folder; only images in "For Approval" (or similar) folders are cross-referenced.`);
+        } else if (images.length >= MAX_DRIVE_IMAGES) {
           console.log(`[fetch-doc] SKIP image "${file.name}" — image cap reached (${MAX_DRIVE_IMAGES}); not cross-referenced.`);
         } else if (file.id) {
           // Prefix with the relative folder path so the QA matcher can tell which
@@ -229,8 +234,21 @@ async function readDriveFolder(
   // ── Recurse into sub-folders ───────────────────────────────────────────────
   for (const folder of subFolders) {
     if (!folder.id || !folder.name) continue;
+    const nameLC = folder.name.toLowerCase();
+    // "Creative" folders hold PSDs/concepts — never pull images from them.
+    // "For Approval" (or "Approval") folders hold the signed-off exports — always pull images.
+    // Once inside an approval folder, all deeper subfolders inherit that flag.
+    const isApprovalFolder = nameLC.includes("approval");
+    const isCreativeFolder = nameLC === "creative" || nameLC.startsWith("creative ");
+    const passImages = isCreativeFolder ? undefined : images; // block images from creative folder
+    const nextInsideApproval = insideApprovalFolder || isApprovalFolder;
+    if (isCreativeFolder) {
+      console.log(`[fetch-doc] Entering "Creative" subfolder "${folder.name}" — images will NOT be queued from here.`);
+    } else if (isApprovalFolder) {
+      console.log(`[fetch-doc] Entering approval subfolder "${folder.name}" — images WILL be queued from here.`);
+    }
     try {
-      const subContent = await readDriveFolder(folder.id, auth, depth + 1, folder.name, images, `${pathPrefix}${folder.name}/`);
+      const subContent = await readDriveFolder(folder.id, auth, depth + 1, folder.name, passImages, `${pathPrefix}${folder.name}/`, nextInsideApproval);
       sections.push(`[Sub-folder: ${folder.name}]\n${subContent}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
