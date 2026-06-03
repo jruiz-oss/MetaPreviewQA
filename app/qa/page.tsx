@@ -53,7 +53,8 @@ type UnitResult = {
   adId?: string | null;
   status: "pass" | "fail" | "warning";
   checks: {
-    copy_creative_alignment: CheckResult;
+    copy_alignment: CheckResult;
+    creative_alignment: CheckResult;
     promo_month_date: CheckResult;
     url_cta: CheckResult;
     grammar_typos: CheckResult;
@@ -73,7 +74,8 @@ type QAResult = {
 };
 
 const CHECK_LABELS: Record<string, string> = {
-  copy_creative_alignment: "Copy / creative match",
+  copy_alignment: "Copy match",
+  creative_alignment: "Creative match",
   promo_month_date: "Promo month & dates",
   url_cta: "URL & CTA destination",
   grammar_typos: "Grammar & typos",
@@ -83,7 +85,8 @@ const CHECK_LABELS: Record<string, string> = {
 
 // Order in which consolidated critical issues are grouped/scanned.
 const CRITICAL_ORDER = [
-  "copy_creative_alignment",
+  "copy_alignment",
+  "creative_alignment",
   "promo_month_date",
   "format_size",
   "url_cta",

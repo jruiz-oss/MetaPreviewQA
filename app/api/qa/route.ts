@@ -32,17 +32,18 @@ CRITICAL — IMAGE READING RULES (read before doing any visual check):
 - When you report that the image "says" or "shows" something, it must be something you can actually read in the pixels. If you are describing what should be there per the copy doc, say so explicitly rather than claiming the image shows it.
 - Do not fabricate differences. Only flag a mismatch between the image and a document when you can actually read the conflicting text in the image.
 
-Review each ad unit on six criteria:
-1. copy_creative_alignment — Does the ad copy exactly match the approved copy doc? You may receive images from two sources:
+Review each ad unit on seven criteria:
+1. copy_alignment — Does the ad copy text (post body, headline, CTA button text) exactly match the approved copy doc? Evaluate only the text-based content here — not the visual creative. Flag any word, phrase, offer detail, or CTA that differs from the approved copy doc. If no copy doc is provided, compare against the WO summary.
+2. creative_alignment — Does the visual creative match the approved Drive files? You may receive images from two sources:
    - APPROVED CREATIVE FROM DRIVE: the design files the client signed off on (labeled with their filenames). These are what the live ad is supposed to match.
    - LIVE META CREATIVE: the image(s) actually live in the Meta ad, shown per ad unit below.
    When images are provided, follow this two-step process:
    STEP 1 — TEXT EXTRACTION: Before comparing anything, read each image and list every piece of text you can literally see in the pixels (headlines, offer amounts, dates, disclaimers, CTAs, fine print). Record this separately for the approved Drive image and the live Meta image in the text_in_approved and text_in_live fields. If text is too small or blurry to read with confidence, write "not legible" for that item. If no image is present for a source, write null.
    STEP 2 — COMPARISON: With the extracted text in hand, compare the two lists. Flag any difference — a word, number, date, or phrase that appears in one but not the other, or differs between them. Also check visual theme, colors, logo, and layout match. Match Drive assets to ad units by filename/concept and size (e.g. "1080x1920 V2", "Carousel"). If only one source is present, check what you can. If no images at all, note that visual creative could not be checked.
-2. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references. Only evaluate dates you can actually read — from the API copy text, the copy doc, or text legibly visible in the image. Never report a date as appearing in the creative unless you can literally read it in the pixels.
-3. url_cta — Does the ad's destination URL match the approved URL exactly? Does the CTA match what was specified?
-4. grammar_typos — Any grammar errors, typos, or awkward phrasing?
-5. ai_enhancements — Are any Meta Advantage+ AI enhancements turned ON? You will receive two pieces of data:
+3. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references. Only evaluate dates you can actually read — from the API copy text, the copy doc, or text legibly visible in the image. Never report a date as appearing in the creative unless you can literally read it in the pixels.
+4. url_cta — Does the ad's destination URL match the approved URL exactly? Does the CTA match what was specified?
+5. grammar_typos — Any grammar errors, typos, or awkward phrasing?
+6. ai_enhancements — Are any Meta Advantage+ AI enhancements turned ON? You will receive two pieces of data:
    (a) API-checked enhancements: a list of enhancements and their on/off status fetched directly from the Meta API.
    (b) Manual check required: a list of enhancements that cannot be read from the API and must be verified by a human inside Meta Ads Manager.
    Evaluation rules:
@@ -51,7 +52,7 @@ Review each ad unit on six criteria:
    - If all non-allowed API-checked enhancements are OFF (allowed ones may be on): status = "warning", note = "All API-readable enhancements are off. The following must still be verified manually in Ads Manager: [list the manual items]."
    - If API enhancement data is absent: status = "unknown", note = "API enhancement data unavailable. The following must be verified manually in Ads Manager: [list the manual items]."
    Never return "pass" for ai_enhancements — manual items always require a human to verify.
-6. format_size — Do the creative asset dimensions match the intended format(s) for this ad?
+7. format_size — Do the creative asset dimensions match the intended format(s) for this ad?
    You will receive "Creative asset sizes" listing every unique width×height found across the ad's creative assets, plus placement info and ad format type.
    Also use the ad unit name as a strong hint — names typically include "Story", "Feed", "Reel", "Static", "Video", "1x1", "9x16", "4x5", etc.
    Key Meta format requirements:
@@ -85,7 +86,8 @@ IMPORTANT: Submit your review by calling the \`submit_qa_report\` tool. Put ever
       "name": "string",
       "status": "pass" | "fail" | "warning",
       "checks": {
-        "copy_creative_alignment": { "status": "pass" | "fail" | "warning", "note": "≤25 words", "text_in_approved": "all legible text from approved Drive image, or null", "text_in_live": "all legible text from live Meta image, or null" },
+        "copy_alignment": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
+        "creative_alignment": { "status": "pass" | "fail" | "warning", "note": "≤25 words", "text_in_approved": "all legible text from approved Drive image, or null", "text_in_live": "all legible text from live Meta image, or null" },
         "promo_month_date": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
         "url_cta": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
         "grammar_typos": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
@@ -130,7 +132,8 @@ const QA_TOOL: Anthropic.Tool = {
             checks: {
               type: "object",
               properties: {
-                copy_creative_alignment: {
+                copy_alignment: CHECK_SHAPE,
+                creative_alignment: {
                   type: "object",
                   properties: {
                     status: STATUS_ENUM,
@@ -789,7 +792,7 @@ export async function POST(request: Request) {
     // was handed the wrong file — cross-check against the [qa][sent] line above).
     for (const u of parsedUnits) {
       const checks = u?.checks as Record<string, Record<string, unknown>> | undefined;
-      const cca = checks?.copy_creative_alignment;
+      const cca = checks?.creative_alignment;
       if (cca) {
         console.log(
           `[qa][extract] "${String(u.name)}" status=${String(cca.status)} | ` +
@@ -982,7 +985,8 @@ export async function POST(request: Request) {
       const safeChecks = hasChecks
         ? base.checks
         : {
-            copy_creative_alignment: { status: "unknown", note: "No result returned for this ad — re-run the QA." },
+            copy_alignment: { status: "unknown", note: "No result returned for this ad — re-run the QA." },
+            creative_alignment: { status: "unknown", note: "No result returned." },
             promo_month_date: { status: "unknown", note: "No result returned." },
             url_cta: { status: "unknown", note: "No result returned." },
             grammar_typos: { status: "unknown", note: "No result returned." },
