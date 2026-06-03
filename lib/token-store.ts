@@ -1,47 +1,38 @@
 /**
- * Persistent token store backed by Vercel Blob.
- * Stores the Google refresh token as a small blob file so all serverless
- * function instances share the same token after a browser reconnect.
- * Falls back to the GOOGLE_REFRESH_TOKEN env var if Blob is not configured.
+ * Persistent token store backed by Upstash Redis.
+ * Stores the Google refresh token so all serverless function instances
+ * share the same token after a browser reconnect.
+ * Falls back to the GOOGLE_REFRESH_TOKEN env var if Redis is not configured.
  */
-import { put, head, del } from "@vercel/blob";
 
-const BLOB_PATHNAME = "vera/google_refresh_token.txt";
+const REDIS_KEY = "google_refresh_token";
+
+async function redisRequest(method: "GET" | "SET", args: string[]): Promise<string | null> {
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return null;
+
+  const res = await fetch(`${url}/${[method, ...args].map(encodeURIComponent).join("/")}`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
+
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data.result ?? null;
+}
 
 export async function getStoredRefreshToken(): Promise<string | undefined> {
   try {
-    const existing = await head(BLOB_PATHNAME, {
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-    }).catch(() => null);
-
-    if (existing?.url) {
-      const res = await fetch(existing.url, { cache: "no-store" });
-      if (res.ok) {
-        const token = (await res.text()).trim();
-        if (token) return token;
-      }
-    }
+    const token = await redisRequest("GET", [REDIS_KEY]);
+    if (token) return token;
   } catch {
-    // Blob not configured — fall through to env var
+    // Redis not configured — fall through to env var
   }
   return process.env.GOOGLE_REFRESH_TOKEN ?? undefined;
 }
 
 export async function setStoredRefreshToken(token: string): Promise<void> {
-  // del() requires the full blob URL, not a pathname — fetch it first
-  const existing = await head(BLOB_PATHNAME, {
-    token: process.env.BLOB_READ_WRITE_TOKEN,
-  }).catch(() => null);
-
-  if (existing?.url) {
-    await del(existing.url, {
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-    }).catch(() => null);
-  }
-
-  await put(BLOB_PATHNAME, token, {
-    access: "public",
-    token: process.env.BLOB_READ_WRITE_TOKEN,
-    addRandomSuffix: false,
-  });
+  await redisRequest("SET", [REDIS_KEY, token]);
 }
