@@ -8,8 +8,8 @@
 const REDIS_KEY = "google_refresh_token";
 
 async function redisRequest(method: "GET" | "SET", args: string[]): Promise<string | null> {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const url = process.env.KV_REST_API_URL;
+  const token = process.env.KV_REST_API_TOKEN;
   if (!url || !token) return null;
 
   const res = await fetch(`${url}/${[method, ...args].map(encodeURIComponent).join("/")}`, {
