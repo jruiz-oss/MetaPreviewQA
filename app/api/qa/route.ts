@@ -459,17 +459,21 @@ export async function POST(request: Request) {
     // reports it as a defect ("image has X" where X is from another creative).
     //   - Carousel unit  → only carousel assets are eligible (fall back to all
     //     if the folder has none, so we don't lose the comparison entirely).
-    //   - Non-carousel unit (static/story/feed/reel) → carousel assets are never
-    //     eligible. If that leaves nothing, we return no Drive image rather than
-    //     comparing against the wrong creative (the prompt handles "no approved
-    //     image" gracefully).
+    //   - Non-carousel unit (static/story/feed/reel) → prefer non-carousel assets,
+    //     but fall back to carousel assets when the Drive folder has none (happens
+    //     when the campaign uses the same creative for both formats and the files
+    //     aren't named separately). This mirrors the carousel-unit fallback above
+    //     so we always attempt a comparison rather than silently skipping it.
     const carouselUnit = unitIsCarousel(unit);
     let eligible = allDriveRefs.map((ref, i) => ({ ref, i }));
     if (carouselUnit) {
       const onlyCarousel = eligible.filter((x) => refIsCarousel(x.ref.name));
       if (onlyCarousel.length) eligible = onlyCarousel;
     } else {
-      eligible = eligible.filter((x) => !refIsCarousel(x.ref.name));
+      const nonCarousel = eligible.filter((x) => !refIsCarousel(x.ref.name));
+      // Fall back to carousel Drive assets when no static/story assets exist —
+      // same creative, different format label.
+      eligible = nonCarousel.length > 0 ? nonCarousel : eligible;
     }
     if (!eligible.length) return [];
 
@@ -672,7 +676,7 @@ export async function POST(request: Request) {
           // NOTE: the API requires temperature=1 (the default) whenever
           // thinking is enabled, so temperature is intentionally not set.
           // budget_tokens must be < max_tokens.
-          thinking: { type: "enabled", budget_tokens: 3000 },
+          thinking: { type: "enabled", budget_tokens: 1500 },
           // Structured output: the model returns its report by calling this tool,
           // so the result arrives as a validated object rather than free-text
           // JSON we have to parse (and that used to crash on unescaped quotes).
@@ -938,12 +942,12 @@ export async function POST(request: Request) {
     `[qa] ${unitContents.length} ad unit(s) → ${batches.length} unique version(s); running ${batches.length} Claude call(s) (saved ${unitContents.length - batches.length}).`
   );
 
-  // Run per-unit calls concurrently with a cap. Kept deliberately low: each call
-  // carries images (token-heavy), so firing 5 at once spiked us past the
-  // per-minute input-token limit and threw 429s. At 2 concurrent the token rate
-  // stays well under the ceiling, and the hardened retry/backoff below absorbs
-  // any remaining bursts. Results stay ordered (written back to their index).
-  const MAX_CONCURRENT_BATCHES = 2;
+  // Run per-unit calls concurrently with a cap. Raised from 2→4 after reviewing
+  // production logs: zero 429s observed, and per-call token volume (~9-13k input)
+  // is low enough that 4 concurrent stays well under rate limits. The hardened
+  // retry/backoff absorbs any remaining bursts. Results stay ordered (written back
+  // to their index).
+  const MAX_CONCURRENT_BATCHES = 4;
 
   try {
     const batchResults: Awaited<ReturnType<typeof runBatch>>[] = new Array(batches.length);
