@@ -961,7 +961,7 @@ export default function QAPage() {
                 onChange={(e) => handleWoChange(e.target.value)}
                 rows={6}
                 placeholder="Paste your full work order here — campaign name, offer, creative direction, expected URLs, launch/end dates."
-                className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent resize-none"
+                className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent resize-y min-h-[144px]"
               />
 
               {/* Detected destination URL */}
@@ -1388,26 +1388,41 @@ export default function QAPage() {
                     </div>
                   );
                 })()}
-                <div className="px-6 py-4 space-y-2">
-                  {/* Guard against a unit that came back without a `checks`
-                      object (e.g. a batch whose model response had an empty/
-                      malformed units array). Object.entries(undefined) throws
-                      "Cannot convert undefined or null to object" and, inside
-                      this .map, takes the whole results page down. Fall back to
-                      an empty object so a single bad unit renders blank instead
-                      of crashing the report. */}
-                  {Object.entries(unit.checks ?? {}).map(([key, check]) => (
-                    <CheckCard
-                      key={key}
-                      label={CHECK_LABELS[key] ?? key}
-                      result={check}
-                    />
-                  ))}
+                <div className="px-6 py-4 space-y-4">
                   {!unit.checks && (
                     <p className="text-sm text-amber-600 py-2.5">
                       This ad unit came back without check details — re-run the QA for it.
                     </p>
                   )}
+                  {unit.checks && (() => {
+                    const entries = Object.entries(unit.checks ?? {});
+                    const failing = entries.filter(([, c]) => c.status === "fail" || c.status === "warning");
+                    const passing = entries.filter(([, c]) => c.status === "pass" || c.status === "unknown");
+                    return (
+                      <>
+                        {failing.length > 0 && (
+                          <div>
+                            <p className="text-xs font-semibold text-red-600 uppercase tracking-wide mb-2">Fail</p>
+                            <div className="space-y-2">
+                              {failing.map(([key, check]) => (
+                                <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={check} />
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {passing.length > 0 && (
+                          <div>
+                            <p className="text-xs font-semibold text-emerald-600 uppercase tracking-wide mb-2">Pass</p>
+                            <div className="space-y-2">
+                              {passing.map(([key, check]) => (
+                                <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={check} />
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
                 {unit.summary && (
                   <div className="px-6 py-3 bg-gray-50 border-t border-gray-100">
