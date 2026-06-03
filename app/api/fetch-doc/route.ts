@@ -97,6 +97,33 @@ async function readDriveFolder(
     return "(Maximum folder depth reached — open this folder manually to review deeper contents.)";
   }
 
+  // For the root call (depth=0), we don't know the folder's own name yet. Fetch
+  // it so we can detect when the user linked directly to "For Approval" itself —
+  // in that case insideApprovalFolder would otherwise start false and images
+  // inside subfolders like "Frys GC Giveaway/V1/" would be silently skipped.
+  let selfName = folderName;
+  if (!selfName && depth === 0) {
+    try {
+      const metaRes = await drive.files.get({
+        fileId: folderId,
+        fields: "name",
+        supportsAllDrives: true,
+      });
+      selfName = metaRes.data.name ?? undefined;
+      if (selfName) console.log(`[fetch-doc] Root folder name resolved: "${selfName}"`);
+    } catch {
+      // Proceed without the name — approval detection falls back to subfolder names
+    }
+  }
+  // Propagate the "inside approval" flag: true if inherited from a parent folder,
+  // OR if the current folder itself has "approval" in its name (e.g. the user
+  // pasted a link directly to "For Approval" or "For Client Approval").
+  const selfIsApproval = (selfName ?? "").toLowerCase().includes("approval");
+  const effectiveInsideApproval = insideApprovalFolder || selfIsApproval;
+  if (selfIsApproval && !insideApprovalFolder) {
+    console.log(`[fetch-doc] Folder "${selfName}" is itself an approval folder — images inside will be queued.`);
+  }
+
   // List ALL non-trashed items (files AND sub-folders)
   const listRes = await drive.files.list({
     q: `'${folderId}' in parents and trashed = false`,
@@ -136,7 +163,7 @@ async function readDriveFolder(
       // Images are ONLY collected from "For Approval" folders (or subfolders within
       // them) — the "Creative" folder holds PSDs/concepts and must be ignored.
       if (images && VIEWABLE_IMAGE_MIME.has(file.mimeType)) {
-        if (!insideApprovalFolder) {
+        if (!effectiveInsideApproval) {
           console.log(`[fetch-doc] SKIP image "${file.name}" — not inside an approval folder; only images in "For Approval" (or similar) folders are cross-referenced.`);
         } else if (images.length >= MAX_DRIVE_IMAGES) {
           console.log(`[fetch-doc] SKIP image "${file.name}" — image cap reached (${MAX_DRIVE_IMAGES}); not cross-referenced.`);
@@ -241,7 +268,7 @@ async function readDriveFolder(
     const isApprovalFolder = nameLC.includes("approval");
     const isCreativeFolder = nameLC === "creative" || nameLC.startsWith("creative ");
     const passImages = isCreativeFolder ? undefined : images; // block images from creative folder
-    const nextInsideApproval = insideApprovalFolder || isApprovalFolder;
+    const nextInsideApproval = effectiveInsideApproval || isApprovalFolder;
     if (isCreativeFolder) {
       console.log(`[fetch-doc] Entering "Creative" subfolder "${folder.name}" — images will NOT be queued from here.`);
     } else if (isApprovalFolder) {

@@ -448,7 +448,20 @@ export async function POST(request: Request) {
   function rankRefsForUnit(unit: { name?: string | null; content?: string | null }): DriveImageRef[] {
     const unitName = unit.name ?? "";
     if (!allDriveRefs.length) return [];
-    const unitTokens = new Set(tokenize(unitName));
+    // Build token set from the unit name AND the ad body copy from the Meta API.
+    // Unit names are often generic ("May Static V1", "May Carousel V2") — they
+    // encode format and version but NOT the campaign concept. The ad copy, on the
+    // other hand, contains campaign-specific terms like "Fry's", "Amazon", or
+    // "Multiplier" that appear in the Drive folder path ("Fry's GC Giveaway/",
+    // "Amazon GC Giveaway/") and carry high IDF. Without content tokens, all V1
+    // images from every concept score identically on "v1" alone, and the wrong
+    // campaign's creative gets picked (alphabetically first wins). With content
+    // tokens, the concept-name terms break the tie and route each unit to its
+    // own campaign's Drive folder.
+    const unitTokens = new Set([
+      ...tokenize(unitName),
+      ...tokenize(unit.content ?? ""),
+    ]);
     if (!unitTokens.size) return [];
 
     // FORMAT-TYPE GATE — the fix for static units being QA'd against carousel
@@ -468,7 +481,11 @@ export async function POST(request: Request) {
     let eligible = allDriveRefs.map((ref, i) => ({ ref, i }));
     if (carouselUnit) {
       const onlyCarousel = eligible.filter((x) => refIsCarousel(x.ref.name));
-      if (onlyCarousel.length) eligible = onlyCarousel;
+      // Fall back to static/non-carousel assets when no carousel-labeled files
+      // exist — same creative, not separately named.
+      eligible = onlyCarousel.length > 0 ? onlyCarousel : eligible.filter((x) => !refIsCarousel(x.ref.name));
+      // If still nothing (e.g. only unrelated files), keep all eligible.
+      if (!eligible.length) eligible = allDriveRefs.map((ref, i) => ({ ref, i }));
     } else {
       const nonCarousel = eligible.filter((x) => !refIsCarousel(x.ref.name));
       // Fall back to carousel Drive assets when no static/story assets exist —
