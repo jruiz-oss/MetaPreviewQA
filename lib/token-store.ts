@@ -15,13 +15,7 @@ export async function getStoredRefreshToken(): Promise<string | undefined> {
     }).catch(() => null);
 
     if (existing?.url) {
-      // Private blobs require the token in the Authorization header
-      const res = await fetch(existing.url, {
-        cache: "no-store",
-        headers: {
-          Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}`,
-        },
-      });
+      const res = await fetch(existing.url, { cache: "no-store" });
       if (res.ok) {
         const token = (await res.text()).trim();
         if (token) return token;
@@ -46,7 +40,7 @@ export async function setStoredRefreshToken(token: string): Promise<void> {
   }
 
   await put(BLOB_PATHNAME, token, {
-    access: "private",
+    access: "public",
     token: process.env.BLOB_READ_WRITE_TOKEN,
     addRandomSuffix: false,
   });
