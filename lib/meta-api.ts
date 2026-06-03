@@ -326,7 +326,7 @@ type CreativeFields = {
   };
   asset_feed_spec?: {
     bodies?: Array<{ text?: string }>;
-    titles?: Array<{ text?: string }>;
+    titles?: Array<{ text?: string; adlabels?: Array<{ name?: string }> }>;
     call_to_action_types?: string[];
     link_urls?: Array<{ website_url?: string }>;
     images?: Array<{ hash?: string; url?: string; adlabels?: Array<{ name?: string }> }>; // width/height not a valid sub-field — use AdImages endpoint
@@ -654,7 +654,7 @@ export async function fetchAdContent(
     // Permission, and because Graph fails the whole request on a single forbidden field, that
     // one field would fail the entire ad read. Music status is fetched separately in
     // fetchMusicStatus() so it degrades to "unknown" instead of nuking the creative read.
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,effective_object_story_id,image_url,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments{name,description,link,call_to_action,image_hash,picture}},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text},call_to_action_types,link_urls{website_url},images{hash,url,adlabels{name}},videos{video_id,thumbnail_url},ad_formats,optimization_type,asset_customization_rules{image_label{name},customization_spec,priority}},degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,effective_object_story_id,image_url,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments{name,description,link,call_to_action,image_hash,picture}},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text,adlabels{name}},call_to_action_types,link_urls{website_url},images{hash,url,adlabels{name}},videos{video_id,thumbnail_url},ad_formats,optimization_type,asset_customization_rules{image_label{name},customization_spec,priority}},degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -1095,10 +1095,40 @@ function formatCreative(data: AdResponse): string | null {
       feed.bodies.forEach((b, i) => b.text && lines.push(`  ${i + 1}. ${b.text}`));
     }
     if (feed.titles?.length) {
-      lines.push(`Ad titles:`);
-      feed.titles.forEach(
-        (t, i) => t.text && lines.push(`  ${i + 1}. ${t.text}`)
+      // Apply the same date-filtering as images: titles accumulate stale entries
+      // from previous promo cycles in the asset_feed_spec pool. If any title has
+      // a timestamp adlabel, drop titles that are much older than the newest one.
+      const titlesWithDates = feed.titles.map((t) => {
+        let dateMs: number | null = null;
+        for (const l of t.adlabels ?? []) {
+          dateMs = dateMs ?? assetLabelDateMs(l.name);
+        }
+        return { text: t.text, dateMs };
+      });
+      const newestTitleMs = titlesWithDates.reduce(
+        (max, t) => (t.dateMs != null && t.dateMs > max ? t.dateMs : max),
+        -Infinity
       );
+      const gapMs = STALE_ASSET_AGE_GAP_DAYS * 24 * 60 * 60 * 1000;
+      const freshTitles = titlesWithDates.filter(
+        (t) =>
+          newestTitleMs === -Infinity || // no dates at all — keep all
+          t.dateMs == null ||            // this title has no date — keep (can't tell)
+          newestTitleMs - t.dateMs <= gapMs // within the freshness window
+      );
+      const staleTitles = titlesWithDates.filter(
+        (t) =>
+          newestTitleMs !== -Infinity &&
+          t.dateMs != null &&
+          newestTitleMs - t.dateMs > gapMs
+      );
+      lines.push(`Ad titles:`);
+      freshTitles.forEach((t, i) => t.text && lines.push(`  ${i + 1}. ${t.text}`));
+      if (staleTitles.length) {
+        lines.push(
+          `  [Note: ${staleTitles.length} title(s) omitted — dated ${STALE_ASSET_AGE_GAP_DAYS}+ days before the newest asset, likely stale from a prior promo: ${staleTitles.map((t) => `"${t.text}"`).join(", ")}]`
+        );
+      }
     }
     if (feed.call_to_action_types?.length) {
       lines.push(`CTA types: ${feed.call_to_action_types.join(", ")}`);
