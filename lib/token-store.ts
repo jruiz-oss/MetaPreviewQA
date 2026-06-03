@@ -10,13 +10,18 @@ const BLOB_PATHNAME = "vera/google_refresh_token.txt";
 
 export async function getStoredRefreshToken(): Promise<string | undefined> {
   try {
-    // Check if the blob exists
     const existing = await head(BLOB_PATHNAME, {
       token: process.env.BLOB_READ_WRITE_TOKEN,
     }).catch(() => null);
 
     if (existing?.url) {
-      const res = await fetch(existing.url, { cache: "no-store" });
+      // Private blobs require the token in the Authorization header
+      const res = await fetch(existing.url, {
+        cache: "no-store",
+        headers: {
+          Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}`,
+        },
+      });
       if (res.ok) {
         const token = (await res.text()).trim();
         if (token) return token;
@@ -29,10 +34,16 @@ export async function getStoredRefreshToken(): Promise<string | undefined> {
 }
 
 export async function setStoredRefreshToken(token: string): Promise<void> {
-  // Delete old blob first (put with same pathname creates a new URL otherwise)
-  await del(BLOB_PATHNAME, {
+  // del() requires the full blob URL, not a pathname — fetch it first
+  const existing = await head(BLOB_PATHNAME, {
     token: process.env.BLOB_READ_WRITE_TOKEN,
   }).catch(() => null);
+
+  if (existing?.url) {
+    await del(existing.url, {
+      token: process.env.BLOB_READ_WRITE_TOKEN,
+    }).catch(() => null);
+  }
 
   await put(BLOB_PATHNAME, token, {
     access: "private",
