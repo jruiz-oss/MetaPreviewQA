@@ -194,49 +194,82 @@ function AdIdBadge({ adId }: { adId: string }) {
   );
 }
 
-function CheckRow({ label, result }: { label: string; result: CheckResult }) {
+function CheckCard({ label, result }: { label: string; result: CheckResult }) {
+  // Fails and warnings start open; passes start collapsed.
+  const defaultOpen = result.status === "fail" || result.status === "warning";
+  const [open, setOpen] = useState(defaultOpen);
+
+  const hasImageText = result.text_in_approved != null || result.text_in_live != null;
+
+  const borderColor: Record<string, string> = {
+    pass: "border-emerald-200",
+    fail: "border-red-200",
+    warning: "border-amber-200",
+    unknown: "border-gray-200",
+  };
+  const headerBg: Record<string, string> = {
+    pass: "bg-emerald-50",
+    fail: "bg-red-50",
+    warning: "bg-amber-50",
+    unknown: "bg-gray-50",
+  };
+  const iconColor: Record<string, string> = {
+    pass: "text-emerald-600",
+    fail: "text-red-600",
+    warning: "text-amber-600",
+    unknown: "text-gray-400",
+  };
   const icons: Record<string, string> = {
     pass: "✓",
     fail: "✗",
     warning: "!",
     unknown: "–",
   };
-  const colors: Record<string, string> = {
-    pass: "text-emerald-600",
-    fail: "text-red-600",
-    warning: "text-amber-600",
-    unknown: "text-gray-400",
-  };
-  const hasImageText = result.text_in_approved != null || result.text_in_live != null;
+
+  const s = result.status in borderColor ? result.status : "unknown";
 
   return (
-    <div className="flex items-start gap-3 py-2.5 border-b border-gray-100 last:border-0">
-      <span className={`font-semibold text-sm w-4 shrink-0 mt-0.5 ${colors[result.status] ?? colors.unknown}`}>
-        {icons[result.status] ?? "–"}
-      </span>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-gray-700">{label}</p>
-        {result.note && (
-          <p className="text-sm text-gray-500 mt-0.5">{result.note}</p>
-        )}
-        {hasImageText && (
-          <details className="mt-1.5">
-            <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-600 select-none">
-              Image text extracted
-            </summary>
-            <div className="mt-1.5 grid grid-cols-2 gap-2 text-xs">
-              <div className="rounded bg-gray-50 border border-gray-200 p-2">
-                <p className="font-medium text-gray-500 mb-1">Approved (Drive)</p>
-                <p className="text-gray-700 whitespace-pre-wrap">{result.text_in_approved ?? "—"}</p>
+    <div className={`rounded-xl border ${borderColor[s]} overflow-hidden`}>
+      {/* Accordion header — always visible */}
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 ${headerBg[s]} text-left`}
+      >
+        <div className="flex items-center gap-2">
+          <span className={`font-semibold text-sm ${iconColor[s]}`}>
+            {icons[s]}
+          </span>
+          <span className="text-sm font-medium text-gray-800">{label}</span>
+        </div>
+        <span className="text-gray-400 text-xs select-none">{open ? "▲" : "▼"}</span>
+      </button>
+
+      {/* Accordion body */}
+      {open && (result.note || hasImageText) && (
+        <div className="px-4 py-3 bg-white border-t border-gray-100 space-y-2">
+          {result.note && (
+            <p className="text-sm text-gray-600">{result.note}</p>
+          )}
+          {hasImageText && (
+            <details className="mt-1">
+              <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-600 select-none">
+                Image text extracted
+              </summary>
+              <div className="mt-1.5 grid grid-cols-2 gap-2 text-xs">
+                <div className="rounded bg-gray-50 border border-gray-200 p-2">
+                  <p className="font-medium text-gray-500 mb-1">Approved (Drive)</p>
+                  <p className="text-gray-700 whitespace-pre-wrap">{result.text_in_approved ?? "—"}</p>
+                </div>
+                <div className="rounded bg-gray-50 border border-gray-200 p-2">
+                  <p className="font-medium text-gray-500 mb-1">Live (Meta)</p>
+                  <p className="text-gray-700 whitespace-pre-wrap">{result.text_in_live ?? "—"}</p>
+                </div>
               </div>
-              <div className="rounded bg-gray-50 border border-gray-200 p-2">
-                <p className="font-medium text-gray-500 mb-1">Live (Meta)</p>
-                <p className="text-gray-700 whitespace-pre-wrap">{result.text_in_live ?? "—"}</p>
-              </div>
-            </div>
-          </details>
-        )}
-      </div>
+            </details>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1355,7 +1388,7 @@ export default function QAPage() {
                     </div>
                   );
                 })()}
-                <div className="px-6 py-2">
+                <div className="px-6 py-4 space-y-2">
                   {/* Guard against a unit that came back without a `checks`
                       object (e.g. a batch whose model response had an empty/
                       malformed units array). Object.entries(undefined) throws
@@ -1364,7 +1397,7 @@ export default function QAPage() {
                       an empty object so a single bad unit renders blank instead
                       of crashing the report. */}
                   {Object.entries(unit.checks ?? {}).map(([key, check]) => (
-                    <CheckRow
+                    <CheckCard
                       key={key}
                       label={CHECK_LABELS[key] ?? key}
                       result={check}
