@@ -35,7 +35,7 @@ export async function setStoredRefreshToken(token: string): Promise<void> {
   }).catch(() => null);
 
   await put(BLOB_PATHNAME, token, {
-    access: "public",
+    access: "private",
     token: process.env.BLOB_READ_WRITE_TOKEN,
     addRandomSuffix: false,
   });
