@@ -795,14 +795,22 @@ export default function QAPage() {
             onClick={reset}
           />
         </div>
-        {result && (
-          <button
-            onClick={reset}
-            className="text-sm text-gray-500 hover:text-gray-900 transition-colors"
+        <div className="flex items-center gap-4">
+          {result && (
+            <button
+              onClick={reset}
+              className="text-sm text-gray-500 hover:text-gray-900 transition-colors"
+            >
+              ← New check
+            </button>
+          )}
+          <a
+            href="/api/google/connect"
+            className="text-xs text-gray-400 hover:text-gray-700 transition-colors border border-gray-200 rounded-lg px-3 py-1.5"
           >
-            ← New check
-          </button>
-        )}
+            Switch Google account
+          </a>
+        </div>
       </header>
 
       {/* Google OAuth banners */}
