@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 import { getOAuthClient } from "@/lib/google-auth";
-import { cookies } from "next/headers";
+import { getStoredRefreshToken } from "@/lib/token-store";
 import mammoth from "mammoth";
 
 // ─── URL parsers ──────────────────────────────────────────────────────────────
@@ -253,10 +253,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "No URL provided" }, { status: 400 });
   }
 
-  // Resolve auth: cookie token (set after browser OAuth) wins over env var
-  const cookieStore = await cookies();
-  const cookieToken = cookieStore.get("google_refresh_token")?.value;
-  const auth = getOAuthClient(cookieToken);
+  // Resolve auth: KV-stored token (set after browser OAuth) wins over env var
+  const storedToken = await getStoredRefreshToken();
+  const auth = getOAuthClient(storedToken);
 
   try {
     // 1. Direct Google Doc link

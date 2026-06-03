@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
+import { setStoredRefreshToken } from "@/lib/token-store";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -31,15 +32,10 @@ export async function GET(request: Request) {
       return NextResponse.redirect(`${base}/qa?google_error=no_refresh_token`);
     }
 
-    const response = NextResponse.redirect(`${base}/qa?google_connected=1`);
-    response.cookies.set("google_refresh_token", refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 60 * 60 * 24 * 365, // 1 year
-      path: "/",
-    });
-    return response;
+    // Store globally so ALL users get the new token, not just the one who reconnected
+    await setStoredRefreshToken(refreshToken);
+
+    return NextResponse.redirect(`${base}/qa?google_connected=1`);
   } catch (err) {
     console.error("Google OAuth callback error:", err);
     return NextResponse.redirect(`${base}/qa?google_error=token_exchange_failed`);
