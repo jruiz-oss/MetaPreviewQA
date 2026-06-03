@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 import { getOAuthClient } from "@/lib/google-auth";
+import { cookies } from "next/headers";
 import mammoth from "mammoth";
 
 // ─── URL parsers ──────────────────────────────────────────────────────────────
@@ -24,8 +25,7 @@ function extractFileId(url: string): string | null {
 
 // ─── Readers ──────────────────────────────────────────────────────────────────
 
-async function readGoogleDoc(docId: string): Promise<string> {
-  const auth = getOAuthClient();
+async function readGoogleDoc(docId: string, auth: ReturnType<typeof getOAuthClient>): Promise<string> {
   const docs = google.docs({ version: "v1", auth });
   const res = await docs.documents.get({ documentId: docId });
   const doc = res.data;
@@ -82,12 +82,12 @@ export type DriveImageRef = { id: string; name: string; mediaType: string };
 
 async function readDriveFolder(
   folderId: string,
+  auth: ReturnType<typeof getOAuthClient>,
   depth = 0,
   folderName?: string,
   images?: DriveImageRef[],
   pathPrefix = ""
 ): Promise<string> {
-  const auth = getOAuthClient();
   const drive = google.drive({ version: "v3", auth });
   const docs = google.docs({ version: "v1", auth });
 
@@ -230,7 +230,7 @@ async function readDriveFolder(
   for (const folder of subFolders) {
     if (!folder.id || !folder.name) continue;
     try {
-      const subContent = await readDriveFolder(folder.id, depth + 1, folder.name, images, `${pathPrefix}${folder.name}/`);
+      const subContent = await readDriveFolder(folder.id, auth, depth + 1, folder.name, images, `${pathPrefix}${folder.name}/`);
       sections.push(`[Sub-folder: ${folder.name}]\n${subContent}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -253,11 +253,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "No URL provided" }, { status: 400 });
   }
 
+  // Resolve auth: cookie token (set after browser OAuth) wins over env var
+  const cookieStore = await cookies();
+  const cookieToken = cookieStore.get("google_refresh_token")?.value;
+  const auth = getOAuthClient(cookieToken);
+
   try {
     // 1. Direct Google Doc link
     const docId = extractDocId(url);
     if (docId) {
-      const content = await readGoogleDoc(docId);
+      const content = await readGoogleDoc(docId, auth);
       if (!content) {
         return NextResponse.json({ error: "Doc appears to be empty." }, { status: 422 });
       }
@@ -268,14 +273,13 @@ export async function POST(request: Request) {
     const folderId = extractFolderId(url);
     if (folderId) {
       const images: DriveImageRef[] = [];
-      const content = await readDriveFolder(folderId, 0, undefined, images);
+      const content = await readDriveFolder(folderId, auth, 0, undefined, images);
       return NextResponse.json({ content: content.slice(0, 30000), type: "folder", images });
     }
 
     // 3. Google Drive file link (non-Doc)
     const fileId = extractFileId(url);
     if (fileId) {
-      const auth = getOAuthClient();
       const drive = google.drive({ version: "v3", auth });
       // Try exporting as plain text
       const exportRes = await drive.files.export(

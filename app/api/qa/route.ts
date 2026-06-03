@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { google } from "googleapis";
 import sharp from "sharp";
 import { getOAuthClient } from "@/lib/google-auth";
+import { cookies } from "next/headers";
 import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
@@ -240,7 +241,9 @@ async function downloadUrlImage(url: string, context?: string | null): Promise<F
 // Download the queued Drive images server-side (no Vercel body limit here).
 async function downloadDriveImages(refs: DriveImageRef[]): Promise<FetchedImage[]> {
   if (!refs.length) return [];
-  const drive = google.drive({ version: "v3", auth: getOAuthClient() });
+  const cookieStore = await cookies();
+  const cookieToken = cookieStore.get("google_refresh_token")?.value;
+  const drive = google.drive({ version: "v3", auth: getOAuthClient(cookieToken) });
 
   // Download in parallel — sequential was needless latency.
   const results = await Promise.all(

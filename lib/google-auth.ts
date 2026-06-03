@@ -1,15 +1,21 @@
 import { google } from "googleapis";
 
 /**
- * Returns an authenticated OAuth2 client using env vars:
+ * Returns an authenticated OAuth2 client.
+ *
+ * Token resolution order:
+ *   1. refreshTokenOverride — passed in from the request's cookie
+ *   2. GOOGLE_REFRESH_TOKEN env var — fallback / initial setup
+ *
+ * Env vars required:
  *   GOOGLE_CLIENT_ID
  *   GOOGLE_CLIENT_SECRET
- *   GOOGLE_REFRESH_TOKEN
+ *   GOOGLE_REFRESH_TOKEN  (fallback when no cookie is present)
  */
-export function getOAuthClient() {
+export function getOAuthClient(refreshTokenOverride?: string) {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  const refreshToken = refreshTokenOverride ?? process.env.GOOGLE_REFRESH_TOKEN;
 
   if (!clientId || !clientSecret || !refreshToken) {
     throw new Error(
