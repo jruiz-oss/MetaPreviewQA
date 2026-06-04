@@ -3,22 +3,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 
-// Loads an external script once and resolves when ready. Used to pull the PDF
-// libraries (html2canvas + jsPDF) from a CDN only when the user actually clicks
-// "Download PDF", so they don't add to the app bundle.
-function loadScript(src: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) {
-      resolve();
-      return;
-    }
-    const s = document.createElement("script");
-    s.src = src;
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error(`Failed to load ${src}`));
-    document.head.appendChild(s);
-  });
-}
 
 type AdUnit = {
   id: string;
@@ -699,92 +683,74 @@ export default function QAPage() {
       .slice(0, 40);
   }
 
-  // Capture the rendered results block as an image and save it as a multi-page
-  // PDF — a visual snapshot the reviewer can send to the team. Libraries load
-  // from CDN on first click.
+  // Print the results block as a PDF using the browser's native print dialog.
+  // This gives crisp vector text and avoids html2canvas spacing/rendering bugs.
   async function downloadPdf() {
     if (!resultsRef.current || downloadingPdf) return;
     setDownloadingPdf(true);
-    try {
-      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js");
-      await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
-      const html2canvas = (window as any).html2canvas;
-      const { jsPDF } = (window as any).jspdf;
-      if (!html2canvas || !jsPDF) throw new Error("PDF tools failed to load — check your connection and try again.");
 
-      const canvas = await html2canvas(resultsRef.current, {
-        scale: 2,
-        backgroundColor: "#f8f8f6",
-        useCORS: true,
-        logging: false,
-        // html2canvas mis-positions text in tight, padded pills (renders it
-        // shifted up, poking out of the rounded background). Inject a capture-
-        // only stylesheet that vertically centers badge text with a relaxed
-        // line-height. Only affects the clone used for capture, not the app.
-        onclone: (doc: Document) => {
-          const style = doc.createElement("style");
-          style.textContent = `
-            /* Pills / badges — html2canvas struggles with inline-flex + small
-               padded text (mispositions content, clips rounded bg). Flatten to
-               inline-block with an explicit line-height so the text sits squarely
-               inside the pill without overflowing. */
-            .pdf-badge {
-              display: inline-block !important;
-              line-height: 1.6 !important;
-              padding-top: 2px !important;
-              padding-bottom: 2px !important;
-              vertical-align: middle !important;
-            }
-            /* AdIdBadge is a button with inline-flex + gap. Collapse it the same
-               way and add spacing between the ID text and the copy icon manually. */
-            button.pdf-badge {
-              display: inline-block !important;
-            }
-            button.pdf-badge > span + span {
-              margin-left: 4px !important;
-            }
-            /* Tailwind's space-y-* emits margin-top on siblings via a CSS selector.
-               html2canvas sometimes collapses these margins; be explicit. */
-            .space-y-5 > * + * {
-              margin-top: 1.25rem !important;
-            }
-            .space-y-3 > * + * {
-              margin-top: 0.75rem !important;
-            }
-            /* Flex gaps inside cards can collapse in the snapshot — convert to margin. */
-            .gap-3 { gap: 0.75rem !important; }
-            .gap-2 { gap: 0.5rem !important; }
-            .gap-1\\.5 { gap: 0.375rem !important; }
-          `;
-          doc.head.appendChild(style);
-        },
-      });
+    const PRINT_ID = "vera-print-root";
+    resultsRef.current.id = PRINT_ID;
 
-      const imgData = canvas.toDataURL("image/png");
-      const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
-      const pageW = pdf.internal.pageSize.getWidth();
-      const pageH = pdf.internal.pageSize.getHeight();
-      // Scale the capture to page width, then slice it across as many pages as needed.
-      const imgW = pageW;
-      const imgH = (canvas.height * imgW) / canvas.width;
-      let heightLeft = imgH;
-      let position = 0;
-      pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
-      heightLeft -= pageH;
-      while (heightLeft > 0) {
-        position -= pageH;
-        pdf.addPage();
-        pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
-        heightLeft -= pageH;
+    const style = document.createElement("style");
+    style.id = "vera-print-css";
+    style.textContent = `
+      @media print {
+        /* Hide all page chrome; show only the results block */
+        body * { visibility: hidden !important; }
+        #${PRINT_ID}, #${PRINT_ID} * { visibility: visible !important; }
+        #${PRINT_ID} {
+          position: fixed !important;
+          inset: 0 !important;
+          width: 100% !important;
+          overflow: visible !important;
+        }
+
+        @page {
+          size: A4 portrait;
+          margin: 1.4cm 1.8cm;
+        }
+
+        /* Preserve background colors (badges, status pills, card tints) */
+        * {
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+        }
+
+        /* Avoid clipping card contents at page boundaries */
+        .vera-unit-card {
+          break-inside: avoid;
+          page-break-inside: avoid;
+          overflow: visible !important;
+        }
+
+        /* Badge / pill rendering — keep inline-block so text sits flush */
+        .pdf-badge {
+          display: inline-block !important;
+          line-height: 1.6 !important;
+          vertical-align: middle !important;
+        }
+
+        /* Hide interactive-only elements */
+        button.pdf-badge > span:last-child { display: none !important; }
+
+        /* Collapse flex gaps that sometimes print as 0 */
+        .gap-3 { gap: 0.75rem !important; }
+        .gap-2 { gap: 0.5rem !important; }
+        .gap-1\\.5 { gap: 0.375rem !important; }
       }
-      const stamp = new Date().toISOString().slice(0, 10);
-      const woSlug = woFileSlug(wo);
-      pdf.save(`vera-qa-${woSlug ? `${woSlug}-` : "results-"}${stamp}.pdf`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not generate PDF.");
-    } finally {
-      setDownloadingPdf(false);
-    }
+    `;
+    document.head.appendChild(style);
+
+    // Brief delay so React flushes any pending renders before the print snapshot.
+    await new Promise((r) => setTimeout(r, 80));
+
+    window.print();
+
+    // Cleanup — runs after the print dialog closes.
+    style.remove();
+    if (resultsRef.current) resultsRef.current.id = "";
+    setDownloadingPdf(false);
   }
 
   function reset() {
@@ -1221,7 +1187,7 @@ export default function QAPage() {
                 onClick={downloadPdf}
                 disabled={downloadingPdf || loading}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                title={loading ? "Wait for all campaigns to finish" : "Download results as PDF"}
+                title={loading ? "Wait for all campaigns to finish" : "Print / save results as PDF"}
               >
                 {downloadingPdf ? (
                   <>
@@ -1350,7 +1316,7 @@ export default function QAPage() {
             {result.units.map((unit, i) => (
               <div
                 key={i}
-                className="bg-white rounded-2xl border border-gray-200 overflow-hidden"
+                className="vera-unit-card bg-white rounded-2xl border border-gray-200 overflow-hidden"
               >
                 {(() => {
                   // The result may cover several identical ad versions. Show the
