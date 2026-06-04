@@ -327,6 +327,7 @@ type CreativeFields = {
   asset_feed_spec?: {
     bodies?: Array<{ text?: string }>;
     titles?: Array<{ text?: string; adlabels?: Array<{ name?: string }> }>;
+    descriptions?: Array<{ text?: string }>; // card/link descriptions for asset-feed ads — without this, QA falsely reports approved descriptions as "absent from live ad"
     call_to_action_types?: string[];
     link_urls?: Array<{ website_url?: string }>;
     images?: Array<{ hash?: string; url?: string; adlabels?: Array<{ name?: string }> }>; // width/height not a valid sub-field — use AdImages endpoint
@@ -654,7 +655,7 @@ export async function fetchAdContent(
     // Permission, and because Graph fails the whole request on a single forbidden field, that
     // one field would fail the entire ad read. Music status is fetched separately in
     // fetchMusicStatus() so it degrades to "unknown" instead of nuking the creative read.
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,effective_object_story_id,image_url,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments{name,description,link,call_to_action,image_hash,picture}},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text,adlabels{name}},call_to_action_types,link_urls{website_url},images{hash,url,adlabels{name}},videos{video_id,thumbnail_url},ad_formats,optimization_type,asset_customization_rules{image_label{name},customization_spec,priority}},degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,effective_object_story_id,image_url,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments{name,description,link,call_to_action,image_hash,picture}},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text,adlabels{name}},descriptions{text},call_to_action_types,link_urls{website_url},images{hash,url,adlabels{name}},videos{video_id,thumbnail_url},ad_formats,optimization_type,asset_customization_rules{image_label{name},customization_spec,priority}},degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -1147,6 +1148,10 @@ function formatCreative(data: AdResponse): string | null {
           `  [Note: ${staleTitles.length} title(s) omitted — dated ${STALE_ASSET_AGE_GAP_DAYS}+ days before the newest asset, likely stale from a prior promo: ${staleTitles.map((t) => `"${t.text}"`).join(", ")}]`
         );
       }
+    }
+    if (feed.descriptions?.length) {
+      lines.push(`Ad descriptions:`);
+      feed.descriptions.forEach((d, i) => d.text && lines.push(`  ${i + 1}. ${d.text}`));
     }
     if (feed.call_to_action_types?.length) {
       lines.push(`CTA types: ${feed.call_to_action_types.join(", ")}`);
