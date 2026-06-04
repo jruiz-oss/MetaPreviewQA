@@ -1407,9 +1407,13 @@ export default function QAPage() {
                           <div>
                             <p className="text-xs font-semibold text-red-600 uppercase tracking-wide mb-2">Fail</p>
                             <div className="space-y-2">
-                              {failing.map(([key, check]) => (
-                                <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={check} />
-                              ))}
+                              {failing.map(([key, check]) => {
+                                const displayResult =
+                                  key === "ai_enhancements" && check.note
+                                    ? { ...check, note: check.note.replace(/\s*(Manual check also required|The following must (?:still )?be verified manually|API enhancement data unavailable)[\s\S]*/i, "").trim() }
+                                    : check;
+                                return <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={displayResult} />;
+                              })}
                             </div>
                           </div>
                         )}
@@ -1417,9 +1421,13 @@ export default function QAPage() {
                           <div>
                             <p className="text-xs font-semibold text-emerald-600 uppercase tracking-wide mb-2">Pass</p>
                             <div className="space-y-2">
-                              {passing.map(([key, check]) => (
-                                <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={check} />
-                              ))}
+                              {passing.map(([key, check]) => {
+                                const displayResult =
+                                  key === "ai_enhancements" && check.note
+                                    ? { ...check, note: check.note.replace(/\s*(Manual check also required|The following must (?:still )?be verified manually|API enhancement data unavailable)[\s\S]*/i, "").trim() }
+                                    : check;
+                                return <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={displayResult} />;
+                              })}
                             </div>
                           </div>
                         )}
