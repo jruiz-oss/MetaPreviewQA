@@ -80,6 +80,12 @@ const MAX_DRIVE_IMAGES = 16;
 
 export type DriveImageRef = { id: string; name: string; mediaType: string };
 
+// No fixed depth cap — recursion follows the tree as deep as it goes, but is
+// bounded by a total-folders budget and a cycle guard (Drive shortcuts can
+// loop), and stops early once the image cap is filled inside approval branches.
+const MAX_FOLDERS_SCANNED = 100;
+type ScanState = { foldersVisited: number; visitedIds: Set<string> };
+
 async function readDriveFolder(
   folderId: string,
   auth: ReturnType<typeof getOAuthClient>,
@@ -87,15 +93,23 @@ async function readDriveFolder(
   folderName?: string,
   images?: DriveImageRef[],
   pathPrefix = "",
-  insideApprovalFolder = false  // true once we've entered an "approval"-named folder
+  insideApprovalFolder = false,  // true once we've entered an "approval"-named folder
+  scan: ScanState = { foldersVisited: 0, visitedIds: new Set() }
 ): Promise<string> {
   const drive = google.drive({ version: "v3", auth });
   const docs = google.docs({ version: "v1", auth });
 
-  // Safety: don't recurse more than 3 levels deep
-  if (depth > 3) {
-    return "(Maximum folder depth reached — open this folder manually to review deeper contents.)";
+  // Cycle guard: skip folders we've already scanned (shortcut loops).
+  if (scan.visitedIds.has(folderId)) {
+    return "(Folder already scanned — skipping repeat visit.)";
   }
+  scan.visitedIds.add(folderId);
+
+  // Total scan budget replaces the old depth-3 cap.
+  if (scan.foldersVisited >= MAX_FOLDERS_SCANNED) {
+    return `(Scan budget of ${MAX_FOLDERS_SCANNED} folders reached — open this folder manually to review contents.)`;
+  }
+  scan.foldersVisited++;
 
   // For the root call (depth=0), we don't know the folder's own name yet. Fetch
   // it so we can detect when the user linked directly to "For Approval" itself —
@@ -285,13 +299,20 @@ async function readDriveFolder(
     const isCreativeFolder = nameLC === "creative" || nameLC.startsWith("creative ");
     const passImages = isCreativeFolder ? undefined : images; // block images from creative folder
     const nextInsideApproval = effectiveInsideApproval || isApprovalFolder;
+    // Early stop: once the image cap is full, deeper approval-branch folders can
+    // only contribute more images — nothing left to find there, so skip them.
+    if (images && images.length >= MAX_DRIVE_IMAGES && nextInsideApproval) {
+      console.log(`[fetch-doc] SKIP subfolder "${folder.name}" — image cap (${MAX_DRIVE_IMAGES}) already reached; nothing more needed from approval branches.`);
+      sections.push(`[Sub-folder: ${folder.name}]\n(Skipped — image cap of ${MAX_DRIVE_IMAGES} already reached.)`);
+      continue;
+    }
     if (isCreativeFolder) {
       console.log(`[fetch-doc] Entering "Creative" subfolder "${folder.name}" — images will NOT be queued from here.`);
     } else if (isApprovalFolder) {
       console.log(`[fetch-doc] Entering approval subfolder "${folder.name}" — images WILL be queued from here.`);
     }
     try {
-      const subContent = await readDriveFolder(folder.id, auth, depth + 1, folder.name, passImages, `${pathPrefix}${folder.name}/`, nextInsideApproval);
+      const subContent = await readDriveFolder(folder.id, auth, depth + 1, folder.name, passImages, `${pathPrefix}${folder.name}/`, nextInsideApproval, scan);
       sections.push(`[Sub-folder: ${folder.name}]\n${subContent}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
