@@ -76,7 +76,10 @@ const VIEWABLE_IMAGE_MIME = new Set([
 // references (Drive file id) — NOT the bytes — so the browser payload stays
 // tiny and well under Vercel's ~4.5MB serverless request-body limit. The QA
 // route downloads the actual bytes server-side.
-const MAX_DRIVE_IMAGES = 16;
+// 64 is generous: refs cost ~100 bytes each, and the QA route ranks + picks at
+// most 4 images per ad unit before downloading any bytes, so a bigger pool here
+// only improves matching (a too-small pool is how approved assets get skipped).
+const MAX_DRIVE_IMAGES = 64;
 
 export type DriveImageRef = { id: string; name: string; mediaType: string };
 
