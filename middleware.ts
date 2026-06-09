@@ -26,5 +26,10 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  // Also exempt public image assets (logo, icons): without this, the login
+  // page's <img src="/vera-wordmark-transparent.png"> was caught by the
+  // middleware pre-auth and redirected to "/", rendering as a broken image.
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:png|jpg|jpeg|gif|svg|webp|ico)$).*)",
+  ],
 };

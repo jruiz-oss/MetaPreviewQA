@@ -124,19 +124,35 @@ async function readDriveFolder(
     console.log(`[fetch-doc] Folder "${selfName}" is itself an approval folder — images inside will be queued.`);
   }
 
-  // List ALL non-trashed items (files AND sub-folders)
-  const listRes = await drive.files.list({
-    q: `'${folderId}' in parents and trashed = false`,
-    fields: "files(id, name, mimeType)",
-    pageSize: 50,
-    supportsAllDrives: true,
-    includeItemsFromAllDrives: true,
-    corpora: "allDrives",
-  });
+  // List ALL non-trashed items (files AND sub-folders), following pagination.
+  // Previously a single pageSize:50 call silently dropped item 51+ — a folder
+  // with many exports could lose the copy doc or approved creative with no
+  // visible error. A page cap bounds runaway folders.
+  const MAX_LIST_PAGES = 10; // 10 × 100 = up to 1000 items per folder
+  type DriveFile = { id?: string | null; name?: string | null; mimeType?: string | null };
+  const allItems: DriveFile[] = [];
+  let pageToken: string | undefined = undefined;
+  for (let page = 0; page < MAX_LIST_PAGES; page++) {
+    // Explicit annotation: pageToken feeds the call args and is assigned from
+    // the response, which otherwise makes TS flag a circular type inference.
+    const listRes: { data: { nextPageToken?: string | null; files?: DriveFile[] } } = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: "nextPageToken, files(id, name, mimeType)",
+      pageSize: 100,
+      pageToken,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      corpora: "allDrives",
+    });
+    allItems.push(...(listRes.data.files ?? []));
+    pageToken = listRes.data.nextPageToken ?? undefined;
+    if (!pageToken) break;
+  }
+  if (pageToken) {
+    console.log(`[fetch-doc] folder ${folderId} — page cap reached (${MAX_LIST_PAGES} pages); remaining items not listed.`);
+  }
 
-  console.log(`[fetch-doc] folder ${folderId} (depth ${depth}) → ${listRes.data.files?.length ?? 0} items found:`, JSON.stringify(listRes.data.files?.map(f => ({ name: f.name, mimeType: f.mimeType })) ?? []));
-
-  const allItems = listRes.data.files ?? [];
+  console.log(`[fetch-doc] folder ${folderId} (depth ${depth}) → ${allItems.length} items found:`, JSON.stringify(allItems.map(f => ({ name: f.name, mimeType: f.mimeType }))));
   if (allItems.length === 0) {
     return "(No files found in this folder — the folder may be empty, or the authenticated account may not have access to its contents.)";
   }

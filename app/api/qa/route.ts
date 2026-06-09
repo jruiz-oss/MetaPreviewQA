@@ -715,9 +715,17 @@ export async function POST(request: Request) {
         break;
       } catch (err) {
         const status = (err as { status?: number })?.status;
+        // Retry transient failures, not just 429s: 529 ("overloaded_error") and
+        // 5xx server errors previously failed the whole batch on the first hit
+        // even though a short backoff almost always recovers them.
         const isRateLimit =
           status === 429 || (err instanceof Error && err.message.includes("rate_limit"));
-        if (isRateLimit && attempt < MAX_ATTEMPTS - 1) {
+        const isTransient =
+          isRateLimit ||
+          status === 529 ||
+          (typeof status === "number" && status >= 500) ||
+          (err instanceof Error && err.message.includes("overloaded"));
+        if (isTransient && attempt < MAX_ATTEMPTS - 1) {
           // Prefer the server's retry-after (seconds); else exponential backoff.
           const headers = (err as { headers?: Record<string, string> })?.headers;
           const retryAfter = headers ? Number(headers["retry-after"]) : NaN;
@@ -877,13 +885,27 @@ export async function POST(request: Request) {
   // with pixel-identical creative collapse while any visual difference splits.
   // We return the parts separately so we can log a per-FIELD hash and see
   // exactly which field makes two "identical" ads diverge.
+  // The Meta content block starts with "Ad name: <name>" (and sometimes a
+  // "Creative name:" line) — per-ad identity, not QA substance. Leaving it in
+  // the fingerprint made every differently-named duplicate ("Carousel 1" vs
+  // "Carousel 2") hash differently, so dedup never fired and identical ads were
+  // QA'd repeatedly. Strip those lines; name-derived format signal is already
+  // captured separately via nameSignature().
+  function contentForFingerprint(content: string | null | undefined): string | null {
+    if (!content) return null;
+    return content
+      .split("\n")
+      .filter((line) => !/^(Ad name|Creative name):/.test(line))
+      .join("\n");
+  }
+
   function fingerprintParts(i: number): Record<string, unknown> {
     const u = unitContents[i];
     const enh = (u as { aiEnhancements?: AiEnhancement[] | null }).aiEnhancements ?? [];
     const manual = (u as { manualCheckItems?: string[] }).manualCheckItems ?? [];
     const liveImgs = (u as { creativeImages?: FetchedImage[] }).creativeImages ?? [];
     return {
-      content: u.content ?? null,
+      content: contentForFingerprint(u.content),
       note: u.note ?? null,
       enh: enh.map((e) => `${e.label}:${e.status}`).sort(),
       manual: [...manual].sort(),

@@ -699,10 +699,19 @@ export default function QAPage() {
         /* Hide all page chrome; show only the results block */
         body * { visibility: hidden !important; }
         #${PRINT_ID}, #${PRINT_ID} * { visibility: visible !important; }
+        /* absolute (not fixed!) — fixed elements clip to a single printed page */
         #${PRINT_ID} {
-          position: fixed !important;
-          inset: 0 !important;
+          position: absolute !important;
+          top: 0 !important;
+          left: 0 !important;
           width: 100% !important;
+          height: auto !important;
+          overflow: visible !important;
+        }
+
+        /* Let the document grow to the full content height across pages */
+        html, body {
+          height: auto !important;
           overflow: visible !important;
         }
 
