@@ -27,11 +27,15 @@ export type CampaignAd = {
   name: string;
   adsetName: string;
   createdTime: string; // ISO timestamp the ad was created
+  updatedTime: string; // ISO timestamp the ad was last edited
 };
 
 export type FetchAdsOptions = {
-  // Optional ISO date (YYYY-MM-DD). When set, ads created before this date are
-  // dropped. This is the guard against stale past-promo ad sets getting QA'd.
+  // Optional ISO date (YYYY-MM-DD). When set, ads not touched since this date
+  // are dropped. The filter runs on updated_time (falling back to created_time):
+  // campaigns reused month over month typically EDIT existing ads for the new
+  // promo rather than recreate them, so created_time stays months old —
+  // filtering on it silently dropped exactly the ads that should be QA'd.
   sinceDate?: string;
 };
 
@@ -76,15 +80,16 @@ export async function fetchCampaignAdsList(
   accessToken: string,
   options: FetchAdsOptions = {}
 ): Promise<FetchAdsResult> {
-  // Filtering is purely by ad creation date. A campaign reused month over month
-  // accumulates ad sets from past promos; without a date floor those get QA'd
-  // against the current work order and report false fails. Set a cutoff (e.g.
-  // the start of this promo month) and only ads created on/after it come through.
+  // A campaign reused month over month accumulates ad sets from past promos;
+  // without a date floor those get QA'd against the current work order and
+  // report false fails. The cutoff compares against updated_time (when the ad
+  // was last edited) so ads refreshed in place for the current promo survive,
+  // while genuinely untouched past-promo ads are dropped.
   const sinceMs = options.sinceDate ? Date.parse(options.sinceDate) : NaN;
   const hasSince = !Number.isNaN(sinceMs);
 
   let url: string | null =
-    `${GRAPH_API}/${campaignId}/ads?fields=id,name,adset{name},created_time&limit=200&access_token=${accessToken}`;
+    `${GRAPH_API}/${campaignId}/ads?fields=id,name,adset{name},created_time,updated_time&limit=200&access_token=${accessToken}`;
   const ads: CampaignAd[] = [];
   let totalFetched = 0;
   let skippedOld = 0;
@@ -98,6 +103,7 @@ export async function fetchCampaignAdsList(
           name: string;
           adset?: { name?: string };
           created_time?: string;
+          updated_time?: string;
         }[];
         paging?: { next?: string };
         error?: { code?: number; message?: string };
@@ -116,11 +122,15 @@ export async function fetchCampaignAdsList(
       for (const ad of data.data ?? []) {
         totalFetched++;
         const createdTime = ad.created_time ?? "";
+        const updatedTime = ad.updated_time ?? "";
 
-        // Drop ads created before the cutoff date when one is set.
+        // Drop ads not touched since the cutoff date when one is set.
+        // updated_time is the signal (edits for the current promo refresh it);
+        // fall back to created_time only if updated_time is absent.
         if (hasSince) {
-          const createdMs = createdTime ? Date.parse(createdTime) : NaN;
-          if (Number.isNaN(createdMs) || createdMs < sinceMs) {
+          const refTime = updatedTime || createdTime;
+          const refMs = refTime ? Date.parse(refTime) : NaN;
+          if (Number.isNaN(refMs) || refMs < sinceMs) {
             skippedOld++;
             continue;
           }
@@ -131,6 +141,7 @@ export async function fetchCampaignAdsList(
           name: ad.name,
           adsetName: ad.adset?.name ?? "",
           createdTime,
+          updatedTime,
         });
       }
 

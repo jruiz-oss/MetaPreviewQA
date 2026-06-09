@@ -5,7 +5,7 @@ import { google } from "googleapis";
 import sharp from "sharp";
 import { getOAuthClient } from "@/lib/google-auth";
 import { getStoredRefreshToken } from "@/lib/token-store";
-import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
+import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, MANUAL_CHECK_ITEMS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
 export const maxDuration = 300;
@@ -34,6 +34,7 @@ CRITICAL — IMAGE READING RULES (read before doing any visual check):
 
 Review each ad unit on seven criteria:
 1. copy_alignment — Does the ad copy text (post body, headline, CTA button text) exactly match the approved copy doc? Evaluate only the text-based content here — not the visual creative. Flag any word, phrase, offer detail, or CTA that differs from the approved copy doc. If no copy doc is provided, compare against the WO summary.
+   TYPOGRAPHIC VARIANTS ARE NOT FINDINGS: curly vs straight quotes/apostrophes, hyphen vs en/em dash, "..." vs "…", differing whitespace or line breaks, and capitalization of an entire line (e.g. headline case) are platform formatting differences — treat them as matching. Flag only changes in actual words, numbers, offers, or meaning-bearing punctuation.
 2. creative_alignment — Does the visual creative match the approved Drive files? You may receive images from two sources:
    - APPROVED CREATIVE FROM DRIVE: the design files the client signed off on (labeled with their filenames). These are what the live ad is supposed to match.
    - LIVE META CREATIVE: the image(s) actually live in the Meta ad, shown per ad unit below.
@@ -42,34 +43,11 @@ Review each ad unit on seven criteria:
    STEP 2 — COMPARISON: With the extracted text in hand, compare the two lists. Flag any difference — a word, number, date, or phrase that appears in one but not the other, or differs between them. Also check visual theme, colors, logo, and layout match. Match Drive assets to ad units by filename/concept and size (e.g. "1080x1920 V2", "Carousel"). If only one source is present, check what you can. If no images at all, note that visual creative could not be checked.
    STEP 3 — COPY DOC CROSS-CHECK (only when the COPY DOCUMENT specifies on-image / per-card copy): compare the live image text you extracted in STEP 1 against the on-image copy the doc assigns to THIS specific ad unit/variant/option. The live image matching the approved Drive file is NOT sufficient on its own — if the live and Drive images both carry on-image text that differs from what the copy doc assigns this unit (e.g. the cards carry a different option's copy), flag it and name which option the on-image text actually belongs to. Use only text literally extracted from the pixels in STEP 1 — the image-reading rules above still apply. If the copy doc does not specify on-image copy, skip this step and do not penalize the ad for it.
    The step names above (STEP 1/2/3) are internal instructions only — NEVER reference them in your notes or summary. Just state the issue plainly, e.g. "live cards carry Option 1 on-image copy; copy doc assigns Option 2 copy to this unit."
-3. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references. Only evaluate dates you can actually read — from the API copy text, the copy doc, or text legibly visible in the image. Never report a date as appearing in the creative unless you can literally read it in the pixels.
-4. url_cta — Does the ad's destination URL match the approved URL exactly? Does the CTA match what was specified?
+3. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references. Use the TODAY'S DATE line provided with the work order as the ground truth for what is current vs stale — never rely on your own sense of the current date. Only evaluate dates you can actually read — from the API copy text, the copy doc, or text legibly visible in the image. Never report a date as appearing in the creative unless you can literally read it in the pixels.
+4. url_cta — Does the CTA match what was specified? For the destination URL, each ad unit includes a "URL comparison (computed)" line — a code-level comparison of the live URL(s) against the approved destination that already normalizes hosts/paths and ignores tracking parameters (utm_*, fbclid, etc.). Treat that computed verdict as authoritative for URL matching: do NOT re-derive URL matching yourself, and never flag tracking parameters as a mismatch. Your job in this check is the CTA (and echoing the computed URL verdict).
 5. grammar_typos — Any grammar errors, typos, or awkward phrasing?
-6. ai_enhancements — Are any Meta Advantage+ AI enhancements turned ON? You will receive two pieces of data:
-   (a) API-checked enhancements: a list of enhancements and their on/off status fetched directly from the Meta API.
-   (b) Manual check required: a list of enhancements that cannot be read from the API and must be verified by a human inside Meta Ads Manager.
-   Evaluation rules:
-   - Enhancements marked "(allowed ...)" are intentionally enabled. Treat them as acceptable: do NOT name them, do NOT include the word "ON" for them, and do NOT let them trigger a warning. Ignore them entirely.
-   - If any non-allowed API-checked enhancement is ON: status = "warning", note = name all ON (non-allowed) enhancements, then add "Manual check also required in Ads Manager for: [list the manual items]."
-   - If all non-allowed API-checked enhancements are OFF (allowed ones may be on): status = "warning", note = "All API-readable enhancements are off. The following must still be verified manually in Ads Manager: [list the manual items]."
-   - If API enhancement data is absent: status = "unknown", note = "API enhancement data unavailable. The following must be verified manually in Ads Manager: [list the manual items]."
-   Never return "pass" for ai_enhancements — manual items always require a human to verify.
-7. format_size — Do the creative asset dimensions match the intended format(s) for this ad?
-   You will receive "Creative asset sizes" listing every unique width×height found across the ad's creative assets, plus placement info and ad format type.
-   Also use the ad unit name as a strong hint — names typically include "Story", "Feed", "Reel", "Static", "Video", "1x1", "9x16", "4x5", etc.
-   Key Meta format requirements:
-   - Feed (facebook: feed, instagram: stream): 1:1 (1080×1080, ratio 1.00) or 4:5 (1080×1350, ratio 0.80)
-   - Stories (facebook: story, instagram: story): 9:16 (1080×1920, ratio 0.5625) — a 1:1 or 4:5 asset here means content will be cut off or letterboxed
-   - Reels (instagram: reels): 9:16 (1080×1920, ratio 0.5625)
-   - Right column (facebook: right_hand_column): 1.91:1
-   Evaluation rules:
-   - If the ad name says "Story" or "Reel" but creative dimensions are 1:1 or 4:5 → FAIL (wrong size, content will be cut off)
-   - If the ad name says "Feed" or "Static" but creative dimensions are 9:16 → FAIL (wrong size, will appear cropped in feed)
-   - If multiple sizes are present (e.g. both 1080×1080 and 1080×1920), check that each size is appropriate for its intended placement
-   - If placement shows "Advantage+ automatic" and multiple sizes exist, pass if the sizes cover both feed and story formats
-   - If placement shows "Advantage+ automatic" and only one size exists, warn if that size would be wrong for some placements
-   - If creative dimensions are absent: status = "unknown", note = "Creative dimensions not available."
-   - If placement data is absent but dimensions exist: evaluate based on ad name vs dimensions alone
+6. ai_enhancements — This check is computed automatically in code from the Meta API data, outside this review. Always return status "unknown" with an empty note for it; the system overwrites it.
+7. format_size — This check is computed automatically in code from the creative dimensions and placement data, outside this review. Always return status "unknown" with an empty note for it; the system overwrites it. (The format & placement info shown per unit is provided as context for your visual checks only.)
 
 For each check, assign one of:
 - "pass" — looks correct
@@ -93,8 +71,8 @@ IMPORTANT: Submit your review by calling the \`submit_qa_report\` tool. Put ever
         "promo_month_date": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
         "url_cta": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
         "grammar_typos": { "status": "pass" | "fail" | "warning", "note": "≤25 words" },
-        "ai_enhancements": { "status": "warning" | "unknown", "note": "≤25 words" },
-        "format_size": { "status": "pass" | "fail" | "warning" | "unknown", "note": "≤25 words" }
+        "ai_enhancements": { "status": "unknown", "note": "" },
+        "format_size": { "status": "unknown", "note": "" }
       },
       "summary": "≤25 words"
     }
@@ -167,6 +145,198 @@ type AdUnit = {
   name: string;
   link: string;
 };
+
+// Tokenize a name (filename or ad unit name) into lowercase alphanumeric
+// tokens. Keeps short-but-meaningful tokens like "v1", "v2", "1x1", "9x16"
+// (length ≥ 2) which are exactly the version/format discriminators we need.
+function tokenize(s: string): string[] {
+  return s
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 2);
+}
+
+// ─── Deterministic checks (computed in code, not by the model) ──────────────
+// url_cta URL matching, format_size, and ai_enhancements are pure logic over
+// API data. Having the model re-derive them invited two failure modes: flubbed
+// ratio/string comparisons (hallucinated findings) and run-to-run inconsistency.
+// They are computed here and the model's output for those checks is overwritten.
+
+type ComputedCheck = { status: "pass" | "fail" | "warning" | "unknown"; note: string };
+
+// Query params that are tracking noise — never a URL mismatch finding.
+const TRACKING_PARAM_RE = /^(utm_|fbclid$|gclid$|gbraid$|wbraid$|msclkid$|ttclid$|mc_cid$|mc_eid$|igshid$|ref$)/i;
+
+function normalizeUrlForCompare(raw: string): { host: string; path: string; params: Map<string, string> } | null {
+  try {
+    const u = new URL(raw.trim());
+    const host = u.hostname.toLowerCase().replace(/^www\./, "");
+    const path = (u.pathname.replace(/\/+$/, "") || "/").toLowerCase();
+    const params = new Map<string, string>();
+    u.searchParams.forEach((v, k) => {
+      if (!TRACKING_PARAM_RE.test(k)) params.set(k.toLowerCase(), v);
+    });
+    return { host, path, params };
+  } catch {
+    return null;
+  }
+}
+
+// True when the live URL points at the approved destination: same host (www
+// ignored) + same path (trailing slash/case ignored), and every meaningful
+// (non-tracking) query param on the approved URL is present on the live URL.
+// Extra non-tracking params on the live side are tolerated.
+function urlsMatch(approved: string, live: string): boolean {
+  const a = normalizeUrlForCompare(approved);
+  const l = normalizeUrlForCompare(live);
+  if (!a || !l) return false;
+  if (a.host !== l.host || a.path !== l.path) return false;
+  for (const [k, v] of Array.from(a.params.entries())) {
+    if (l.params.get(k) !== v) return false;
+  }
+  return true;
+}
+
+// Pull every URL out of the formatted Meta creative content (Destination URL,
+// Link URL, CTA URL, Landing URLs, carousel card urls all appear as plain text).
+function extractLiveUrls(content: string | null | undefined): string[] {
+  if (!content) return [];
+  const matches = content.match(/https?:\/\/[^\s|,")\]]+/g) ?? [];
+  return Array.from(new Set(matches));
+}
+
+function computeUrlComparisonLine(approvedUrl: string | null | undefined, content: string | null | undefined): string {
+  if (!approvedUrl) return "";
+  const liveUrls = extractLiveUrls(content);
+  if (!liveUrls.length) {
+    return `\nURL comparison (computed): no destination URL found in the ad's creative fields — URL match could not be verified.`;
+  }
+  const mismatches = liveUrls.filter((u) => !urlsMatch(approvedUrl, u));
+  if (!mismatches.length) {
+    return `\nURL comparison (computed): all ${liveUrls.length} live URL(s) match the approved destination (host + path compared; tracking params ignored). URL matching = PASS; evaluate only the CTA.`;
+  }
+  return `\nURL comparison (computed): MISMATCH — these live URL(s) do not point at the approved destination ${approvedUrl}: ${mismatches.join(" , ")}. URL matching = FAIL.`;
+}
+
+// format_size: name tokens are the primary intent signal, dimensions the
+// evidence, placements the tiebreaker — same rules the prompt used to describe,
+// now applied deterministically.
+function classifyDim(width: number, height: number): "story" | "feed" | "landscape" | "other" {
+  const ratio = width / height;
+  if (ratio >= 0.54 && ratio <= 0.58) return "story"; // 9:16
+  if (ratio >= 0.78 && ratio <= 0.82) return "feed"; // 4:5
+  if (ratio >= 0.98 && ratio <= 1.02) return "feed"; // 1:1
+  if (ratio >= 1.88 && ratio <= 1.94) return "landscape"; // 1.91:1
+  return "other";
+}
+
+function computeFormatSizeCheck(unitName: string, fi: FormatInfo | null | undefined): ComputedCheck {
+  const dims = fi?.creativeDimensions ?? [];
+  if (!dims.length) return { status: "unknown", note: "Creative dimensions not available." };
+
+  const kinds = dims.map((d) => classifyDim(d.width, d.height));
+  const has916 = kinds.includes("story");
+  const hasFeed = kinds.includes("feed");
+  const sizesStr = dims.map((d) => `${d.width}×${d.height}`).join(", ");
+
+  const tokens = new Set(tokenize(unitName));
+  const expectsStory =
+    tokens.has("story") || tokens.has("stories") || tokens.has("reel") || tokens.has("reels") || tokens.has("9x16");
+  const expectsFeed =
+    tokens.has("feed") || tokens.has("static") || tokens.has("1x1") || tokens.has("4x5") || tokens.has("square");
+
+  const issues: string[] = [];
+  if (expectsStory && !has916) {
+    issues.push(`ad name indicates Story/Reel but no 9:16 asset exists (sizes: ${sizesStr}) — content will be cut off or letterboxed`);
+  }
+  if (expectsFeed && !hasFeed) {
+    issues.push(`ad name indicates Feed/Static but no 1:1 or 4:5 asset exists (sizes: ${sizesStr}) — will appear cropped in feed`);
+  }
+  if (issues.length) return { status: "fail", note: issues.join("; ") };
+  if (expectsStory || expectsFeed) {
+    return { status: "pass", note: `Asset sizes (${sizesStr}) match the format indicated by the ad name.` };
+  }
+
+  // No format signal in the name — judge by placements.
+  if (fi?.placements?.automatic) {
+    if (has916 && hasFeed) {
+      return { status: "pass", note: `Advantage+ automatic placements with both feed and story sizes (${sizesStr}).` };
+    }
+    return {
+      status: "warning",
+      note: `Advantage+ automatic placements but only ${sizesStr} — some placements may crop or letterbox this size.`,
+    };
+  }
+  const p = fi?.placements;
+  if (p) {
+    const wantsStory =
+      p.facebook_positions.some((x) => x.includes("story") || x.includes("reel")) ||
+      p.instagram_positions.some((x) => x.includes("story") || x.includes("reel"));
+    const wantsFeed = p.facebook_positions.includes("feed") || p.instagram_positions.includes("stream");
+    const probs: string[] = [];
+    if (wantsStory && !has916) probs.push("story/reels placement targeted but no 9:16 asset");
+    if (wantsFeed && !hasFeed) probs.push("feed placement targeted but no 1:1/4:5 asset");
+    if (probs.length) return { status: "warning", note: `${probs.join("; ")} (sizes: ${sizesStr}).` };
+  }
+  return { status: "pass", note: `Asset sizes: ${sizesStr} — no format conflict detected.` };
+}
+
+// ai_enhancements: a fixed decision over API booleans. `flaggedOn` feeds the
+// status rollup — manual-reminder-only warnings must not block "All clear".
+// Note phrasings ("are ON", "Manual check also required…", "must still be
+// verified manually…") are load-bearing: the results page splits the manual
+// tail and detects real findings via /\bON\b/ on this text.
+function computeEnhancementsCheck(
+  enhancements: AiEnhancement[] | null | undefined,
+  manualItems: string[]
+): { check: ComputedCheck; flaggedOn: boolean } {
+  const manualList = manualItems.join(", ");
+  if (!enhancements || !enhancements.length) {
+    return {
+      check: {
+        status: "unknown",
+        note: `API enhancement data unavailable. The following must be verified manually in Ads Manager: ${manualList}.`,
+      },
+      flaggedOn: false,
+    };
+  }
+  const onNotAllowed = enhancements.filter((e) => e.status === "on" && !ALLOWED_ENHANCEMENT_KEYS.has(e.key));
+  if (onNotAllowed.length) {
+    const names = onNotAllowed.map((e) => e.label).join(", ");
+    return {
+      check: {
+        status: "warning",
+        note: `${names} ${onNotAllowed.length === 1 ? "is" : "are"} ON. Manual check also required in Ads Manager for: ${manualList}.`,
+      },
+      flaggedOn: true,
+    };
+  }
+  return {
+    check: {
+      status: "warning",
+      note: `All API-readable enhancements are off. The following must still be verified manually in Ads Manager: ${manualList}.`,
+    },
+    flaggedOn: false,
+  };
+}
+
+// Deterministic status rollup: worst of the checks (fail > warning > pass;
+// "unknown" doesn't penalize). ai_enhancements only counts when something is
+// actually ON — its ever-present manual reminder previously made "All clear"
+// unreachable (or model-dependent, varying run to run).
+function rollupUnitStatus(
+  checks: Record<string, { status?: string } | undefined>,
+  enhancementFlaggedOn: boolean
+): "pass" | "fail" | "warning" {
+  let worst = 0;
+  for (const [key, c] of Object.entries(checks)) {
+    if (!c) continue;
+    if (key === "ai_enhancements" && !enhancementFlaggedOn) continue;
+    const r = c.status === "fail" ? 2 : c.status === "warning" ? 1 : 0;
+    if (r > worst) worst = r;
+  }
+  return worst === 2 ? "fail" : worst === 1 ? "warning" : "pass";
+}
 
 type LabeledDoc = {
   label: string;
@@ -393,7 +563,12 @@ export async function POST(request: Request) {
     sourceSections.push(`\n\nDESTINATION URL (approved landing page from WO):\n${destinationUrl}`);
   }
 
-  const woSection = `WORK ORDER SUMMARY:\n${wo}${sourceSections.join("")}`;
+  // Ground the model's sense of "now" — promo_month_date staleness judgments
+  // are meaningless without it (the model's internal "today" is its training
+  // date, not the run date).
+  const todayLine = `TODAY'S DATE: ${new Date().toISOString().slice(0, 10)} — use this as ground truth when judging whether promo months/dates are current or stale.`;
+
+  const woSection = `${todayLine}\n\nWORK ORDER SUMMARY:\n${wo}${sourceSections.join("")}`;
 
   // Build the user message — multi-modal: text + image blocks per unit
   type CacheControl = { cache_control?: { type: "ephemeral" } };
@@ -412,16 +587,6 @@ export async function POST(request: Request) {
   // (the prompt already handles a missing approved image gracefully).
   const MAX_DRIVE_IMAGES_PER_UNIT = 4;
   const allDriveRefs = driveImages ?? [];
-
-  // Tokenize a name (filename or ad unit name) into lowercase alphanumeric
-  // tokens. Keeps short-but-meaningful tokens like "v1", "v2", "1x1", "9x16"
-  // (length ≥ 2) which are exactly the version/format discriminators we need.
-  function tokenize(s: string): string[] {
-    return s
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((t) => t.length >= 2);
-  }
 
   // Pre-compute document frequency of each token across ALL Drive image names.
   // A token in every file (e.g. "june", "hrok", the concept name) carries no
@@ -538,25 +703,13 @@ export async function POST(request: Request) {
       : `Note: ${unit.note ?? "Could not retrieve ad content."} Mark all checks as warning.`;
     const urlLine = unit.link ? `\nURL: ${unit.link}` : "";
 
-    // AI enhancements block
-    let enhancementsBlock = "";
-    const enhancements = (unit as { aiEnhancements?: AiEnhancement[] | null }).aiEnhancements;
-    const manualItems = (unit as { manualCheckItems?: string[] }).manualCheckItems ?? [];
-    const manualList = manualItems.length > 0
-      ? `\nEnhancements requiring manual verification in Ads Manager:\n${manualItems.map(i => `  - ${i}`).join("\n")}`
-      : "";
-    if (enhancements && enhancements.length > 0) {
-      const lines = enhancements.map((e) => {
-        if (e.status !== "on") return `  - ${e.label}: off`;
-        // Allowed enhancements are intentionally always on — do not flag them.
-        return ALLOWED_ENHANCEMENT_KEYS.has(e.key)
-          ? `  - ${e.label}: on (allowed — intentionally enabled, do NOT flag or mention)`
-          : `  - ${e.label}: ON ⚠️`;
-      });
-      enhancementsBlock = `\nMeta Advantage+ AI enhancements (from API):\n${lines.join("\n")}${manualList}`;
-    } else {
-      enhancementsBlock = `\nMeta Advantage+ AI enhancements: not available for this ad.${manualList}`;
-    }
+    // AI enhancements are no longer shown to the model — that check is computed
+    // deterministically in code (computeEnhancementsCheck) and overwritten on
+    // the parsed result, so sending the toggle list was pure token cost.
+
+    // Deterministic URL comparison — computed in code so the model never
+    // eyeball-matches URLs (and tracking params can't cause false fails).
+    const urlComparisonLine = computeUrlComparisonLine(destinationUrl, unit.content);
 
     // Format & placement block
     let formatBlock = "";
@@ -607,7 +760,7 @@ export async function POST(request: Request) {
 
     blocks.push({
       type: "text",
-      text: `\n---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${contentBlock}${enhancementsBlock}${formatBlock}${imageNote}`,
+      text: `\n---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${contentBlock}${urlComparisonLine}${formatBlock}${imageNote}`,
     });
 
     for (const img of liveImages) {
@@ -1027,7 +1180,7 @@ export async function POST(request: Request) {
       // card instead of taking the report down.
       const hasChecks =
         base.checks !== null && typeof base.checks === "object";
-      const safeChecks = hasChecks
+      const safeChecks = (hasChecks
         ? base.checks
         : {
             copy_alignment: { status: "unknown", note: "No result returned for this ad — re-run the QA." },
@@ -1037,11 +1190,30 @@ export async function POST(request: Request) {
             grammar_typos: { status: "unknown", note: "No result returned." },
             ai_enhancements: { status: "unknown", note: "No result returned." },
             format_size: { status: "unknown", note: "No result returned." },
-          };
+          }) as Record<string, { status?: string; note?: string }>;
+
+      // Overwrite the deterministic checks with code-computed results — the
+      // model is instructed to leave these as unknown/"" placeholders.
+      const rep = unitContents[repIdx];
+      const enhResult = computeEnhancementsCheck(
+        (rep as { aiEnhancements?: AiEnhancement[] | null }).aiEnhancements,
+        (rep as { manualCheckItems?: string[] }).manualCheckItems ?? MANUAL_CHECK_ITEMS
+      );
+      const finalChecks = {
+        ...safeChecks,
+        ai_enhancements: enhResult.check,
+        format_size: computeFormatSizeCheck(
+          rep.name ?? "",
+          (rep as { formatInfo?: FormatInfo | null }).formatInfo
+        ),
+      };
+
       return {
         ...base,
-        checks: safeChecks,
-        status: typeof base.status === "string" ? base.status : "warning",
+        checks: finalChecks,
+        // Deterministic rollup — worst of the checks. The model's own status
+        // field is ignored: it had no defined rollup rule and varied run to run.
+        status: rollupUnitStatus(finalChecks, enhResult.flaggedOn),
         summary: typeof base.summary === "string" ? base.summary : "",
         name: unitContents[repIdx].name || "Unnamed",
         adId: unitContents[repIdx].adId ?? null,

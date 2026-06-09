@@ -307,15 +307,17 @@ export default function QAPage() {
     id: string;
     campaignId: string;
     filter: string;
-    sinceDate: string;   // optional YYYY-MM-DD created-since cutoff
+    sinceDate: string;   // optional YYYY-MM-DD updated-since cutoff
     loading: boolean;
     loaded: boolean;
     error: string;
     skipNote: string;    // post-load summary of what was filtered out
   };
-  // Default the created-since cutoff to ~30 days ago. We never QA old ads through
+  // Default the updated-since cutoff to ~30 days ago. We never QA old ads through
   // Vera, so pre-filling this means one less field to think about — the user can
-  // still change or clear it for the rare backfill case.
+  // still change or clear it for the rare backfill case. The filter runs on
+  // Meta's updated_time so ads EDITED for the current promo are kept even if
+  // they were created months ago.
   function defaultSinceDate(): string {
     const d = new Date();
     d.setDate(d.getDate() - 30);
@@ -521,7 +523,7 @@ export default function QAPage() {
       const skippedOld = data.skippedOld ?? 0;
       const skipNote =
         `Loaded ${imported.length} ad${imported.length === 1 ? "" : "s"}` +
-        (skippedOld > 0 ? ` · skipped ${skippedOld} created before cutoff` : "");
+        (skippedOld > 0 ? ` · skipped ${skippedOld} not updated since cutoff` : "");
 
       setCampaigns((prev) =>
         prev.map((c) => (c.id === rowId ? { ...c, loading: false, loaded: true, skipNote } : c))
@@ -1086,12 +1088,13 @@ export default function QAPage() {
                         ×
                       </button>
                     </div>
-                    {/* Optional created-since cutoff. Set this to the start of the
+                    {/* Optional updated-since cutoff. Set this to the start of the
                         current promo so reused campaigns don't pull stale ad sets
-                        from past months into the QA run. */}
+                        from past months into the QA run. Runs on updated_time so
+                        ads edited in place for this promo are kept. */}
                     <div className="flex items-center flex-wrap gap-x-4 gap-y-1.5 pl-1">
                       <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 select-none">
-                        Only ads created since
+                        Only ads updated since
                         <input
                           type="date"
                           value={row.sinceDate}

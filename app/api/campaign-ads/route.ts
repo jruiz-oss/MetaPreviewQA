@@ -35,7 +35,7 @@ export async function POST(request: Request) {
     // campaign ID.
     const msg =
       skippedOld > 0
-        ? `No ads matched — ${skippedOld} of ${totalFetched} were created before the cutoff date. Move the date earlier or clear it to include them.`
+        ? `No ads matched — ${skippedOld} of ${totalFetched} haven't been updated since the cutoff date. Move the date earlier or clear it to include them.`
         : "No ads found under this campaign ID.";
     return NextResponse.json({ ads: [], error: msg, totalFetched, skippedOld });
   }
