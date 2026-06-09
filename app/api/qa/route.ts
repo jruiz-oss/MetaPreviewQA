@@ -986,6 +986,33 @@ export async function POST(request: Request) {
       }
     }
 
+    // --- GUARD: no approved Drive image → creative_alignment can't be green ---
+    // The prompt tells the model "if only one source is present, check what you
+    // can", which lets it PASS a creative it never actually compared against the
+    // signed-off Drive asset (it just eyeballs branding/theme vs the WO text).
+    // Enforce deterministically: if this batch had ZERO approved Drive images
+    // but the unit DID have live Meta images, a "pass" on creative_alignment is
+    // overclaiming — cap it at "warning" and say why. A unit-level "pass" is
+    // downgraded along with it so the card color reflects the weakest check.
+    if (batchDriveImages.length === 0) {
+      parsedUnits.forEach((u, idx) => {
+        const hasLive =
+          ((batchUnits[idx] ?? batchUnits[0]) as { creativeImages?: FetchedImage[] } | undefined)
+            ?.creativeImages?.length ?? 0;
+        const checks = u?.checks as Record<string, Record<string, unknown>> | undefined;
+        const cca = checks?.creative_alignment;
+        if (hasLive > 0 && cca && cca.status === "pass") {
+          cca.status = "warning";
+          const existing = typeof cca.note === "string" && cca.note.trim() ? `${cca.note.trim()} ` : "";
+          cca.note = `${existing}(Approved Drive asset not available for comparison — could not fully verify.)`.trim();
+          if (u.status === "pass") u.status = "warning";
+          console.log(
+            `[qa][guard] "${String(u.name)}" creative_alignment pass→warning — no approved Drive image reached the model.`
+          );
+        }
+      });
+    }
+
     // Attach the resolved ad ID to each result unit so the report can show a
     // copy/paste-able ID. The model output isn't trusted to echo it — we map by
     // index back to the batch's input units (one unit per batch here), falling
