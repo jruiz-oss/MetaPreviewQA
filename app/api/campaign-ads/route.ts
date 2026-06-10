@@ -19,7 +19,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const { ads, error, totalFetched, skippedOld } = await fetchCampaignAdsList(
+  const { ads, error, totalFetched, skippedOld, campaignName } = await fetchCampaignAdsList(
     campaignId.trim(),
     accessToken,
     { sinceDate: sinceDate?.trim() || undefined }
@@ -37,8 +37,8 @@ export async function POST(request: Request) {
       skippedOld > 0
         ? `No ads matched — ${skippedOld} of ${totalFetched} haven't been updated since the cutoff date. Move the date earlier or clear it to include them.`
         : "No ads found under this campaign ID.";
-    return NextResponse.json({ ads: [], error: msg, totalFetched, skippedOld });
+    return NextResponse.json({ ads: [], error: msg, totalFetched, skippedOld, campaignName });
   }
 
-  return NextResponse.json({ ads, totalFetched, skippedOld });
+  return NextResponse.json({ ads, totalFetched, skippedOld, campaignName });
 }

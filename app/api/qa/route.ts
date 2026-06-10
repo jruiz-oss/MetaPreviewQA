@@ -1529,8 +1529,20 @@ export async function POST(request: Request) {
       notes: allNotes,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("QA API error:", message);
+    // Non-Error throws (plain objects from SDKs / rejected promises) used to
+    // hit String(err) → "[object Object]" in the UI banner, hiding the real
+    // cause. Serialize them so the message is actionable.
+    let message: string;
+    if (err instanceof Error) {
+      message = err.message || err.name;
+    } else {
+      try {
+        message = typeof err === "string" ? err : JSON.stringify(err);
+      } catch {
+        message = String(err);
+      }
+    }
+    console.error("QA API error:", message, err instanceof Error ? err.stack : err);
     return NextResponse.json(
       { error: `QA check failed: ${message}` },
       { status: 500 }

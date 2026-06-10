@@ -25,6 +25,7 @@ const STALE_ASSET_AGE_GAP_DAYS = 25;
 export type CampaignAd = {
   id: string;
   name: string;
+  adsetId: string;
   adsetName: string;
   createdTime: string; // ISO timestamp the ad was created
   updatedTime: string; // ISO timestamp the ad was last edited
@@ -45,6 +46,8 @@ export type FetchAdsResult = {
   // Counts so the UI can tell the user what was skipped and why.
   totalFetched: number;
   skippedOld: number;
+  // Human-readable campaign name, so the UI can show it next to the pasted ID.
+  campaignName: string | null;
 };
 
 export type PlacementInfo = {
@@ -84,6 +87,21 @@ export type FormatInfo = {
  * better than failing, and the cap is well above any realistic campaign size).
  */
 const MAX_AD_PAGES = 10; // 10 pages × 200 = up to 2000 ads
+
+// Resolves a campaign ID to its name. Best-effort — a failure just means the
+// UI shows the bare ID, so errors are swallowed rather than failing the load.
+async function fetchCampaignName(campaignId: string, accessToken: string): Promise<string | null> {
+  try {
+    const url = `${GRAPH_API}/${campaignId}?fields=name&access_token=${accessToken}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
+    const data = await res.json();
+    if (data.error || !data.name) return null;
+    return data.name as string;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchCampaignAdsList(
   campaignId: string,
   accessToken: string,
@@ -98,10 +116,14 @@ export async function fetchCampaignAdsList(
   const hasSince = !Number.isNaN(sinceMs);
 
   let url: string | null =
-    `${GRAPH_API}/${campaignId}/ads?fields=id,name,adset{name},created_time,updated_time&limit=200&access_token=${accessToken}`;
+    `${GRAPH_API}/${campaignId}/ads?fields=id,name,adset{id,name},created_time,updated_time&limit=200&access_token=${accessToken}`;
   const ads: CampaignAd[] = [];
   let totalFetched = 0;
   let skippedOld = 0;
+
+  // Resolve the campaign's name in parallel with the ads pages — purely
+  // cosmetic, so it never blocks or fails the ad load.
+  const campaignNamePromise = fetchCampaignName(campaignId, accessToken);
 
   try {
     for (let page = 0; url && page < MAX_AD_PAGES; page++) {
@@ -110,7 +132,7 @@ export async function fetchCampaignAdsList(
         data?: {
           id: string;
           name: string;
-          adset?: { name?: string };
+          adset?: { id?: string; name?: string };
           created_time?: string;
           updated_time?: string;
         }[];
@@ -125,7 +147,7 @@ export async function fetchCampaignAdsList(
         if (code === 190) friendly = `Access token invalid or expired. Regenerate META_ACCESS_TOKEN.`;
         else if (code === 100) friendly = `Invalid campaign ID or bad request. Check the ID and try again.`;
         else if (code === 200) friendly = `Token missing required permissions (needs ads_read or ads_management).`;
-        return { ads: [], error: friendly, totalFetched, skippedOld };
+        return { ads: [], error: friendly, totalFetched, skippedOld, campaignName: await campaignNamePromise };
       }
 
       for (const ad of data.data ?? []) {
@@ -148,6 +170,7 @@ export async function fetchCampaignAdsList(
         ads.push({
           id: ad.id,
           name: ad.name,
+          adsetId: ad.adset?.id ?? "",
           adsetName: ad.adset?.name ?? "",
           createdTime,
           updatedTime,
@@ -158,9 +181,9 @@ export async function fetchCampaignAdsList(
       url = data.paging?.next ?? null;
     }
 
-    return { ads, error: null, totalFetched, skippedOld };
+    return { ads, error: null, totalFetched, skippedOld, campaignName: await campaignNamePromise };
   } catch (err) {
-    return { ads: [], error: `Network error: ${(err as Error).message}`, totalFetched, skippedOld };
+    return { ads: [], error: `Network error: ${(err as Error).message}`, totalFetched, skippedOld, campaignName: null };
   }
 }
 

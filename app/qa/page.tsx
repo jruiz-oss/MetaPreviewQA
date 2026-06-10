@@ -11,10 +11,15 @@ type AdUnit = {
   // Which campaign this unit was imported from. Manually-typed units have none
   // and are grouped together. Used to send one QA request per campaign.
   campaignId?: string;
+  // Human-readable campaign name resolved from the Meta API — shown alongside
+  // the campaign ID in the UI. Manual units: none.
+  campaignName?: string;
   // Ad set name from the Meta API. Lets the QA route scope approved Drive
   // images to the right ad set when approval subfolders are named after ad
   // sets (e.g. "Walnut Creek/" ↔ the Walnut Creek ad set). Manual units: none.
   adsetName?: string;
+  // Ad set ID from the Meta API — shown alongside the ad set name in the UI.
+  adsetId?: string;
 };
 
 type DriveImage = {
@@ -272,6 +277,21 @@ function CheckCard({ label, result }: { label: string; result: CheckResult }) {
   );
 }
 
+// Coerce an API `error` payload to a readable string. Some failure paths hand
+// back an error OBJECT (e.g. a platform-level JSON error body) instead of a
+// string; `new Error(obj)` then renders the useless "[object Object]" in the
+// UI. JSON-stringify anything that isn't already a string so the real cause
+// is visible.
+function asErrorMessage(v: unknown, fallback: string): string {
+  if (typeof v === "string" && v.trim()) return v;
+  if (v == null) return fallback;
+  try {
+    return `${fallback} — ${JSON.stringify(v)}`;
+  } catch {
+    return fallback;
+  }
+}
+
 // Returns true if the error message looks like an expired/revoked Google token.
 function isGoogleAuthError(msg: string): boolean {
   return (
@@ -317,6 +337,7 @@ export default function QAPage() {
   type CampaignRow = {
     id: string;
     campaignId: string;
+    campaignName: string; // resolved from Meta on load — shown next to the ID
     filter: string;
     sinceDate: string;   // optional YYYY-MM-DD updated-since cutoff
     loading: boolean;
@@ -337,6 +358,7 @@ export default function QAPage() {
   const newCampaignRow = (id: string): CampaignRow => ({
     id,
     campaignId: "",
+    campaignName: "",
     filter: "",
     sinceDate: defaultSinceDate(),
     loading: false,
@@ -361,7 +383,7 @@ export default function QAPage() {
   function patchCampaignRow(id: string, patch: Partial<CampaignRow>) {
     setCampaigns((prev) =>
       prev.map((c) =>
-        c.id === id ? { ...c, ...patch, error: "", loaded: false, skipNote: "" } : c
+        c.id === id ? { ...c, ...patch, error: "", loaded: false, skipNote: "", campaignName: "" } : c
       )
     );
   }
@@ -456,7 +478,7 @@ export default function QAPage() {
         body: JSON.stringify({ url }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Failed to fetch doc");
+      if (!res.ok) throw new Error(asErrorMessage(data.error, `Failed to fetch doc (HTTP ${res.status})`));
       setDetectedDocs((prev) =>
         prev.map((d) =>
           d.url === url ? { ...d, loading: false, content: data.content, images: data.images ?? [] } : d
@@ -498,8 +520,9 @@ export default function QAPage() {
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Failed to load campaign ads");
+      if (!res.ok) throw new Error(asErrorMessage(data.error, `Failed to load campaign ads (HTTP ${res.status})`));
 
+      const campaignName: string = data.campaignName ?? "";
       const keyword = row.filter.trim().toLowerCase();
       const filtered = keyword
         ? data.ads.filter((ad: { id: string; name: string; adsetName?: string }) => {
@@ -518,12 +541,14 @@ export default function QAPage() {
       }
 
       const importedCampaignId = row.campaignId.trim();
-      const imported: AdUnit[] = filtered.map((ad: { id: string; name: string; adsetName?: string }) => ({
+      const imported: AdUnit[] = filtered.map((ad: { id: string; name: string; adsetName?: string; adsetId?: string }) => ({
         id: String(Date.now()) + ad.id,
         name: ad.name,
         link: ad.id,
         campaignId: importedCampaignId,
+        campaignName: campaignName || undefined,
         adsetName: ad.adsetName || undefined,
+        adsetId: ad.adsetId || undefined,
       }));
 
       // Append to existing units (remove empty placeholder rows first)
@@ -535,10 +560,11 @@ export default function QAPage() {
       const skippedOld = data.skippedOld ?? 0;
       const skipNote =
         `Loaded ${imported.length} ad${imported.length === 1 ? "" : "s"}` +
+        (campaignName ? ` from “${campaignName}”` : "") +
         (skippedOld > 0 ? ` · skipped ${skippedOld} not updated since cutoff` : "");
 
       setCampaigns((prev) =>
-        prev.map((c) => (c.id === rowId ? { ...c, loading: false, loaded: true, skipNote } : c))
+        prev.map((c) => (c.id === rowId ? { ...c, loading: false, loaded: true, skipNote, campaignName } : c))
       );
     } catch (err) {
       setCampaigns((prev) =>
@@ -731,7 +757,7 @@ export default function QAPage() {
           );
         }
         if (!res.ok) {
-          throw new Error(data.error ?? `${group.label}: QA check failed (HTTP ${res.status})`);
+          throw new Error(asErrorMessage(data.error, `${group.label}: QA check failed (HTTP ${res.status})`));
         }
 
         const partial = data as unknown as QAResult;
@@ -899,6 +925,13 @@ export default function QAPage() {
   ];
 
   const [checkIdx, setCheckIdx] = useState(0);
+
+  // Ad ID → loaded AdUnit, so result cards can show the campaign / ad set
+  // names + IDs that came with the import (results themselves only carry the
+  // ad name + ID).
+  const unitMetaByAdId = new Map(
+    units.filter((u) => u.link.trim()).map((u) => [u.link.trim(), u])
+  );
 
   useEffect(() => {
     if (!loading) return;
@@ -1261,6 +1294,18 @@ export default function QAPage() {
                         <div className="min-w-0">
                           <p className="text-sm text-gray-900 truncate">{unit.name || "Unnamed ad"}</p>
                           <p className="text-xs font-mono text-gray-400 truncate">{unit.link}</p>
+                          {(unit.adsetName || unit.adsetId) && (
+                            <p className="text-xs text-gray-500 truncate">
+                              Ad set: {unit.adsetName || "—"}
+                              {unit.adsetId && <span className="font-mono text-gray-400"> · {unit.adsetId}</span>}
+                            </p>
+                          )}
+                          {(unit.campaignName || unit.campaignId) && (
+                            <p className="text-xs text-gray-500 truncate">
+                              Campaign: {unit.campaignName || "—"}
+                              {unit.campaignId && <span className="font-mono text-gray-400"> · {unit.campaignId}</span>}
+                            </p>
+                          )}
                         </div>
                         <button
                           onClick={() => removeUnit(unit.id)}
@@ -1472,6 +1517,38 @@ export default function QAPage() {
                               <AdIdBadge key={m.adId} adId={m.adId as string} />
                             ))}
                         </div>
+                        {(() => {
+                          // Campaign / ad set context (name + ID), deduped in
+                          // case a grouped result spans several identical ads.
+                          const metas = members
+                            .map((m) => (m.adId ? unitMetaByAdId.get(m.adId) : undefined))
+                            .filter((m): m is AdUnit => !!m);
+                          const adsetLines = Array.from(
+                            new Set(
+                              metas
+                                .filter((m) => m.adsetName || m.adsetId)
+                                .map((m) => `${m.adsetName || "—"}${m.adsetId ? ` (${m.adsetId})` : ""}`)
+                            )
+                          );
+                          const campaignLines = Array.from(
+                            new Set(
+                              metas
+                                .filter((m) => m.campaignName || m.campaignId)
+                                .map((m) => `${m.campaignName || "—"}${m.campaignId ? ` (${m.campaignId})` : ""}`)
+                            )
+                          );
+                          if (!adsetLines.length && !campaignLines.length) return null;
+                          return (
+                            <div className="mt-1.5 space-y-0.5">
+                              {adsetLines.length > 0 && (
+                                <p className="text-xs text-gray-500">Ad set: {adsetLines.join(", ")}</p>
+                              )}
+                              {campaignLines.length > 0 && (
+                                <p className="text-xs text-gray-500">Campaign: {campaignLines.join(", ")}</p>
+                              )}
+                            </div>
+                          );
+                        })()}
                         {grouped && (
                           <p className="text-xs text-gray-400 mt-1.5">
                             Same copy, creative & settings — checked once, applies to all {members.length}.
