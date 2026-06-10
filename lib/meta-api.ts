@@ -424,6 +424,10 @@ export type CreativeImageContext = {
   placement: string | null;   // human-readable placement(s) this asset serves, when resolvable
   assetDate: string | null;   // ISO date the asset label was created, when resolvable
   staleNote: string | null;   // set when this asset is much older than the newest in the ad
+  // true when this URL is a video's auto-selected thumbnail — ONE frame of the
+  // video, not the creative itself. Set regardless of PLACEMENT_AWARE_CREATIVE
+  // so the QA prompt can treat frame-vs-frame text differences as non-findings.
+  videoThumbnail?: boolean;
 };
 
 export type FetchResult = {
@@ -1047,7 +1051,11 @@ export async function fetchAdContent(
   } else {
     for (const c of chosenImageCandidates) addUrl(c.url);
   }
-  for (const vid of data.creative?.asset_feed_spec?.videos ?? []) addUrl(vid.thumbnail_url);
+  const videoThumbUrls = new Set<string>();
+  for (const vid of data.creative?.asset_feed_spec?.videos ?? []) {
+    if (vid.thumbnail_url) videoThumbUrls.add(vid.thumbnail_url);
+    addUrl(vid.thumbnail_url);
+  }
 
   // --- Per-image placement + date context (flag-gated) --------------------
   // Tag each chosen image with the placement(s) it serves and the date its
@@ -1081,6 +1089,17 @@ export async function fetchAdContent(
       }
       creativeImageContext.push({ url, placement, assetDate, staleNote });
     }
+  }
+
+  // Tag video thumbnails regardless of the placement-aware flag: a thumbnail is
+  // ONE auto-selected frame of the video, not the creative itself. Without this
+  // label the QA model treats the frame as a static and flags text present in
+  // other parts of the video as "missing" (or vice versa) — phantom mismatches.
+  for (const url of creativeImageUrls) {
+    if (!videoThumbUrls.has(url)) continue;
+    const existing = creativeImageContext.find((c) => c.url === url);
+    if (existing) existing.videoThumbnail = true;
+    else creativeImageContext.push({ url, placement: null, assetDate: null, staleNote: null, videoThumbnail: true });
   }
 
   // Diagnostic: shows how the image pool was reduced, with sizes — confirms in

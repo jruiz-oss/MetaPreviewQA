@@ -72,7 +72,8 @@ const VIEWABLE_IMAGE_MIME = new Set([
   "image/gif",
 ]);
 
-// Video types we can extract frames from server-side (via ffmpeg in the QA route).
+// Video types Drive auto-generates a thumbnail frame for — the QA route fetches
+// that thumbnail (no ffmpeg on Vercel, so the raw video can't be decoded).
 const VIEWABLE_VIDEO_MIME = new Set([
   "video/mp4",
   "video/quicktime",
@@ -201,15 +202,15 @@ async function readDriveFolder(
       sections.push(`[Creative asset: ${file.name}]`);
 
       // Queue viewable images and videos (by reference, not bytes) for server-side
-      // download in the QA route. Images are sent directly; videos have frames
-      // extracted via ffmpeg. PSDs, PDFs, and audio are skipped (not viewable).
+      // download in the QA route. Images are sent directly; videos are represented
+      // by their Drive-generated thumbnail frame. PSDs, PDFs, and audio are skipped.
       // Assets are ONLY collected from "For Approval" folders (or subfolders within
       // them) — the "Creative" folder holds PSDs/concepts and must be ignored.
       if (images && (VIEWABLE_IMAGE_MIME.has(file.mimeType) || VIEWABLE_VIDEO_MIME.has(file.mimeType))) {
         if (!effectiveInsideApproval) {
-          console.log(`[fetch-doc] SKIP image "${file.name}" — not inside an approval folder; only images in "For Approval" (or similar) folders are cross-referenced.`);
+          console.log(`[fetch-doc] SKIP asset "${file.name}" — not inside an approval folder; only assets in "For Approval" (or similar) folders are cross-referenced.`);
         } else if (images.length >= MAX_DRIVE_IMAGES) {
-          console.log(`[fetch-doc] SKIP image "${file.name}" — image cap reached (${MAX_DRIVE_IMAGES}); not cross-referenced.`);
+          console.log(`[fetch-doc] SKIP asset "${file.name}" — asset cap reached (${MAX_DRIVE_IMAGES}); not cross-referenced.`);
         } else if (file.id) {
           // Prefix with the relative folder path so the QA matcher can tell which
           // subfolder (e.g. "V1/" vs "V2/") an image came from — that's what
