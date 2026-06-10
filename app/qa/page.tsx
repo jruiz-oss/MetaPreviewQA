@@ -342,6 +342,7 @@ export default function QAPage() {
     sinceDate: string;   // optional YYYY-MM-DD updated-since cutoff
     loading: boolean;
     loaded: boolean;
+    cooldown: boolean;   // true for 60s after an error to prevent rapid retries
     error: string;
     skipNote: string;    // post-load summary of what was filtered out
   };
@@ -363,6 +364,7 @@ export default function QAPage() {
     sinceDate: defaultSinceDate(),
     loading: false,
     loaded: false,
+    cooldown: false,
     error: "",
     skipNote: "",
   });
@@ -570,10 +572,16 @@ export default function QAPage() {
       setCampaigns((prev) =>
         prev.map((c) =>
           c.id === rowId
-            ? { ...c, loading: false, error: err instanceof Error ? err.message : "Something went wrong" }
+            ? { ...c, loading: false, cooldown: true, error: err instanceof Error ? err.message : "Something went wrong" }
             : c
         )
       );
+      // Re-enable after 60s so the user can retry without hammering the Meta API
+      setTimeout(() => {
+        setCampaigns((prev) =>
+          prev.map((c) => (c.id === rowId ? { ...c, cooldown: false } : c))
+        );
+      }, 60_000);
     }
   }
 
@@ -1205,7 +1213,7 @@ export default function QAPage() {
                       />
                       <button
                         onClick={() => loadFromCampaign(row.id)}
-                        disabled={row.loading || row.loaded || !row.campaignId.trim()}
+                        disabled={row.loading || row.loaded || row.cooldown || !row.campaignId.trim()}
                         className={`px-4 py-2.5 rounded-xl text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-2 ${
                           row.loaded
                             ? "bg-gray-200 text-gray-400 cursor-not-allowed"
@@ -1222,6 +1230,8 @@ export default function QAPage() {
                             <span className="text-emerald-500">✓</span>
                             Loaded
                           </>
+                        ) : row.cooldown ? (
+                          "Wait 60s..."
                         ) : (
                           "Load ads"
                         )}
