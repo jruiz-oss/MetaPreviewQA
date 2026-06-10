@@ -1577,7 +1577,8 @@ export default function QAPage() {
                   )}
                   {unit.checks && (() => {
                     const entries = Object.entries(unit.checks ?? {});
-                    const failing = entries.filter(([, c]) => c.status === "fail" || c.status === "warning");
+                    const failing = entries.filter(([, c]) => c.status === "fail");
+                    const warning = entries.filter(([, c]) => c.status === "warning");
                     const passing = entries.filter(([, c]) => c.status === "pass" || c.status === "unknown");
                     return (
                       <>
@@ -1586,6 +1587,20 @@ export default function QAPage() {
                             <p className="text-xs font-semibold text-red-600 uppercase tracking-wide mb-2">Fail</p>
                             <div className="space-y-2">
                               {failing.map(([key, check]) => {
+                                const displayResult =
+                                  key === "ai_enhancements" && check.note
+                                    ? { ...check, note: check.note.replace(/\s*(Manual check also required|The following must (?:still )?be verified manually|API enhancement data unavailable)[\s\S]*/i, "").trim() }
+                                    : check;
+                                return <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={displayResult} />;
+                              })}
+                            </div>
+                          </div>
+                        )}
+                        {warning.length > 0 && (
+                          <div>
+                            <p className="text-xs font-semibold text-amber-600 uppercase tracking-wide mb-2">Warning</p>
+                            <div className="space-y-2">
+                              {warning.map(([key, check]) => {
                                 const displayResult =
                                   key === "ai_enhancements" && check.note
                                     ? { ...check, note: check.note.replace(/\s*(Manual check also required|The following must (?:still )?be verified manually|API enhancement data unavailable)[\s\S]*/i, "").trim() }

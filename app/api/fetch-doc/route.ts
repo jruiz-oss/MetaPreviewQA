@@ -72,6 +72,15 @@ const VIEWABLE_IMAGE_MIME = new Set([
   "image/gif",
 ]);
 
+// Video types we can extract frames from server-side (via ffmpeg in the QA route).
+const VIEWABLE_VIDEO_MIME = new Set([
+  "video/mp4",
+  "video/quicktime",
+  "video/x-msvideo",
+  "video/webm",
+  "video/x-matroska",
+]);
+
 // Cap how many images we hand off for cross-referencing. We pass lightweight
 // references (Drive file id) — NOT the bytes — so the browser payload stays
 // tiny and well under Vercel's ~4.5MB serverless request-body limit. The QA
