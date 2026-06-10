@@ -36,6 +36,7 @@ CRITICAL — IMAGE READING RULES (read before doing any visual check):
 Review each ad unit on seven criteria:
 1. copy_alignment — Does the ad copy text (post body, headline, CTA button text) exactly match the approved copy doc? Evaluate only the text-based content here — not the visual creative. Flag any word, phrase, offer detail, or CTA that differs from the approved copy doc. If no copy doc is provided, compare against the WO summary.
    TYPOGRAPHIC VARIANTS ARE NOT FINDINGS: curly vs straight quotes/apostrophes, hyphen vs en/em dash, "..." vs "…", differing whitespace or line breaks, and capitalization of an entire line (e.g. headline case) are platform formatting differences — treat them as matching. Flag only changes in actual words, numbers, offers, or meaning-bearing punctuation.
+   AD/CREATIVE NAMES ARE NOT FINDINGS: the "Ad name:" and "Creative name:" lines are internal Meta metadata that never renders publicly. Never flag anything about them in ANY check — naming conventions, typos, or unresolved template tokens like {{product.name}} in a name are all out of scope. Use names only as format/placement hints.
 2. creative_alignment — Does the visual creative match the approved Drive files? You may receive images from two sources:
    - APPROVED CREATIVE FROM DRIVE: the design files the client signed off on (labeled with their filenames). These are what the live ad is supposed to match.
    - LIVE META CREATIVE: the image(s) actually live in the Meta ad, shown per ad unit below.
