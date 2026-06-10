@@ -200,11 +200,12 @@ async function readDriveFolder(
     ) {
       sections.push(`[Creative asset: ${file.name}]`);
 
-      // Queue viewable images (by reference, not bytes) for server-side download
-      // in the QA route. PSDs, PDFs, video and audio are skipped (not viewable).
-      // Images are ONLY collected from "For Approval" folders (or subfolders within
+      // Queue viewable images and videos (by reference, not bytes) for server-side
+      // download in the QA route. Images are sent directly; videos have frames
+      // extracted via ffmpeg. PSDs, PDFs, and audio are skipped (not viewable).
+      // Assets are ONLY collected from "For Approval" folders (or subfolders within
       // them) — the "Creative" folder holds PSDs/concepts and must be ignored.
-      if (images && VIEWABLE_IMAGE_MIME.has(file.mimeType)) {
+      if (images && (VIEWABLE_IMAGE_MIME.has(file.mimeType) || VIEWABLE_VIDEO_MIME.has(file.mimeType))) {
         if (!effectiveInsideApproval) {
           console.log(`[fetch-doc] SKIP image "${file.name}" — not inside an approval folder; only images in "For Approval" (or similar) folders are cross-referenced.`);
         } else if (images.length >= MAX_DRIVE_IMAGES) {
@@ -218,7 +219,7 @@ async function readDriveFolder(
           console.log(`[fetch-doc] QUEUED image "${qualifiedName}" (${file.mimeType}) for cross-reference [${images.length}/${MAX_DRIVE_IMAGES}].`);
         }
       } else if (images) {
-        console.log(`[fetch-doc] SKIP asset "${file.name}" — type ${file.mimeType} not viewable; filename only, not cross-referenced.`);
+        console.log(`[fetch-doc] SKIP asset "${file.name}" — type ${file.mimeType} not viewable or not video; filename only, not cross-referenced.`);
       }
       continue;
     }

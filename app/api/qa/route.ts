@@ -448,6 +448,9 @@ type LabeledDoc = {
 type ImageMediaType = "image/jpeg" | "image/png" | "image/webp" | "image/gif";
 const ALLOWED_IMAGE_MEDIA_TYPES: ImageMediaType[] = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 
+// Video types Drive auto-generates thumbnails for.
+const ALLOWED_VIDEO_MEDIA_TYPES = ["video/mp4", "video/quicktime", "video/x-msvideo", "video/webm", "video/x-matroska"];
+
 // Lightweight reference passed from the browser — bytes are downloaded
 // server-side below to keep the request body under Vercel's ~4.5MB limit.
 type DriveImageRef = {
@@ -580,11 +583,41 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
   // Download in parallel — sequential was needless latency.
   await Promise.all(
     refs.map(async (ref): Promise<void> => {
-      if (!ref.id || !(ALLOWED_IMAGE_MEDIA_TYPES as string[]).includes(ref.mediaType)) {
-        console.log(`[qa] SKIP image "${ref.name}" — unsupported type ${ref.mediaType}.`);
+      const isVideo = ALLOWED_VIDEO_MEDIA_TYPES.includes(ref.mediaType);
+      const isImage = (ALLOWED_IMAGE_MEDIA_TYPES as string[]).includes(ref.mediaType);
+      if (!ref.id || (!isImage && !isVideo)) {
+        console.log(`[qa] SKIP "${ref.name}" — unsupported type ${ref.mediaType}.`);
         return;
       }
       try {
+        if (isVideo) {
+          // On Vercel there is no ffmpeg binary, so we can't decode the raw video.
+          // Instead, request the Drive-generated thumbnail — Drive processes every
+          // uploaded video and produces a JPEG preview frame, accessible via
+          // thumbnailLink. We bump the size to 1568px to match the image QA
+          // resolution so Claude can read overlay text and branding clearly.
+          const metaRes = await drive.files.get({
+            fileId: ref.id,
+            fields: "thumbnailLink",
+            supportsAllDrives: true,
+          });
+          const rawThumbUrl = metaRes.data.thumbnailLink;
+          if (!rawThumbUrl) {
+            console.log(`[qa] SKIP video "${ref.name}" — Drive has not generated a thumbnail yet (file may still be processing).`);
+            return;
+          }
+          // Drive thumbnails default to small sizes; swap in =s1568 for a larger frame.
+          const thumbUrl = rawThumbUrl.replace(/=s\d+$/, "=s1568");
+          const imgs = await downloadUrlImage(thumbUrl);
+          if (imgs.length) {
+            out.set(ref.name, imgs.map((img) => ({ ...img, name: `${ref.name} (Drive thumbnail frame)` })));
+            console.log(`[qa] DOWNLOADED Drive thumbnail for video "${ref.name}" → cross-referenced.`);
+          } else {
+            console.log(`[qa] SKIP video "${ref.name}" — Drive thumbnail URL returned no image.`);
+          }
+          return;
+        }
+
         const res = await drive.files.get(
           { fileId: ref.id, alt: "media", supportsAllDrives: true },
           { responseType: "arraybuffer" }
@@ -606,7 +639,7 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : "unknown error";
-        console.log(`[qa] SKIP image "${ref.name}" — download failed: ${msg}`);
+        console.log(`[qa] SKIP "${ref.name}" — download failed: ${msg}`);
       }
     })
   );
