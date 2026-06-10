@@ -11,6 +11,10 @@ type AdUnit = {
   // Which campaign this unit was imported from. Manually-typed units have none
   // and are grouped together. Used to send one QA request per campaign.
   campaignId?: string;
+  // Ad set name from the Meta API. Lets the QA route scope approved Drive
+  // images to the right ad set when approval subfolders are named after ad
+  // sets (e.g. "Walnut Creek/" ↔ the Walnut Creek ad set). Manual units: none.
+  adsetName?: string;
 };
 
 type DriveImage = {
@@ -48,6 +52,13 @@ type UnitResult = {
   summary: string;
   group?: GroupMember[];
   groupSize?: number;
+  // Image sizes + carousel flag from the server, for the cross-ad size
+  // comparison run after all chunks finish (campaigns are QA'd in chunks, so
+  // only the browser ever sees every ad of a campaign together).
+  sizeProfile?: { isCarousel: boolean; imageSizes: string[] };
+  // Which campaign this result belongs to — tagged client-side on merge so the
+  // cross-ad comparison never compares ads from different campaigns.
+  campaignKey?: string;
 };
 
 type QAResult = {
@@ -507,11 +518,12 @@ export default function QAPage() {
       }
 
       const importedCampaignId = row.campaignId.trim();
-      const imported: AdUnit[] = filtered.map((ad: { id: string; name: string }) => ({
+      const imported: AdUnit[] = filtered.map((ad: { id: string; name: string; adsetName?: string }) => ({
         id: String(Date.now()) + ad.id,
         name: ad.name,
         link: ad.id,
         campaignId: importedCampaignId,
+        adsetName: ad.adsetName || undefined,
       }));
 
       // Append to existing units (remove empty placeholder rows first)
@@ -542,6 +554,100 @@ export default function QAPage() {
   // Rank used to roll individual unit statuses up into an overall status.
   function statusRank(s: string): number {
     return s === "fail" ? 2 : s === "warning" ? 1 : 0;
+  }
+
+  // ── Cross-ad size comparison ───────────────────────────────────────────────
+  // Within ONE campaign, ads of the same format should share creative sizes:
+  // all statics one size, all carousels one size (V1 vs V2 included). Carousels
+  // and statics are compared separately — a 920×920 static next to 1080×1080
+  // carousels is fine. Sizes are compared per aspect ratio so legit placement
+  // variants (1:1 + 9:16) never collide; only same-ratio different-pixel sizes
+  // across ads get flagged (e.g. V1 static 1080×1080 vs V2 static 920×920).
+  // Runs once, after every chunk's results are merged — warning-level only.
+  function applyCrossAdSizeCheck(result: QAResult): QAResult {
+    const units = result.units.map((u) => ({ ...u, checks: { ...u.checks, format_size: { ...u.checks.format_size } } }));
+
+    // campaign → format (carousel|static) → ratio → size → unit indices
+    const byCampaign = new Map<string, number[]>();
+    units.forEach((u, i) => {
+      if (!u.sizeProfile?.imageSizes?.length) return;
+      const key = u.campaignKey ?? "__manual__";
+      if (!byCampaign.has(key)) byCampaign.set(key, []);
+      byCampaign.get(key)!.push(i);
+    });
+
+    const ratioOf = (size: string): string | null => {
+      const [w, h] = size.split("×").map(Number);
+      return w > 0 && h > 0 ? (w / h).toFixed(2) : null;
+    };
+
+    for (const idxs of Array.from(byCampaign.values())) {
+      for (const wantCarousel of [true, false]) {
+        const groupIdxs = idxs.filter((i) => units[i].sizeProfile!.isCarousel === wantCarousel);
+        if (groupIdxs.length < 2) continue;
+
+        // ratio → size → set of unit indices using that size
+        const ratioMap = new Map<string, Map<string, Set<number>>>();
+        for (const i of groupIdxs) {
+          for (const size of Array.from(new Set(units[i].sizeProfile!.imageSizes))) {
+            const r = ratioOf(size);
+            if (!r) continue;
+            if (!ratioMap.has(r)) ratioMap.set(r, new Map());
+            const sizeMap = ratioMap.get(r)!;
+            if (!sizeMap.has(size)) sizeMap.set(size, new Set());
+            sizeMap.get(size)!.add(i);
+          }
+        }
+
+        const fmtLabel = wantCarousel ? "carousel" : "static";
+        const flagUnit = (i: number, note: string) => {
+          const u = units[i];
+          const fs = u.checks.format_size;
+          fs.note = fs.note ? `${fs.note} ${note}` : note;
+          if (fs.status === "pass" || fs.status === "unknown") fs.status = "warning";
+          if (u.status === "pass") u.status = "warning";
+        };
+        for (const sizeMap of Array.from(ratioMap.values())) {
+          if (sizeMap.size < 2) continue; // one size for this ratio → consistent
+          const ranked = Array.from(sizeMap.entries()).sort((a, b) => b[1].size - a[1].size);
+          // TIE for the top count (e.g. 1 ad vs 1 ad): there is no majority, so
+          // electing an "outlier" would be arbitrary — flag ALL involved units
+          // with a neutral note instead of blaming one side at random.
+          const isTie = ranked.length > 1 && ranked[1][1].size === ranked[0][1].size;
+          if (isTie) {
+            const sizesDesc = ranked.map(([s, set]) => `${s} (${set.size} ad(s))`).join(" vs ");
+            const flagged = new Set<number>();
+            for (const [, set] of ranked) for (const i of Array.from(set)) flagged.add(i);
+            for (const i of Array.from(flagged)) {
+              flagUnit(
+                i,
+                `Cross-ad check: same-format ${fmtLabel} ads in this campaign use different sizes (${sizesDesc}) — same-format ads should share one size; verify which is correct.`
+              );
+            }
+            continue;
+          }
+          // Clear majority: everyone else is an outlier. Skip units that also
+          // carry the majority size (already covered by the per-ad mixed-size
+          // rule — don't let a unit flag itself).
+          const [majSize, majUnits] = ranked[0];
+          for (const [size, unitSet] of ranked.slice(1)) {
+            for (const i of Array.from(unitSet)) {
+              if (majUnits.has(i)) continue;
+              flagUnit(
+                i,
+                `Cross-ad check: this ${fmtLabel} uses ${size} while ${majUnits.size} other ${fmtLabel} ad(s) in the campaign use ${majSize} — same-format ads should share one size.`
+              );
+            }
+          }
+        }
+      }
+    }
+
+    const worst = units.reduce(
+      (w, u) => (statusRank(u.status) > statusRank(w) ? u.status : w),
+      "pass" as QAResult["overall_status"]
+    );
+    return { ...result, units, overall_status: worst };
   }
 
   async function runQA() {
@@ -629,11 +735,15 @@ export default function QAPage() {
         }
 
         const partial = data as unknown as QAResult;
+        // Tag each unit with its campaign (group.key is "<campaignId>#<chunk>")
+        // so the post-run cross-ad size check only compares within a campaign.
+        const campaignKey = group.key.split("#")[0];
+        const taggedUnits = (partial.units ?? []).map((u) => ({ ...u, campaignKey }));
         // Merge this campaign's results into the accumulating result as soon as
         // it returns, so the user sees results stream in rather than waiting.
         setResult((prev) => {
           const base = prev ?? { overall_status: "pass" as QAResult["overall_status"], units: [], critical_issues: [], notes: "" };
-          const mergedUnits = [...base.units, ...(partial.units ?? [])];
+          const mergedUnits = [...base.units, ...taggedUnits];
           const mergedCritical = [...base.critical_issues, ...(partial.critical_issues ?? [])];
           const worst = mergedUnits.reduce(
             (w, u) => (statusRank(u.status) > statusRank(w) ? u.status : w),
@@ -661,6 +771,9 @@ export default function QAPage() {
     await Promise.all(
       Array.from({ length: Math.min(MAX_CONCURRENT, groups.length) }, () => worker())
     );
+
+    // All chunks merged — run the cross-ad size comparison over the full set.
+    setResult((prev) => (prev ? applyCrossAdSizeCheck(prev) : prev));
 
     if (errors.length > 0) setError(errors.join("  "));
     setLoading(false);

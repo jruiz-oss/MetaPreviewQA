@@ -31,6 +31,7 @@ CRITICAL — IMAGE READING RULES (read before doing any visual check):
 - NEVER attribute text from the COPY DOCUMENT, CREATIVE DOCUMENT, or WORK ORDER to the image. Those are separate text sources. A date or phrase appearing in a document does NOT mean it appears in the creative, and vice versa.
 - When you report that the image "says" or "shows" something, it must be something you can actually read in the pixels. If you are describing what should be there per the copy doc, say so explicitly rather than claiming the image shows it.
 - Do not fabricate differences. Only flag a mismatch between the image and a document when you can actually read the conflicting text in the image.
+- ANIMATED GIFS: a GIF creative is delivered as several extracted still frames, each labeled "(GIF frame i/N)". All frames with the same base filename are ONE creative whose content legitimately changes over time — do NOT flag differences BETWEEN frames of the same GIF as a defect. Instead, review the SET of frames together: every frame's text/imagery must be correct, and when comparing a live GIF against an approved Drive GIF, compare the whole frame set (e.g. the live GIF must contain both the "A" and "B" states the approved GIF shows).
 
 Review each ad unit on seven criteria:
 1. copy_alignment — Does the ad copy text (post body, headline, CTA button text) exactly match the approved copy doc? Evaluate only the text-based content here — not the visual creative. Flag any word, phrase, offer detail, or CTA that differs from the approved copy doc. If no copy doc is provided, compare against the WO summary.
@@ -39,7 +40,7 @@ Review each ad unit on seven criteria:
    - APPROVED CREATIVE FROM DRIVE: the design files the client signed off on (labeled with their filenames). These are what the live ad is supposed to match.
    - LIVE META CREATIVE: the image(s) actually live in the Meta ad, shown per ad unit below.
    When images are provided, follow this three-step process:
-   STEP 1 — TEXT EXTRACTION: Before comparing anything, read each image and list every piece of text you can literally see in the pixels (headlines, offer amounts, dates, disclaimers, CTAs, fine print). Record this separately for the approved Drive image and the live Meta image in the text_in_approved and text_in_live fields. If text is too small or blurry to read with confidence, write "not legible" for that item. If no image is present for a source, write null.
+   STEP 1 — TEXT EXTRACTION: Before comparing anything, read each image and list every piece of text you can literally see in the pixels (headlines, offer amounts, dates, disclaimers, CTAs, fine print). Record this separately for the approved Drive image and the live Meta image in the text_in_approved and text_in_live fields. If text is too small or blurry to read with confidence, write "not legible" for that item. If an image is present but contains no legible text at all, write "no text visible". Reserve null STRICTLY for when no image was provided for that source — never use null when an image exists.
    STEP 2 — COMPARISON: With the extracted text in hand, compare the two lists. Flag any difference — a word, number, date, or phrase that appears in one but not the other, or differs between them. Also check visual theme, colors, logo, and layout match. Match Drive assets to ad units by filename/concept and size (e.g. "1080x1920 V2", "Carousel"). If only one source is present, check what you can. If no images at all, note that visual creative could not be checked.
    STEP 3 — COPY DOC CROSS-CHECK (only when the COPY DOCUMENT specifies on-image / per-card copy): compare the live image text you extracted in STEP 1 against the on-image copy the doc assigns to THIS specific ad unit/variant/option. The live image matching the approved Drive file is NOT sufficient on its own — if the live and Drive images both carry on-image text that differs from what the copy doc assigns this unit (e.g. the cards carry a different option's copy), flag it and name which option the on-image text actually belongs to. Use only text literally extracted from the pixels in STEP 1 — the image-reading rules above still apply. If the copy doc does not specify on-image copy, skip this step and do not penalize the ad for it.
    The step names above (STEP 1/2/3) are internal instructions only — NEVER reference them in your notes or summary. Just state the issue plainly, e.g. "live cards carry Option 1 on-image copy; copy doc assigns Option 2 copy to this unit."
@@ -144,6 +145,10 @@ const QA_TOOL: Anthropic.Tool = {
 type AdUnit = {
   name: string;
   link: string;
+  // Ad set name (from campaign import). Used to hard-scope approved Drive
+  // images to the matching ad set when approval subfolders are named after
+  // ad sets (location-variant campaigns: "Walnut Creek/", "Hayward/", …).
+  adsetName?: string;
 };
 
 // Tokenize a name (filename or ad unit name) into lowercase alphanumeric
@@ -199,23 +204,52 @@ function urlsMatch(approved: string, live: string): boolean {
 
 // Pull every URL out of the formatted Meta creative content (Destination URL,
 // Link URL, CTA URL, Landing URLs, carousel card urls all appear as plain text).
-function extractLiveUrls(content: string | null | undefined): string[] {
+// Line-based so each URL can be tagged as a carousel-card URL ("  Card N: …")
+// vs a primary destination — cards may legitimately deep-link to different
+// pages on the approved domain, which must not hard-FAIL the whole ad.
+function extractLiveUrls(content: string | null | undefined): { url: string; isCard: boolean }[] {
   if (!content) return [];
-  const matches = content.match(/https?:\/\/[^\s|,")\]]+/g) ?? [];
-  return Array.from(new Set(matches));
+  const out: { url: string; isCard: boolean }[] = [];
+  const seen = new Set<string>();
+  for (const line of content.split("\n")) {
+    const isCard = /^\s*Card \d+:/.test(line);
+    for (const u of line.match(/https?:\/\/[^\s|,")\]]+/g) ?? []) {
+      if (!seen.has(u)) {
+        seen.add(u);
+        out.push({ url: u, isCard });
+      }
+    }
+  }
+  return out;
 }
 
 function computeUrlComparisonLine(approvedUrl: string | null | undefined, content: string | null | undefined): string {
-  if (!approvedUrl) return "";
+  // No approved URL in the WO → say so explicitly. Without this line the model
+  // would eyeball-match URLs itself — the exact failure mode the computed
+  // verdict exists to prevent.
+  if (!approvedUrl) {
+    return `\nURL comparison (computed): no approved destination URL was provided in the work order — do NOT judge URL matching; evaluate only the CTA.`;
+  }
   const liveUrls = extractLiveUrls(content);
   if (!liveUrls.length) {
     return `\nURL comparison (computed): no destination URL found in the ad's creative fields — URL match could not be verified.`;
   }
-  const mismatches = liveUrls.filter((u) => !urlsMatch(approvedUrl, u));
+  const mismatches = liveUrls.filter((u) => !urlsMatch(approvedUrl, u.url));
   if (!mismatches.length) {
     return `\nURL comparison (computed): all ${liveUrls.length} live URL(s) match the approved destination (host + path compared; tracking params ignored). URL matching = PASS; evaluate only the CTA.`;
   }
-  return `\nURL comparison (computed): MISMATCH — these live URL(s) do not point at the approved destination ${approvedUrl}: ${mismatches.join(" , ")}. URL matching = FAIL.`;
+  // Split mismatches: a carousel-card URL on the approved HOST but a different
+  // path is a deep-link (often intentional) → warning. Anything else — a
+  // primary URL mismatch, or a card pointing at a different domain — is a FAIL.
+  const approvedHost = normalizeUrlForCompare(approvedUrl)?.host ?? null;
+  const sameHost = (u: string) =>
+    !!approvedHost && normalizeUrlForCompare(u)?.host === approvedHost;
+  const hardMismatches = mismatches.filter((m) => !m.isCard || !sameHost(m.url));
+  const cardDeepLinks = mismatches.filter((m) => m.isCard && sameHost(m.url));
+  if (hardMismatches.length) {
+    return `\nURL comparison (computed): MISMATCH — these live URL(s) do not point at the approved destination ${approvedUrl}: ${hardMismatches.map((m) => m.url).join(" , ")}. URL matching = FAIL.`;
+  }
+  return `\nURL comparison (computed): primary destination matches the approved URL, but ${cardDeepLinks.length} carousel card URL(s) deep-link to other pages on the approved domain: ${cardDeepLinks.map((m) => m.url).join(" , ")}. URL matching = WARNING (verify the card deep-links are intentional); do not mark this a FAIL on URL matching alone.`;
 }
 
 // format_size: name tokens are the primary intent signal, dimensions the
@@ -230,7 +264,69 @@ function classifyDim(width: number, height: number): "story" | "feed" | "landsca
   return "other";
 }
 
+// Dimension-consistency rules (computed deterministically from per-asset dims):
+//  1. CAROUSEL CARDS — all cards in one carousel must share ONE exact size.
+//     One 2040×1080 card among 1080×1080 siblings is a real defect → FAIL.
+//  2. SAME-RATIO MIXED SIZES — two unique sizes with the SAME aspect ratio in
+//     one ad (e.g. 920×920 + 1080×1080, both 1:1) can't be placement variants
+//     (those differ in ratio: 1:1 vs 4:5 vs 9:16) → WARNING. Different-ratio
+//     sizes are legitimate placement customization and are never flagged.
+function checkDimensionConsistency(fi: FormatInfo | null | undefined): { failNote: string | null; warnNote: string | null } {
+  // Rule 1: carousel card uniformity (exact WxH, per-card, not deduped).
+  let failNote: string | null = null;
+  const cards = fi?.cardDimensions ?? [];
+  if (cards.length >= 2) {
+    const counts = new Map<string, number>();
+    for (const c of cards) {
+      const key = `${c.width}×${c.height}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    if (counts.size > 1) {
+      const parts = Array.from(counts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([size, n]) => `${n}× ${size}`);
+      failNote = `carousel cards have mixed sizes (${parts.join(", ")}) — all cards in a carousel should share one size`;
+    }
+  }
+
+  // Rule 2: same aspect ratio, different pixel sizes (unique IMAGE dims only —
+  // videos legitimately ship at other resolutions and are excluded).
+  let warnNote: string | null = null;
+  const dims = fi?.imageDimensions ?? [];
+  const byRatio = new Map<string, string[]>();
+  for (const d of dims) {
+    const key = (d.width / d.height).toFixed(2);
+    if (!byRatio.has(key)) byRatio.set(key, []);
+    byRatio.get(key)!.push(`${d.width}×${d.height}`);
+  }
+  const mixed = Array.from(byRatio.values()).filter((sizes) => sizes.length > 1);
+  if (mixed.length) {
+    warnNote = `multiple sizes share the same aspect ratio within this ad (${mixed
+      .map((s) => s.join(" vs "))
+      .join("; ")}) — same-format assets should be one size; verify this is intentional`;
+  }
+  return { failNote, warnNote };
+}
+
+// Combines the placement/format expectation check with the dimension
+// consistency rules above. Consistency failures dominate (fail > warning),
+// and notes are merged so neither finding hides the other.
 function computeFormatSizeCheck(unitName: string, fi: FormatInfo | null | undefined): ComputedCheck {
+  const base = computePlacementFormatCheck(unitName, fi);
+  const { failNote, warnNote } = checkDimensionConsistency(fi);
+  if (!failNote && !warnNote) return base;
+
+  const notes: string[] = [];
+  if (failNote) notes.push(failNote);
+  if (warnNote) notes.push(warnNote);
+  if (base.status === "fail" || (base.status === "warning" && base.note)) notes.push(base.note);
+
+  const status: ComputedCheck["status"] =
+    failNote || base.status === "fail" ? "fail" : "warning";
+  return { status, note: notes.join("; ") };
+}
+
+function computePlacementFormatCheck(unitName: string, fi: FormatInfo | null | undefined): ComputedCheck {
   const dims = fi?.creativeDimensions ?? [];
   if (!dims.length) return { status: "unknown", note: "Creative dimensions not available." };
 
@@ -240,10 +336,15 @@ function computeFormatSizeCheck(unitName: string, fi: FormatInfo | null | undefi
   const sizesStr = dims.map((d) => `${d.width}×${d.height}`).join(", ");
 
   const tokens = new Set(tokenize(unitName));
+  // Colon ratio notation ("9:16", "4:5", "1:1") tokenizes into bare numbers
+  // ("9" is even dropped for being too short), so it's matched on the raw name.
+  const rawName = unitName.toLowerCase();
   const expectsStory =
-    tokens.has("story") || tokens.has("stories") || tokens.has("reel") || tokens.has("reels") || tokens.has("9x16");
+    tokens.has("story") || tokens.has("stories") || tokens.has("reel") || tokens.has("reels") ||
+    tokens.has("9x16") || /\b9\s*:\s*16\b/.test(rawName);
   const expectsFeed =
-    tokens.has("feed") || tokens.has("static") || tokens.has("1x1") || tokens.has("4x5") || tokens.has("square");
+    tokens.has("feed") || tokens.has("static") || tokens.has("1x1") || tokens.has("4x5") ||
+    tokens.has("square") || /\b(1\s*:\s*1|4\s*:\s*5)\b/.test(rawName);
 
   const issues: string[] = [];
   if (expectsStory && !has916) {
@@ -386,45 +487,101 @@ async function resizeForClaude(buf: Buffer): Promise<{ buf: Buffer; mediaType: I
   }
 }
 
+// Animated GIFs are mini slideshows — the creative's content CHANGES across
+// frames (e.g. image A → image B). Sending the GIF whole means the model only
+// ever sees one frame, so the other version(s) were never QA'd. Extract up to
+// MAX_GIF_FRAMES evenly-spaced frames (always including first and last) and
+// send each as its own labeled image so the full animation gets reviewed.
+const MAX_GIF_FRAMES = 4;
+type PreparedImage = {
+  buf: Buffer;
+  mediaType: ImageMediaType;
+  frame?: { index: number; total: number }; // present only for animated-GIF frames (1-based)
+};
+async function prepareImageForClaude(raw: Buffer): Promise<PreparedImage[]> {
+  try {
+    const meta = await sharp(raw).metadata();
+    if (!meta.width || !meta.height) return [];
+    const pages = meta.pages ?? 1;
+    if (meta.format === "gif" && pages > 1) {
+      const n = Math.min(MAX_GIF_FRAMES, pages);
+      // Evenly spaced 0-based page indices, first and last always included.
+      const indices = Array.from(
+        new Set(Array.from({ length: n }, (_, i) => Math.round((i * (pages - 1)) / (n - 1))))
+      );
+      const out: PreparedImage[] = [];
+      for (const idx of indices) {
+        try {
+          const buf = await sharp(raw, { page: idx, pages: 1 })
+            .resize(MAX_SIDE, MAX_SIDE, { fit: "inside", withoutEnlargement: true })
+            .jpeg({ quality: 88 })
+            .toBuffer();
+          out.push({ buf, mediaType: "image/jpeg", frame: { index: idx + 1, total: pages } });
+        } catch {
+          // Skip an unreadable frame; remaining frames still get reviewed.
+        }
+      }
+      if (out.length) {
+        console.log(`[qa] Animated GIF: extracted ${out.length} of ${pages} frame(s) for review.`);
+        return out;
+      }
+      // Frame extraction failed entirely — fall through to the static path.
+    }
+    const resized = await resizeForClaude(raw);
+    return resized ? [resized] : [];
+  } catch {
+    return [];
+  }
+}
+
 // Download a URL-based image server-side, resize, and return as base64.
 // `context` (optional) is a human-readable placement/date note attached to this
 // specific live image so the QA prompt can label it; null when the flag is off.
-async function downloadUrlImage(url: string, context?: string | null): Promise<FetchedImage | null> {
+async function downloadUrlImage(url: string, context?: string | null): Promise<FetchedImage[]> {
   try {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) {
       console.log(`[qa] SKIP live Meta image — HTTP ${res.status} for ${url}`);
-      return null;
+      return [];
     }
     const rawBuf = Buffer.from(await res.arrayBuffer());
-    const resized = await resizeForClaude(rawBuf);
-    if (!resized) {
+    const prepared = await prepareImageForClaude(rawBuf);
+    if (!prepared.length) {
       console.log(`[qa] SKIP live Meta image — not a decodable image: ${url}`);
-      return null;
+      return [];
     }
-    const { buf, mediaType } = resized;
-    const name = url.split("/").pop()?.split("?")[0] ?? "meta-creative.jpg";
-    console.log(`[qa] DOWNLOADED live Meta image "${name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${(buf.length / 1024).toFixed(0)} KB resized).`);
-    return { name, mediaType, data: buf.toString("base64"), context: context ?? null };
+    const baseName = url.split("/").pop()?.split("?")[0] ?? "meta-creative.jpg";
+    console.log(`[qa] DOWNLOADED live Meta image "${baseName}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${prepared.length} image(s)).`);
+    return prepared.map((p) => ({
+      name: p.frame ? `${baseName} (GIF frame ${p.frame.index}/${p.frame.total})` : baseName,
+      mediaType: p.mediaType,
+      data: p.buf.toString("base64"),
+      context: p.frame
+        ? `${context ? `${context} — ` : ""}animated GIF, extracted frame ${p.frame.index} of ${p.frame.total}`
+        : context ?? null,
+    }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
     console.log(`[qa] SKIP live Meta image — download failed: ${msg}`);
-    return null;
+    return [];
   }
 }
 
 // Download the queued Drive images server-side (no Vercel body limit here).
-async function downloadDriveImages(refs: DriveImageRef[]): Promise<FetchedImage[]> {
-  if (!refs.length) return [];
+// Returns a map of ref.name → one or more prepared images (animated GIFs expand
+// into multiple labeled frames; everything else stays a single image).
+async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, FetchedImage[]>> {
+  const out = new Map<string, FetchedImage[]>();
+  if (!refs.length) return out;
   const storedToken = await getStoredRefreshToken();
   const drive = google.drive({ version: "v3", auth: getOAuthClient(storedToken) });
 
   // Download in parallel — sequential was needless latency.
-  const results = await Promise.all(
-    refs.map(async (ref): Promise<FetchedImage | null> => {
+  await Promise.all(
+    refs.map(async (ref): Promise<void> => {
       if (!ref.id || !(ALLOWED_IMAGE_MEDIA_TYPES as string[]).includes(ref.mediaType)) {
         console.log(`[qa] SKIP image "${ref.name}" — unsupported type ${ref.mediaType}.`);
-        return null;
+        return;
       }
       try {
         const res = await drive.files.get(
@@ -432,22 +589,27 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<FetchedImage[
           { responseType: "arraybuffer" }
         );
         const rawBuf = Buffer.from(res.data as ArrayBuffer);
-        const resized = await resizeForClaude(rawBuf);
-        if (!resized) {
+        const prepared = await prepareImageForClaude(rawBuf);
+        if (!prepared.length) {
           console.log(`[qa] SKIP image "${ref.name}" — not a decodable image.`);
-          return null;
+          return;
         }
-        const { buf, mediaType: resizedType } = resized;
-        console.log(`[qa] DOWNLOADED image "${ref.name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${(buf.length / 1024).toFixed(0)} KB resized) → cross-referenced.`);
-        return { name: ref.name, mediaType: resizedType, data: buf.toString("base64") };
+        console.log(`[qa] DOWNLOADED image "${ref.name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${prepared.length} image(s)) → cross-referenced.`);
+        out.set(
+          ref.name,
+          prepared.map((p) => ({
+            name: p.frame ? `${ref.name} (GIF frame ${p.frame.index}/${p.frame.total})` : ref.name,
+            mediaType: p.mediaType,
+            data: p.buf.toString("base64"),
+          }))
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : "unknown error";
         console.log(`[qa] SKIP image "${ref.name}" — download failed: ${msg}`);
-        return null;
       }
     })
   );
-  return results.filter((img): img is FetchedImage => img !== null);
+  return out;
 }
 
 export async function POST(request: Request) {
@@ -516,7 +678,7 @@ export async function POST(request: Request) {
     // (Meta CDN URLs are blocked by robots.txt when passed directly to Claude).
     const creativeImages: FetchedImage[] = (
       await Promise.all((creativeImageUrls ?? []).map((u) => downloadUrlImage(u, contextByUrl.get(u))))
-    ).filter((img): img is FetchedImage => img !== null);
+    ).flat();
 
     return {
       ...unit,
@@ -612,9 +774,35 @@ export async function POST(request: Request) {
   // "Carousels/" subfolder and carry "Carousel" in the filename.
   const refIsCarousel = (name: string) => name.toLowerCase().includes("carousel");
 
-  function rankRefsForUnit(unit: { name?: string | null; content?: string | null }): DriveImageRef[] {
+  // ── AD-SET FOLDER SCOPING ────────────────────────────────────────────────
+  // Location/variant campaigns keep each ad set's approved images in a folder
+  // NAMED AFTER the ad set ("Walnut Creek/" ↔ the Walnut Creek ad set). Token
+  // scoring alone can't enforce that mapping — if the location name doesn't
+  // appear in the ad name/copy, the wrong folder's creative can win. Rule: a
+  // Drive ref is scoped to an ad set when one of its folder path segments,
+  // after dropping generic structure words, has ALL its tokens present in the
+  // ad set name. Scoping only narrows when it actually discriminates (some
+  // refs match, some don't) — otherwise everything falls back to TF-IDF as
+  // before, so normal retargeting/interests/lookalike campaigns are unaffected.
+  const GENERIC_FOLDER_TOKEN =
+    /^(for|approval|approvals|approved|client|creative|creatives|carousel|carousels|static|statics|gif|gifs|video|videos|image|images|img|final|finals|export|exports|option|options|v?\d+|\d+x\d+)$/;
+  function folderSegments(qualifiedName: string): string[] {
+    return qualifiedName.split("/").slice(0, -1);
+  }
+  function segmentMatchesAdset(segment: string, adsetTokens: Set<string>): boolean {
+    const segTokens = tokenize(segment).filter((t) => !GENERIC_FOLDER_TOKEN.test(t));
+    return segTokens.length > 0 && segTokens.every((t) => adsetTokens.has(t));
+  }
+
+  // Returns the matched refs plus `crossFormat`: true when the matched approved
+  // assets are the OPPOSITE format of the unit (carousel unit → static files or
+  // vice versa, via the fallback paths below). The prompt then tells the model
+  // to compare offer/text/theme only — not layout — so the fallback doesn't
+  // produce "wrong layout" false flags.
+  type RankedRefs = { refs: DriveImageRef[]; crossFormat: boolean };
+  function rankRefsForUnit(unit: { name?: string | null; content?: string | null; adsetName?: string }): RankedRefs {
     const unitName = unit.name ?? "";
-    if (!allDriveRefs.length) return [];
+    if (!allDriveRefs.length) return { refs: [], crossFormat: false };
     // Build token set from the unit name AND the ad body copy from the Meta API.
     // Unit names are often generic ("May Static V1", "May Carousel V2") — they
     // encode format and version but NOT the campaign concept. The ad copy, on the
@@ -629,7 +817,7 @@ export async function POST(request: Request) {
       ...tokenize(unitName),
       ...tokenize(unit.content ?? ""),
     ]);
-    if (!unitTokens.size) return [];
+    if (!unitTokens.size) return { refs: [], crossFormat: false };
 
     // FORMAT-TYPE GATE — the fix for static units being QA'd against carousel
     // designs (and vice versa). Token overlap alone can't tell them apart when
@@ -644,22 +832,39 @@ export async function POST(request: Request) {
     //     when the campaign uses the same creative for both formats and the files
     //     aren't named separately). This mirrors the carousel-unit fallback above
     //     so we always attempt a comparison rather than silently skipping it.
+    // Apply ad-set folder scoping first (see comment above). The original
+    // index `i` is preserved so refTokenSets/idf lookups stay valid.
+    let pool = allDriveRefs.map((ref, i) => ({ ref, i }));
+    const adsetName = unit.adsetName ?? "";
+    if (adsetName) {
+      const adsetTokens = new Set(tokenize(adsetName));
+      const scoped = pool.filter(({ ref }) =>
+        folderSegments(ref.name).some((s) => segmentMatchesAdset(s, adsetTokens))
+      );
+      if (scoped.length > 0 && scoped.length < pool.length) {
+        console.log(
+          `[qa] AD-SET SCOPE: unit "${unitName}" (ad set "${adsetName}") → ${scoped.length}/${pool.length} Drive image(s) in matching folder(s).`
+        );
+        pool = scoped;
+      }
+    }
+
     const carouselUnit = unitIsCarousel(unit);
-    let eligible = allDriveRefs.map((ref, i) => ({ ref, i }));
+    let eligible = pool;
     if (carouselUnit) {
       const onlyCarousel = eligible.filter((x) => refIsCarousel(x.ref.name));
       // Fall back to static/non-carousel assets when no carousel-labeled files
       // exist — same creative, not separately named.
       eligible = onlyCarousel.length > 0 ? onlyCarousel : eligible.filter((x) => !refIsCarousel(x.ref.name));
-      // If still nothing (e.g. only unrelated files), keep all eligible.
-      if (!eligible.length) eligible = allDriveRefs.map((ref, i) => ({ ref, i }));
+      // If still nothing (e.g. only unrelated files), keep the scoped pool.
+      if (!eligible.length) eligible = pool;
     } else {
       const nonCarousel = eligible.filter((x) => !refIsCarousel(x.ref.name));
       // Fall back to carousel Drive assets when no static/story assets exist —
       // same creative, different format label.
       eligible = nonCarousel.length > 0 ? nonCarousel : eligible;
     }
-    if (!eligible.length) return [];
+    if (!eligible.length) return { refs: [], crossFormat: false };
 
     const scored = eligible
       .map(({ ref, i }) => {
@@ -672,24 +877,34 @@ export async function POST(request: Request) {
       .filter((x) => x.score > 0) // require at least one shared token
       .sort((a, b) => b.score - a.score);
 
-    if (!scored.length) return []; // no match → no Drive comparison for this unit
+    if (!scored.length) return { refs: [], crossFormat: false }; // no match → no Drive comparison for this unit
 
     // Keep only images close to the best score (so a unit doesn't pull in
     // weakly-related extras from the wrong version), capped.
     const best = scored[0].score;
-    return scored
+    const refs = scored
       .filter((x) => x.score >= best * 0.5)
       .slice(0, MAX_DRIVE_IMAGES_PER_UNIT)
       .map((x) => x.ref);
+    // Did the fallback hand this unit opposite-format approved assets?
+    const crossFormat = carouselUnit
+      ? refs.some((r) => !refIsCarousel(r.name))
+      : refs.some((r) => refIsCarousel(r.name));
+    if (crossFormat) {
+      console.log(
+        `[qa] CROSS-FORMAT FALLBACK: unit "${unitName}" (${carouselUnit ? "carousel" : "non-carousel"}) matched opposite-format approved file(s): ${refs.map((r) => r.name).join(" | ")}`
+      );
+    }
+    return { refs, crossFormat };
   }
 
   // Match first, then download ONLY the images actually used by some unit —
   // no point downloading 40 assets when a handful are referenced.
   const refsPerUnit = unitContents.map((u) => rankRefsForUnit(u));
   const neededIds = new Set<string>();
-  for (const refs of refsPerUnit) for (const r of refs) neededIds.add(r.id);
-  const downloadedDrive = await downloadDriveImages(allDriveRefs.filter((r) => neededIds.has(r.id)));
-  const driveByName = new Map(downloadedDrive.map((img) => [img.name, img] as const));
+  for (const ranked of refsPerUnit) for (const r of ranked.refs) neededIds.add(r.id);
+  // Map of ref.name → prepared image(s); animated GIFs expand to several frames.
+  const driveByName = await downloadDriveImages(allDriveRefs.filter((r) => neededIds.has(r.id)));
 
   // Build content blocks for a single ad unit (text + image blocks)
   function buildUnitBlocks(
@@ -779,7 +994,8 @@ export async function POST(request: Request) {
   // Call the Claude API for one batch of units + their Drive images
   async function runBatch(
     batchUnits: (typeof unitContents),
-    batchDriveImages: FetchedImage[]
+    batchDriveImages: FetchedImage[],
+    crossFormat = false
   ): Promise<{ units: unknown[]; critical_issues: string[]; notes: string }> {
     const messageContent: ContentBlock[] = [];
 
@@ -789,9 +1005,16 @@ export async function POST(request: Request) {
     messageContent.push({ type: "text", text: woSection, cache_control: { type: "ephemeral" } });
 
     if (batchDriveImages.length > 0) {
+      // Cross-format fallback: the only approved assets found are the opposite
+      // format of this unit (e.g. carousel exports for a static ad). The design
+      // is shared, the layout is not — scope the comparison so layout/card-count
+      // differences don't become false flags.
+      const crossFormatNote = crossFormat
+        ? ` NOTE: the approved file(s) below are a DIFFERENT FORMAT than this ad unit (carousel vs static/story) — the campaign reuses one design across formats. Compare offer details, dates, on-image text, and visual theme ONLY; do NOT flag layout, card count, crop, or aspect-ratio differences as defects.`
+        : "";
       messageContent.push({
         type: "text",
-        text: `\n\nAPPROVED CREATIVE FROM DRIVE (${batchDriveImages.length} image(s) — these are the signed-off designs the live Meta ads should match; match each to an ad unit by filename/concept/size):`,
+        text: `\n\nAPPROVED CREATIVE FROM DRIVE (${batchDriveImages.length} image(s) — these are the signed-off designs the live Meta ads should match; match each to an ad unit by filename/concept/size):${crossFormatNote}`,
       });
       for (const img of batchDriveImages) {
         messageContent.push({ type: "text", text: `\nApproved creative file: ${img.name}` });
@@ -966,7 +1189,21 @@ export async function POST(request: Request) {
     // null/undefined, so a non-array value slipped through and threw
     // "(parsed.units ?? []).map is not a function", failing the whole batch.
     const parsedUnits: Record<string, unknown>[] = Array.isArray(parsed.units) ? parsed.units : [];
-    const parsedCritical: string[] = Array.isArray(parsed.critical_issues) ? parsed.critical_issues : [];
+    const rawCritical: string[] = Array.isArray(parsed.critical_issues) ? parsed.critical_issues : [];
+
+    // Drop model-authored criticals about checks the code owns and overwrites
+    // (ai_enhancements, format_size, URL matching). The model is told to leave
+    // those as placeholders, but it can still surface a critical that
+    // contradicts the deterministic result — a false flag in the issues card.
+    const CODE_OWNED_CRITICAL_RE =
+      /(enhancement|advantage\+|aspect ratio|\bdimensions?\b|image size|asset size|\b9:16\b|\b4:5\b|\b1:1\b|letterbox|tracking param|utm_)/i;
+    const parsedCritical = rawCritical.filter((c) => {
+      if (CODE_OWNED_CRITICAL_RE.test(c)) {
+        console.log(`[qa][guard] dropped model critical about a code-owned check: "${c}"`);
+        return false;
+      }
+      return true;
+    });
 
     // --- DEBUG: text the model claims it read from each image ---------------
     // The two-step prompt records every legible string the model saw in the
@@ -986,32 +1223,49 @@ export async function POST(request: Request) {
       }
     }
 
-    // --- GUARD: no approved Drive image → creative_alignment can't be green ---
+    // --- GUARDS: creative_alignment can't be green without a real comparison ---
     // The prompt tells the model "if only one source is present, check what you
-    // can", which lets it PASS a creative it never actually compared against the
-    // signed-off Drive asset (it just eyeballs branding/theme vs the WO text).
-    // Enforce deterministically: if this batch had ZERO approved Drive images
-    // but the unit DID have live Meta images, a "pass" on creative_alignment is
-    // overclaiming — cap it at "warning" and say why. A unit-level "pass" is
-    // downgraded along with it so the card color reflects the weakest check.
-    if (batchDriveImages.length === 0) {
-      parsedUnits.forEach((u, idx) => {
-        const hasLive =
-          ((batchUnits[idx] ?? batchUnits[0]) as { creativeImages?: FetchedImage[] } | undefined)
-            ?.creativeImages?.length ?? 0;
-        const checks = u?.checks as Record<string, Record<string, unknown>> | undefined;
-        const cca = checks?.creative_alignment;
-        if (hasLive > 0 && cca && cca.status === "pass") {
-          cca.status = "warning";
-          const existing = typeof cca.note === "string" && cca.note.trim() ? `${cca.note.trim()} ` : "";
-          cca.note = `${existing}(Approved Drive asset not available for comparison — could not fully verify.)`.trim();
-          if (u.status === "pass") u.status = "warning";
-          console.log(
-            `[qa][guard] "${String(u.name)}" creative_alignment pass→warning — no approved Drive image reached the model.`
-          );
-        }
-      });
-    }
+    // can", which lets it PASS a creative it never actually compared. Enforce
+    // deterministically — a "pass" is downgraded to "warning" when:
+    //  1. No approved Drive image reached the model (it only eyeballed the live).
+    //  2. No live Meta image was retrievable (it only eyeballed the approved).
+    //  3. Neither image was available at all.
+    //  4. Images WERE sent but the model returned null for the corresponding
+    //     text-extraction field — STEP 1 was skipped, so the pass is unverified.
+    //     (Safe to enforce: the prompt reserves null for "no image provided";
+    //     textless creatives must be reported as "no text visible".)
+    // A unit-level "pass" is downgraded along with it so the card color
+    // reflects the weakest check.
+    parsedUnits.forEach((u, idx) => {
+      const hasLive =
+        (((batchUnits[idx] ?? batchUnits[0]) as { creativeImages?: FetchedImage[] } | undefined)
+          ?.creativeImages?.length ?? 0) > 0;
+      const hasDrive = batchDriveImages.length > 0;
+      const checks = u?.checks as Record<string, Record<string, unknown>> | undefined;
+      const cca = checks?.creative_alignment;
+      if (!cca || cca.status !== "pass") return;
+      const extracted = (v: unknown) => typeof v === "string" && v.trim().length > 0;
+      let reason: string | null = null;
+      if (!hasLive && !hasDrive) {
+        reason = "No creative images were available — visual creative could not be verified.";
+      } else if (hasLive && !hasDrive) {
+        reason = "Approved Drive asset not available for comparison — could not fully verify.";
+      } else if (hasDrive && !hasLive) {
+        reason = "Live Meta image could not be retrieved — could not fully verify against the approved creative.";
+      } else if (!extracted(cca.text_in_approved)) {
+        reason = "No text was extracted from the approved image — visual comparison not verifiable.";
+      } else if (!extracted(cca.text_in_live)) {
+        reason = "No text was extracted from the live image — visual comparison not verifiable.";
+      }
+      if (!reason) return;
+      cca.status = "warning";
+      const existing = typeof cca.note === "string" && cca.note.trim() ? `${cca.note.trim()} ` : "";
+      cca.note = `${existing}(${reason})`.trim();
+      if (u.status === "pass") u.status = "warning";
+      console.log(
+        `[qa][guard] "${String(u.name)}" creative_alignment pass→warning — ${reason}`
+      );
+    });
 
     // Attach the resolved ad ID to each result unit so the report can show a
     // copy/paste-able ID. The model output isn't trusted to echo it — we map by
@@ -1091,7 +1345,8 @@ export async function POST(request: Request) {
       manual: [...manual].sort(),
       fmt: (u as { formatInfo?: FormatInfo | null }).formatInfo ?? null,
       liveImgHashes: liveImgs.map((img) => sha1(img.data)).sort(),
-      driveImgs: refsPerUnit[i].map((r) => r.name).sort(),
+      driveImgs: refsPerUnit[i].refs.map((r) => r.name).sort(),
+      driveCrossFormat: refsPerUnit[i].crossFormat,
       nameSig: nameSignature(u.name ?? ""),
     };
   }
@@ -1151,12 +1406,11 @@ export async function POST(request: Request) {
   // fast call (~5-15s). Many of these run concurrently and fail in isolation,
   // keeping every request comfortably under Vercel's limit. We only call Claude
   // for representatives — duplicate versions reuse the representative's result.
-  type Batch = { units: (typeof unitContents); driveImages: FetchedImage[] };
+  type Batch = { units: (typeof unitContents); driveImages: FetchedImage[]; crossFormat: boolean };
   const batches: Batch[] = repIndices.map((i) => ({
     units: [unitContents[i]],
-    driveImages: refsPerUnit[i]
-      .map((r) => driveByName.get(r.name))
-      .filter((x): x is FetchedImage => !!x),
+    driveImages: refsPerUnit[i].refs.flatMap((r) => driveByName.get(r.name) ?? []),
+    crossFormat: refsPerUnit[i].crossFormat,
   }));
 
   console.log(
@@ -1180,7 +1434,7 @@ export async function POST(request: Request) {
         if (i >= batches.length) return;
         const b = batches[i];
         console.log(`[qa] Batch ${i + 1}/${batches.length}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
-        batchResults[i] = await runBatch(b.units, b.driveImages);
+        batchResults[i] = await runBatch(b.units, b.driveImages, b.crossFormat);
       }
     };
 
@@ -1235,6 +1489,16 @@ export async function POST(request: Request) {
         ),
       };
 
+      // Size profile for the CLIENT-SIDE cross-ad comparison (V1 vs V2 statics,
+      // carousel vs carousel). Campaigns are chunked into multiple /api/qa
+      // requests, so comparing across ads can only happen once the browser has
+      // every chunk's results — the server just ships the raw image sizes.
+      const repFi = (rep as { formatInfo?: FormatInfo | null }).formatInfo;
+      const sizeProfile = {
+        isCarousel: unitIsCarousel(rep),
+        imageSizes: (repFi?.imageDimensions ?? []).map((d) => `${d.width}×${d.height}`),
+      };
+
       return {
         ...base,
         checks: finalChecks,
@@ -1246,6 +1510,7 @@ export async function POST(request: Request) {
         adId: unitContents[repIdx].adId ?? null,
         group,
         groupSize: group.length,
+        sizeProfile,
       };
     });
     const allCritical = batchResults.flatMap((r) => r.critical_issues);

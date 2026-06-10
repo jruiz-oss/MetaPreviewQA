@@ -65,6 +65,15 @@ export type FormatInfo = {
   placements: PlacementInfo | null;
   creativeDimensions: ImageDimensions[]; // all unique dimensions found across creative assets
   adFormats: string[]; // e.g. ["AUTOMATIC_FORMAT"] or ["SINGLE_IMAGE", "CAROUSEL"]
+  // Per-card dimensions of the carousel's actually-configured cards
+  // (object_story_spec child_attachments), in card order and NOT deduplicated —
+  // this is what lets QA flag one odd-sized card among otherwise uniform cards.
+  // Empty for non-carousel ads and asset-feed carousels without child_attachments.
+  cardDimensions?: ImageDimensions[];
+  // Unique dimensions across IMAGE assets only (videos excluded) — videos
+  // legitimately ship at different resolutions than statics, so consistency
+  // rules must not compare across the two.
+  imageDimensions?: ImageDimensions[];
 };
 
 /**
@@ -264,6 +273,24 @@ const ENHANCEMENT_LABELS: Record<string, string> = {
   video_filtering: "Video Filtering",
   video_uncrop: "Expand Video",
 };
+
+// Confirmed user-controllable enhancement toggles. If one of these keys is
+// ABSENT from degrees_of_freedom_spec, Meta simply did not report its state —
+// and several Advantage+ features default to opt-IN unless explicitly opted
+// out, so absence must surface as "verify manually", never as implicitly off.
+// (inline_comment is excluded: it's allowed ON by policy either way.)
+const CONFIRMED_ENHANCEMENT_KEYS = [
+  "image_templates",
+  "image_touchups",
+  "video_auto_crop",
+  "text_optimizations",
+  "image_brightness_and_contrast",
+  "reveal_details_over_time",
+  "text_translation",
+  "add_text_overlay",
+  "enhance_cta",
+  "image_uncrop",
+];
 
 // Keys the Meta API reports as OPT_IN but that don't correspond to a user-controllable
 // toggle visible in Ads Manager. Excluding these from API-checked enhancements prevents
@@ -763,10 +790,21 @@ export async function fetchAdContent(
     if (!seenSizes.has(key)) { seenSizes.add(key); creativeDimensions.push(d); }
   }
   for (const hash of allHashes) addDim(dimMap.get(hash));
+  // Image-only snapshot BEFORE video dims are mixed in — consistency checks
+  // must not compare image sizes against video renditions.
+  const imageDimensions: ImageDimensions[] = [...creativeDimensions];
   for (const d of videoDims) addDim(d);
 
   const adFormats = data.creative?.asset_feed_spec?.ad_formats ?? [];
-  const formatInfo: FormatInfo = { placements, creativeDimensions, adFormats };
+
+  // Per-card dims for the configured carousel cards (order preserved, no dedup)
+  // so the QA route can flag a single odd-sized card among uniform siblings.
+  const cardDimensions: ImageDimensions[] = cardHashes
+    .map((h) => dimMap.get(h))
+    .filter((d): d is ImageMeta => !!d?.width && !!d?.height)
+    .map(({ width, height }) => ({ width, height }));
+
+  const formatInfo: FormatInfo = { placements, creativeDimensions, adFormats, cardDimensions, imageDimensions };
 
   // --- Select which creative images to send for visual QA -----------------
   // A single-image ad serves ONE creative, but its asset_feed_spec.images pool
@@ -1035,6 +1073,26 @@ export async function fetchAdContent(
       `published_hash=${publishedHash ? "yes" : "no"} live_source=${liveSource} → chosen=${creativeImageUrls.length}`
   );
 
+  // Per-ad manual-check list. Confirmed enhancement toggles MISSING from
+  // degrees_of_freedom_spec were not reported by the API for this ad — since
+  // Meta defaults several of them to ON, "all API-readable enhancements are
+  // off" would overstate. List the unreported ones for manual verification.
+  // Only applies when the spec exists but is partial; a fully absent spec is
+  // already covered by the "enhancement data unavailable" note.
+  let manualCheckItems = MANUAL_CHECK_ITEMS;
+  const featureSpec = data.creative?.degrees_of_freedom_spec?.creative_features_spec;
+  if (featureSpec) {
+    const absent = CONFIRMED_ENHANCEMENT_KEYS.filter((k) => !(k in featureSpec));
+    if (absent.length) {
+      manualCheckItems = [
+        ...MANUAL_CHECK_ITEMS,
+        ...absent.map(
+          (k) => `${ENHANCEMENT_LABELS[k] ?? k} (not reported by the API for this ad — Meta may default it ON)`
+        ),
+      ];
+    }
+  }
+
   return {
     content: formatted,
     error: formatted ? null : "Meta returned the ad but no readable creative fields were present.",
@@ -1042,7 +1100,7 @@ export async function fetchAdContent(
     formatInfo,
     creativeImageUrls,
     creativeImageContext,
-    manualCheckItems: MANUAL_CHECK_ITEMS,
+    manualCheckItems,
   };
 }
 
@@ -1156,7 +1214,7 @@ function formatCreative(data: AdResponse): string | null {
       freshTitles.forEach((t, i) => t.text && lines.push(`  ${i + 1}. ${t.text}`));
       if (staleTitles.length) {
         lines.push(
-          `  [Note: ${staleTitles.length} title(s) omitted — dated ${STALE_ASSET_AGE_GAP_DAYS}+ days before the newest asset, likely stale from a prior promo: ${staleTitles.map((t) => `"${t.text}"`).join(", ")}]`
+          `  [⚠️ ATTENTION: ${staleTitles.length} title(s) omitted above — dated ${STALE_ASSET_AGE_GAP_DAYS}+ days before the newest asset, likely stale from a prior promo: ${staleTitles.map((t) => `"${t.text}"`).join(", ")}. If this ad is paused or was edited without relaunching, a stale title may still be what is actually serving — mention this in the promo/date check note so it gets verified in Ads Manager.]`
         );
       }
     }
