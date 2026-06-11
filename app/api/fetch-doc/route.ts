@@ -302,8 +302,52 @@ async function readDriveFolder(
     }
   }
 
+  // ── Tier 1: Channel-folder detection ──────────────────────────────────────
+  // Vera is Social/Meta-only. If this folder level contains channel subfolders
+  // (Social, Display, Native, etc.), navigate straight into Social and skip the
+  // rest. This handles the "For Approval → Display / Native / Social / xxOLD"
+  // structure without needing any manual selection.
+  //
+  // Detection: if ANY subfolder name matches a known channel keyword, we treat
+  // this as a channel-level folder. Priority: Social wins every time.
+  //
+  // Tier 2 (creative-type / version / size folders with no channel names) falls
+  // through naturally — all subfolders are processed and the QA route's TF-IDF
+  // ranking picks the right assets per ad unit based on folder path prefixes.
+  const CHANNEL_FOLDER_KEYWORDS = ["social", "display", "native"];
+  const OLD_FOLDER_MARKERS = ["xxold", "xx old", " old"];
+
+  const isChannelName = (name: string) => {
+    const n = name.toLowerCase().trim();
+    return CHANNEL_FOLDER_KEYWORDS.some(kw => n === kw || n.startsWith(kw + " ") || n.endsWith(" " + kw));
+  };
+  const isOldFolder = (name: string) => {
+    const n = name.toLowerCase();
+    return OLD_FOLDER_MARKERS.some(marker => n === marker.trim() || n.startsWith("xx") || n === "old");
+  };
+
+  const hasChannelFolders = subFolders.some(f => isChannelName(f.name ?? ""));
+  let foldersToProcess = subFolders;
+
+  if (hasChannelFolders) {
+    const socialFolder = subFolders.find(f => {
+      const n = (f.name ?? "").toLowerCase().trim();
+      return n === "social" || n.startsWith("social ") || n.endsWith(" social");
+    });
+    if (socialFolder) {
+      const skipped = subFolders.filter(f => f !== socialFolder).map(f => f.name).join(", ");
+      console.log(`[fetch-doc] Channel folders detected — navigating into Social only (skipping: ${skipped})`);
+      foldersToProcess = [socialFolder];
+    } else {
+      // Social folder not found by name — skip OLD folders, process the rest
+      foldersToProcess = subFolders.filter(f => !isOldFolder(f.name ?? ""));
+      const skipped = subFolders.filter(f => isOldFolder(f.name ?? "")).map(f => f.name).join(", ");
+      if (skipped) console.log(`[fetch-doc] Channel folders detected but no "Social" folder — skipping OLD: ${skipped}`);
+    }
+  }
+
   // ── Recurse into sub-folders ───────────────────────────────────────────────
-  for (const folder of subFolders) {
+  for (const folder of foldersToProcess) {
     if (!folder.id || !folder.name) continue;
     const nameLC = folder.name.toLowerCase();
     // "Creative" folders hold PSDs/concepts — never pull images from them.
