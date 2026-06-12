@@ -766,9 +766,9 @@ export async function POST(request: Request) {
   }
 
   // When ignoreCopyDoc is on, tell the model explicitly so it doesn't wait for
-  // a copy doc that isn't coming and evaluates copy_alignment against the WO only.
+  // a copy doc that isn't coming and evaluates copy_alignment + CTA against the WO only.
   if (ignoreCopyDoc) {
-    sourceSections.push(`\n\nCOPY REVIEW MODE: No copy document has been provided for this run. Evaluate copy_alignment using the WORK ORDER SUMMARY above as the sole reference for expected copy — do not penalize the ad for the absence of a copy doc.`);
+    sourceSections.push(`\n\nCOPY REVIEW MODE: No copy document has been provided for this run. There is NO copy document — do not reference, cite, or hallucinate one. For ALL text-based checks — copy_alignment AND the CTA button text portion of url_cta — evaluate only against the WORK ORDER SUMMARY above. If the work order does not specify a CTA button type, treat the live CTA as acceptable and mark url_cta pass. Do not flag a CTA mismatch based on any copy document language. Do not penalize the ad for the absence of a copy doc.`);
   }
 
   // Ground the model's sense of "now" — promo_month_date staleness judgments
