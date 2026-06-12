@@ -648,12 +648,13 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
 }
 
 export async function POST(request: Request) {
-  const { wo, units, labeledDocs, destinationUrl, driveImages } = (await request.json()) as {
+  const { wo, units, labeledDocs, destinationUrl, driveImages, ignoreCopyDoc } = (await request.json()) as {
     wo: string;
     units: AdUnit[];
     labeledDocs?: LabeledDoc[];
     destinationUrl?: string | null;
     driveImages?: DriveImageRef[];
+    ignoreCopyDoc?: boolean;
   };
 
   if (!wo || !units?.length) {
@@ -748,6 +749,9 @@ export async function POST(request: Request) {
 
   if (labeledDocs && labeledDocs.length > 0) {
     for (const doc of labeledDocs) {
+      // When ignoreCopyDoc is set the frontend already strips copy docs from the
+      // payload, but guard here too so the label doesn't sneak through.
+      if (ignoreCopyDoc && doc.label.toUpperCase().includes("COPY")) continue;
       const sectionTitle = doc.label.toUpperCase().includes("COPY")
         ? "COPY DOCUMENT (approved copy — authoritative source for ad copy)"
         : doc.label.toUpperCase().includes("CREATIVE")
@@ -759,6 +763,12 @@ export async function POST(request: Request) {
 
   if (destinationUrl) {
     sourceSections.push(`\n\nDESTINATION URL (approved landing page from WO):\n${destinationUrl}`);
+  }
+
+  // When ignoreCopyDoc is on, tell the model explicitly so it doesn't wait for
+  // a copy doc that isn't coming and evaluates copy_alignment against the WO only.
+  if (ignoreCopyDoc) {
+    sourceSections.push(`\n\nCOPY REVIEW MODE: No copy document has been provided for this run. Evaluate copy_alignment using the WORK ORDER SUMMARY above as the sole reference for expected copy — do not penalize the ad for the absence of a copy doc.`);
   }
 
   // Ground the model's sense of "now" — promo_month_date staleness judgments

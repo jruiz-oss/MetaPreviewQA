@@ -307,6 +307,7 @@ export default function QAPage() {
   const router = useRouter();
   const [googleBanner, setGoogleBanner] = useState<"connected" | "error" | null>(null);
   const [wo, setWo] = useState("");
+  const [ignoreCopyDoc, setIgnoreCopyDoc] = useState(false);
   const [detectedDocs, setDetectedDocs] = useState<{ url: string; woLabel: string; content: string | null; images: DriveImage[]; error: string | null; loading: boolean }[]>([]);
   const [woDestinationUrl, setWoDestinationUrl] = useState<string | null>(null);
   const [units, setUnits] = useState<AdUnit[]>([]);
@@ -746,9 +747,12 @@ export default function QAPage() {
           body: JSON.stringify({
             wo,
             units: group.units,
-            labeledDocs,
+            labeledDocs: ignoreCopyDoc
+              ? labeledDocs.filter((d) => !d.label.toUpperCase().includes("COPY"))
+              : labeledDocs,
             driveImages,
             destinationUrl: woDestinationUrl ?? null,
+            ignoreCopyDoc,
           }),
         });
 
@@ -1335,6 +1339,25 @@ export default function QAPage() {
                 {error}
               </div>
             )}
+
+            {/* Ignore copy doc toggle */}
+            <label className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 cursor-pointer select-none">
+              <div>
+                <p className="text-sm font-medium text-gray-800">Use WO copy only</p>
+                <p className="text-xs text-gray-500 mt-0.5">Ignore the copy doc — evaluate copy against the work order text only</p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={ignoreCopyDoc}
+                onClick={() => setIgnoreCopyDoc((v) => !v)}
+                className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none ${ignoreCopyDoc ? "bg-gray-900" : "bg-gray-300"}`}
+              >
+                <span
+                  className={`inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform ${ignoreCopyDoc ? "translate-x-5" : "translate-x-0"}`}
+                />
+              </button>
+            </label>
 
             <button
               onClick={runQA}
