@@ -145,8 +145,11 @@ async function readDriveFolder(
   // Propagate the "inside approval" flag: true if inherited from a parent folder,
   // OR if the current folder itself has "approval" in its name (e.g. the user
   // pasted a link directly to "For Approval" or "For Client Approval").
+  // A third case is handled below after listing items: if the WO link points
+  // directly into the approved assets (e.g. "Carousel/" or "Static/"), there
+  // is no "approval"-named ancestor — auto-approve at that point.
   const selfIsApproval = (selfName ?? "").toLowerCase().includes("approval");
-  const effectiveInsideApproval = insideApprovalFolder || selfIsApproval;
+  let effectiveInsideApproval = insideApprovalFolder || selfIsApproval;
   if (selfIsApproval && !insideApprovalFolder) {
     console.log(`[fetch-doc] Folder "${selfName}" is itself an approval folder — images inside will be queued.`);
   }
@@ -186,6 +189,20 @@ async function readDriveFolder(
 
   const subFolders = allItems.filter(f => f.mimeType === "application/vnd.google-apps.folder");
   const files = allItems.filter(f => f.mimeType !== "application/vnd.google-apps.folder");
+
+  // Auto-approve: if the WO link lands directly inside the approved assets
+  // (e.g. straight to "Carousel/" or "Static/v1/") there is no "approval"-
+  // named folder in the path, so effectiveInsideApproval would stay false and
+  // every image would be silently skipped. Fix: at the root call, if none of
+  // the direct subfolders carry "approval" in their name, treat this folder as
+  // already inside the approval context.
+  if (!effectiveInsideApproval && depth === 0) {
+    const hasApprovalSubfolder = subFolders.some(f => (f.name ?? "").toLowerCase().includes("approval"));
+    if (!hasApprovalSubfolder) {
+      effectiveInsideApproval = true;
+      console.log(`[fetch-doc] Folder "${selfName ?? folderId}" has no approval subfolder — treating as already inside approval context.`);
+    }
+  }
 
   const sections: string[] = [];
 
