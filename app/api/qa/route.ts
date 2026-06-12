@@ -918,9 +918,36 @@ export async function POST(request: Request) {
     // Keep only images close to the best score (so a unit doesn't pull in
     // weakly-related extras from the wrong version), capped.
     const best = scored[0].score;
-    const refs = scored
-      .filter((x) => x.score >= best * 0.5)
-      .slice(0, MAX_DRIVE_IMAGES_PER_UNIT)
+    let filtered = scored.filter((x) => x.score >= best * 0.5);
+
+    // Version-token discrimination: if the unit name contains a version token
+    // (v1, v2, v3…) AND at least one matched file also carries that token, drop
+    // any file that carries a DIFFERENT version token. This prevents Static V1
+    // from receiving v2 files (and vice versa) when all variants share the same
+    // Drive folder and differ only by "v1"/"v2" in the filename.
+    const VERSION_TOKEN = /^v\d+$/;
+    const unitVersionTokens = Array.from(unitTokens).filter((t) => VERSION_TOKEN.test(t));
+    if (unitVersionTokens.length > 0) {
+      const refToks = (x: { ref: DriveImageRef }) => tokenize(x.ref.name);
+      const hasVersionMatch = filtered.some((x) =>
+        unitVersionTokens.some((vt) => refToks(x).includes(vt))
+      );
+      if (hasVersionMatch) {
+        filtered = filtered.filter((x) => {
+          const toks = refToks(x);
+          // Keep if it has at least one matching version token
+          if (unitVersionTokens.some((vt) => toks.includes(vt))) return true;
+          // OR has NO version token at all (version-agnostic asset)
+          return !toks.some((t) => VERSION_TOKEN.test(t));
+        });
+      }
+    }
+
+    // For carousel units, raise the per-unit cap to cover all cards (carousels
+    // can have 6+ cards, each needing its own approved image for comparison).
+    const perUnitCap = carouselUnit ? Math.max(MAX_DRIVE_IMAGES_PER_UNIT, 10) : MAX_DRIVE_IMAGES_PER_UNIT;
+    const refs = filtered
+      .slice(0, perUnitCap)
       .map((x) => x.ref);
     // Did the fallback hand this unit opposite-format approved assets?
     const crossFormat = carouselUnit
