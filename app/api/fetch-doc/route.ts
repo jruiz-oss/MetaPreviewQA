@@ -4,6 +4,11 @@ import { getOAuthClient } from "@/lib/google-auth";
 import { getStoredRefreshToken } from "@/lib/token-store";
 import mammoth from "mammoth";
 
+// Diagnostic logging is gated behind QA_DEBUG so production logs stay quiet.
+// Set QA_DEBUG=1 to re-enable verbose folder/asset tracing.
+const dbg: (...args: unknown[]) => void =
+  process.env.QA_DEBUG === "1" ? console.log.bind(console) : () => {};
+
 // ─── URL parsers ──────────────────────────────────────────────────────────────
 
 function extractDocId(url: string): string | null {
@@ -137,7 +142,7 @@ async function readDriveFolder(
         supportsAllDrives: true,
       });
       selfName = metaRes.data.name ?? undefined;
-      if (selfName) console.log(`[fetch-doc] Root folder name resolved: "${selfName}"`);
+      if (selfName) dbg(`[fetch-doc] Root folder name resolved: "${selfName}"`);
     } catch {
       // Proceed without the name — approval detection falls back to subfolder names
     }
@@ -151,7 +156,7 @@ async function readDriveFolder(
   const selfIsApproval = (selfName ?? "").toLowerCase().includes("approval");
   let effectiveInsideApproval = insideApprovalFolder || selfIsApproval;
   if (selfIsApproval && !insideApprovalFolder) {
-    console.log(`[fetch-doc] Folder "${selfName}" is itself an approval folder — images inside will be queued.`);
+    dbg(`[fetch-doc] Folder "${selfName}" is itself an approval folder — images inside will be queued.`);
   }
 
   // List ALL non-trashed items (files AND sub-folders), following pagination.
@@ -179,10 +184,10 @@ async function readDriveFolder(
     if (!pageToken) break;
   }
   if (pageToken) {
-    console.log(`[fetch-doc] folder ${folderId} — page cap reached (${MAX_LIST_PAGES} pages); remaining items not listed.`);
+    dbg(`[fetch-doc] folder ${folderId} — page cap reached (${MAX_LIST_PAGES} pages); remaining items not listed.`);
   }
 
-  console.log(`[fetch-doc] folder ${folderId} (depth ${depth}) → ${allItems.length} items found:`, JSON.stringify(allItems.map(f => ({ name: f.name, mimeType: f.mimeType }))));
+  dbg(`[fetch-doc] folder ${folderId} (depth ${depth}) → ${allItems.length} items found:`, JSON.stringify(allItems.map(f => ({ name: f.name, mimeType: f.mimeType }))));
   if (allItems.length === 0) {
     return "(No files found in this folder — the folder may be empty, or the authenticated account may not have access to its contents.)";
   }
@@ -200,7 +205,7 @@ async function readDriveFolder(
     const hasApprovalSubfolder = subFolders.some(f => (f.name ?? "").toLowerCase().includes("approval"));
     if (!hasApprovalSubfolder) {
       effectiveInsideApproval = true;
-      console.log(`[fetch-doc] Folder "${selfName ?? folderId}" has no approval subfolder — treating as already inside approval context.`);
+      dbg(`[fetch-doc] Folder "${selfName ?? folderId}" has no approval subfolder — treating as already inside approval context.`);
     }
   }
 
@@ -225,19 +230,19 @@ async function readDriveFolder(
       // them) — the "Creative" folder holds PSDs/concepts and must be ignored.
       if (images && (VIEWABLE_IMAGE_MIME.has(file.mimeType) || VIEWABLE_VIDEO_MIME.has(file.mimeType))) {
         if (!effectiveInsideApproval) {
-          console.log(`[fetch-doc] SKIP asset "${file.name}" — not inside an approval folder; only assets in "For Approval" (or similar) folders are cross-referenced.`);
+          dbg(`[fetch-doc] SKIP asset "${file.name}" — not inside an approval folder; only assets in "For Approval" (or similar) folders are cross-referenced.`);
         } else if (images.length >= MAX_DRIVE_IMAGES) {
-          console.log(`[fetch-doc] SKIP asset "${file.name}" — asset cap reached (${MAX_DRIVE_IMAGES}); not cross-referenced.`);
+          dbg(`[fetch-doc] SKIP asset "${file.name}" — asset cap reached (${MAX_DRIVE_IMAGES}); not cross-referenced.`);
         } else if (file.id) {
           // Prefix with the relative folder path so the QA matcher can tell which
           // subfolder (e.g. "V1/" vs "V2/") an image came from — that's what
           // distinguishes versions, and it lives in the folder, not the filename.
           const qualifiedName = `${pathPrefix}${file.name ?? "creative"}`;
           images.push({ id: file.id, name: qualifiedName, mediaType: file.mimeType });
-          console.log(`[fetch-doc] QUEUED image "${qualifiedName}" (${file.mimeType}) for cross-reference [${images.length}/${MAX_DRIVE_IMAGES}].`);
+          dbg(`[fetch-doc] QUEUED image "${qualifiedName}" (${file.mimeType}) for cross-reference [${images.length}/${MAX_DRIVE_IMAGES}].`);
         }
       } else if (images) {
-        console.log(`[fetch-doc] SKIP asset "${file.name}" — type ${file.mimeType} not viewable or not video; filename only, not cross-referenced.`);
+        dbg(`[fetch-doc] SKIP asset "${file.name}" — type ${file.mimeType} not viewable or not video; filename only, not cross-referenced.`);
       }
       continue;
     }
@@ -332,15 +337,24 @@ async function readDriveFolder(
   // through naturally — all subfolders are processed and the QA route's TF-IDF
   // ranking picks the right assets per ad unit based on folder path prefixes.
   const CHANNEL_FOLDER_KEYWORDS = ["social", "display", "native"];
-  const OLD_FOLDER_MARKERS = ["xxold", "xx old", " old"];
 
   const isChannelName = (name: string) => {
     const n = name.toLowerCase().trim();
     return CHANNEL_FOLDER_KEYWORDS.some(kw => n === kw || n.startsWith(kw + " ") || n.endsWith(" " + kw));
   };
+  // Deprecated/old dumps: exactly "old"/"archive(d)", or the "xx"/"xxOLD"
+  // sink-to-bottom marker agencies use for superseded creative. A bare "old"
+  // substring is intentionally NOT matched, so real client names like "Old Navy"
+  // are never skipped.
   const isOldFolder = (name: string) => {
-    const n = name.toLowerCase();
-    return OLD_FOLDER_MARKERS.some(marker => n === marker.trim() || n.startsWith("xx") || n === "old");
+    const n = name.toLowerCase().trim();
+    return (
+      n === "old" ||
+      n === "archive" ||
+      n === "archived" ||
+      /^xx[\s_-]*old\b/.test(n) ||
+      /^xx($|[\s_-])/.test(n)
+    );
   };
 
   const hasChannelFolders = subFolders.some(f => isChannelName(f.name ?? ""));
@@ -353,13 +367,24 @@ async function readDriveFolder(
     });
     if (socialFolder) {
       const skipped = subFolders.filter(f => f !== socialFolder).map(f => f.name).join(", ");
-      console.log(`[fetch-doc] Channel folders detected — navigating into Social only (skipping: ${skipped})`);
+      dbg(`[fetch-doc] Channel folders detected — navigating into Social only (skipping: ${skipped})`);
       foldersToProcess = [socialFolder];
     } else {
       // Social folder not found by name — skip OLD folders, process the rest
       foldersToProcess = subFolders.filter(f => !isOldFolder(f.name ?? ""));
       const skipped = subFolders.filter(f => isOldFolder(f.name ?? "")).map(f => f.name).join(", ");
-      if (skipped) console.log(`[fetch-doc] Channel folders detected but no "Social" folder — skipping OLD: ${skipped}`);
+      if (skipped) dbg(`[fetch-doc] Channel folders detected but no "Social" folder — skipping OLD: ${skipped}`);
+    }
+  }
+
+  // Skip deprecated/old dumps everywhere — not only in the channel branch above.
+  // An "xxOLD" or "OLD" folder beside the current approved exports holds last
+  // cycle's creative and must never be queued for matching.
+  {
+    const oldOnes = foldersToProcess.filter((f) => isOldFolder(f.name ?? ""));
+    if (oldOnes.length) {
+      dbg(`[fetch-doc] Skipping OLD/archive folder(s): ${oldOnes.map((f) => f.name).join(", ")}`);
+      foldersToProcess = foldersToProcess.filter((f) => !isOldFolder(f.name ?? ""));
     }
   }
 
@@ -377,14 +402,14 @@ async function readDriveFolder(
     // Early stop: once the image cap is full, deeper approval-branch folders can
     // only contribute more images — nothing left to find there, so skip them.
     if (images && images.length >= MAX_DRIVE_IMAGES && nextInsideApproval) {
-      console.log(`[fetch-doc] SKIP subfolder "${folder.name}" — image cap (${MAX_DRIVE_IMAGES}) already reached; nothing more needed from approval branches.`);
+      dbg(`[fetch-doc] SKIP subfolder "${folder.name}" — image cap (${MAX_DRIVE_IMAGES}) already reached; nothing more needed from approval branches.`);
       sections.push(`[Sub-folder: ${folder.name}]\n(Skipped — image cap of ${MAX_DRIVE_IMAGES} already reached.)`);
       continue;
     }
     if (isCreativeFolder) {
-      console.log(`[fetch-doc] Entering "Creative" subfolder "${folder.name}" — images will NOT be queued from here.`);
+      dbg(`[fetch-doc] Entering "Creative" subfolder "${folder.name}" — images will NOT be queued from here.`);
     } else if (isApprovalFolder) {
-      console.log(`[fetch-doc] Entering approval subfolder "${folder.name}" — images WILL be queued from here.`);
+      dbg(`[fetch-doc] Entering approval subfolder "${folder.name}" — images WILL be queued from here.`);
     }
     try {
       const subContent = await readDriveFolder(folder.id, auth, depth + 1, folder.name, passImages, `${pathPrefix}${folder.name}/`, nextInsideApproval, scan);

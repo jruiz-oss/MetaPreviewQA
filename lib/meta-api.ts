@@ -2,25 +2,26 @@
 const GRAPH_API = "https://graph.facebook.com/v23.0";
 
 // ───────────────────────────────────────────────────────────────────────────
-// FEATURE FLAG — placement/date-aware creative selection.
+// CREATIVE SELECTION — placement/date-aware.
 //
-// When TRUE: for the live-creative visual check we STOP anchoring to the
-// effective_object_story_id (the last *published* post — which on paused,
-// edited-but-not-relaunched ads is frozen on the PREVIOUS promo's creative and
-// is the root cause of Vera reporting "old creative"). Instead we read the
-// rule-filtered asset_feed_spec image pool and tag each image with the
-// placement(s) it serves and the date its asset label was created, so the QA
-// model can report a genuinely-stale asset as a real, explained finding rather
-// than a phantom.
-//
-// When FALSE: behaviour is byte-for-byte the original effective-post anchor.
-// ⇒ To fully revert this experiment: set this to false (keeps the code), OR
-//   `git checkout main` to remove the branch entirely.
-const PLACEMENT_AWARE_CREATIVE = true;
+// For the live-creative visual check Vera reads the rule-filtered
+// asset_feed_spec image pool and tags each image with the placement(s) it
+// serves and the date its asset label was created. It deliberately does NOT
+// anchor to the effective_object_story_id (the last *published* post): on
+// paused or edited-but-not-relaunched ads that post is frozen on the PREVIOUS
+// promo's creative, which was the root cause of Vera reporting phantom "old
+// creative". A genuinely stale asset instead surfaces as an explained finding
+// via the date tagging below. (The original effective-post anchor lives in git
+// history if it is ever needed again.)
 
 // An asset more than this many days older than the NEWEST asset in the same ad
 // is treated as a likely leftover from an earlier promo cycle and called out.
 const STALE_ASSET_AGE_GAP_DAYS = 25;
+
+// Diagnostic logging is gated behind QA_DEBUG so production logs stay quiet and
+// never echo creative copy or model reasoning. Set QA_DEBUG=1 to re-enable.
+const dbg: (...args: unknown[]) => void =
+  process.env.QA_DEBUG === "1" ? console.log.bind(console) : () => {};
 
 export type CampaignAd = {
   id: string;
@@ -417,16 +418,14 @@ type AdResponse = {
 };
 
 // Per-image context for the visual QA. Aligned by `url` to creativeImageUrls.
-// Only populated when PLACEMENT_AWARE_CREATIVE is on; empty otherwise so the
-// flag-off path is unchanged.
 export type CreativeImageContext = {
   url: string;
   placement: string | null;   // human-readable placement(s) this asset serves, when resolvable
   assetDate: string | null;   // ISO date the asset label was created, when resolvable
   staleNote: string | null;   // set when this asset is much older than the newest in the ad
   // true when this URL is a video's auto-selected thumbnail — ONE frame of the
-  // video, not the creative itself. Set regardless of PLACEMENT_AWARE_CREATIVE
-  // so the QA prompt can treat frame-vs-frame text differences as non-findings.
+  // video, not the creative itself, so the QA prompt can treat frame-vs-frame
+  // text differences as non-findings.
   videoThumbnail?: boolean;
 };
 
@@ -436,7 +435,7 @@ export type FetchResult = {
   aiEnhancements: AiEnhancement[] | null;
   formatInfo: FormatInfo | null; // null only on hard API error
   creativeImageUrls: string[]; // image/thumbnail URLs for visual QA
-  creativeImageContext: CreativeImageContext[]; // per-image placement/date tags (empty when flag off)
+  creativeImageContext: CreativeImageContext[]; // per-image placement/date tags
   manualCheckItems: string[]; // checklist items that cannot be read from the API — must be verified in Ads Manager
 };
 
@@ -559,74 +558,7 @@ async function fetchMusicStatus(
   }
 }
 
-/**
- * Fetches the actual serving image URL(s) from an ad's effective published post.
- *
- * This is the ground truth of what an ad is really showing. We use it to bypass
- * asset_feed_spec.images when that pool is unreliable: PLACEMENT-optimized ads
- * keep a pool of size variants that can retain STALE assets from a previous edit
- * (e.g. an old April creative left behind after the ad was updated to June).
- * With no published image_hash to anchor on, picking from the pool by size lands
- * on the wrong (stale) asset — so the QA reads a creative the ad doesn't serve.
- * The effective post reflects what's actually live, so we read its image instead.
- */
-// Exchanges the system-user / user token for a PAGE access token. Reading a
-// Page-owned post (an ad's effective_object_story_id is usually a dark post)
-// returns Meta error (#10) with a user/system-user token even when it carries
-// pages_read_engagement — the post node must be read with the Page's own token.
-// The system user can mint one as long as it has a task on the Page (it does).
-async function fetchPageAccessToken(pageId: string, accessToken: string): Promise<string | null> {
-  try {
-    const url = `${GRAPH_API}/${pageId}?fields=access_token&access_token=${accessToken}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
-    const data = await res.json();
-    if (data.error || !data.access_token) {
-      console.log(`[meta-api][pagetoken-dbg] page=${pageId} no token (${data.error?.code ?? "none"}: ${data.error?.message ?? "n/a"})`);
-      return null;
-    }
-    return data.access_token as string;
-  } catch {
-    return null;
-  }
-}
-
-async function fetchServingImageUrls(storyId: string, accessToken: string): Promise<string[]> {
-  try {
-    // effective_object_story_id is "{pageId}_{postId}". The post is Page-owned,
-    // so read it with the Page token (falling back to the original token if the
-    // exchange fails — e.g. the story isn't page-scoped).
-    const pageId = storyId.split("_")[0];
-    const pageToken = pageId ? await fetchPageAccessToken(pageId, accessToken) : null;
-    const tokenToUse = pageToken ?? accessToken;
-    const url = `${GRAPH_API}/${storyId}?fields=full_picture,picture,attachments{media{image{src},source},subattachments{media{image{src},source}}}&access_token=${tokenToUse}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
-    const data = await res.json();
-    if (data.error) {
-      console.log(`[meta-api][post-dbg] story=${storyId} page_token=${pageToken ? "yes" : "no"} ERROR code=${data.error.code} msg=${data.error.message}`);
-      return [];
-    }
-    const urls: string[] = [];
-    for (const a of data.attachments?.data ?? []) {
-      const src = a?.media?.image?.src ?? a?.media?.source;
-      if (src) urls.push(src);
-      for (const s of a?.subattachments?.data ?? []) {
-        const ssrc = s?.media?.image?.src ?? s?.media?.source;
-        if (ssrc) urls.push(ssrc);
-      }
-    }
-    if (!urls.length && data.full_picture) urls.push(data.full_picture);
-    if (!urls.length && data.picture) urls.push(data.picture);
-    if (!urls.length) {
-      console.log(`[meta-api][post-dbg] story=${storyId} no images — raw=${JSON.stringify(data).slice(0, 400)}`);
-    }
-    return urls;
-  } catch {
-    return [];
-  }
-}
-
-
-// ─── Placement/date-aware helpers (used only when PLACEMENT_AWARE_CREATIVE) ──
+// ─── Placement/date-aware helpers ───────────────────────────────────────────
 
 // Asset labels are named like "placement_asset_<hex>_<unixMillis>". The trailing
 // number is the millisecond timestamp the asset/label was created. Returns that
@@ -904,11 +836,10 @@ export async function fetchAdContent(
   if (isCarousel) {
     chosenImageCandidates = feedImageCandidates; // keep every card
   } else {
-    // Dedupe by exact WxH. Within a size bucket prefer the published image; when
-    // PLACEMENT_AWARE_CREATIVE is on also prefer the NEWEST-dated asset (this is
-    // the fix for an old-promo static — e.g. an "April" 1080x1080 — winning its
-    // size bucket over the current June asset just because it appears first in
-    // the pool). Flag off ⇒ original "first seen / published wins" behavior.
+    // Dedupe by exact WxH. Within a size bucket prefer the published image, then
+    // the NEWEST-dated asset — the fix for an old-promo static (e.g. an "April"
+    // 1080x1080) winning its size bucket over the current June asset just because
+    // it appears first in the pool.
     const bySize = new Map<string, ImgCandidate>();
     const unknownDim: ImgCandidate[] = [];
     for (const c of feedImageCandidates) {
@@ -920,7 +851,6 @@ export async function fetchAdContent(
         } else if (publishedHash && c.hash === publishedHash) {
           bySize.set(key, c);
         } else if (
-          PLACEMENT_AWARE_CREATIVE &&
           !(publishedHash && existing.hash === publishedHash) &&
           (c.dateMs ?? -Infinity) > (existing.dateMs ?? -Infinity)
         ) {
@@ -932,12 +862,12 @@ export async function fetchAdContent(
     }
     chosenImageCandidates = [...Array.from(bySize.values()), ...unknownDim];
 
-    // When placement-aware mode is on, additionally drop assets that are stale
-    // relative to the newest dated asset in the pool. The WxH dedup above keeps
-    // a unique-size asset even if it's the only one at that size — but a Reel
-    // (e.g. 1152×2048) from March is still stale creative even if nothing newer
-    // has that exact size. Same 25-day threshold used for titles and staleNote.
-    if (PLACEMENT_AWARE_CREATIVE) {
+    // Additionally drop assets that are stale relative to the newest dated asset
+    // in the pool. The WxH dedup above keeps a unique-size asset even if it's the
+    // only one at that size — but a Reel (e.g. 1152×2048) from March is still
+    // stale creative even if nothing newer has that exact size. Same 25-day
+    // threshold used for titles and staleNote.
+    {
       const newestCandMs = feedImageCandidates.reduce(
         (max, c) => (c.dateMs != null && c.dateMs > max ? c.dateMs : max),
         -Infinity
@@ -951,92 +881,24 @@ export async function fetchAdContent(
     }
   }
 
-  // --- Anchor the live image to what is ACTUALLY serving ------------------
-  // PLACEMENT-optimized ads (optimization_type=PLACEMENT) keep a POOL of images
-  // in asset_feed_spec that retains STALE assets from earlier edits — e.g. an
-  // old "Opening April 9" creative left behind after the ad was updated to the
-  // June promo. With published_hash=no there's no single image to anchor on, so
-  // reading from the pool makes QA OCR a creative the ad no longer serves and
-  // report a phantom "old creative" mismatch. The effective published post is
-  // the ground truth of what's live, so prefer it — for carousels (its
-  // subattachments are the live cards) AND statics — and only fall back to the
-  // pool when nothing else resolves. Previously this anchor ran for non-carousel
-  // ads only, so carousels always read the raw (stale-prone) pool.
-  const sizeKeys = feedImageCandidates.map((c) => (c.width && c.height ? `${c.width}x${c.height}` : "??"));
-  const hasSameSizeDupes = sizeKeys.length > new Set(sizeKeys).size;
-  // The pool is trustworthy only when it has one image per size AND a concrete
-  // published hash to anchor on. Otherwise treat it as stale-prone.
-  const poolIsTrustworthy = !!publishedHash && !hasSameSizeDupes;
+  // --- Select the live creative images ------------------------------------
+  // Vera reads the rule-filtered, date-deduped asset pool built above rather
+  // than anchoring to the effective published post: on paused or edited-but-
+  // not-relaunched ads that post is frozen on the PREVIOUS promo's creative,
+  // which produced phantom "old creative" findings. Each chosen image is tagged
+  // below with the placement it serves and its asset date, so a genuinely stale
+  // asset surfaces as an explained finding instead.
+  const liveSource = isCarousel ? "pool_placement_aware_carousel" : "pool_placement_aware";
 
-  const storyId = data.creative?.effective_object_story_id;
-  let servingUrls: string[] = [];
-  let liveSource = isCarousel ? "carousel_pool" : "pool";
-
-  // FLAG: when placement-aware selection is on, we deliberately DO NOT anchor to
-  // the effective (last-published) post — on paused/edited ads it's the previous
-  // promo's creative. We read the rule-filtered pool instead and tag each image
-  // with its placement + date below. Setting PLACEMENT_AWARE_CREATIVE=false
-  // restores the original effective-post anchor exactly.
-  if (PLACEMENT_AWARE_CREATIVE) {
-    liveSource = isCarousel ? "pool_placement_aware_carousel" : "pool_placement_aware";
-  } else if (!poolIsTrustworthy) {
-    // 1. Ground truth: the effective serving post. Carousel → live cards via
-    //    subattachments; static → the served image.
-    if (storyId) {
-      servingUrls = await fetchServingImageUrls(storyId, accessToken);
-      if (servingUrls.length) liveSource = "effective_post";
-    }
-
-    // 2. Carousel fallback: the configured card images (child_attachments) are
-    //    the real cards — still far more reliable than the asset_feed_spec pool.
-    if (!servingUrls.length && isCarousel) {
-      const cardUrls: string[] = [];
-      for (const card of data.creative?.object_story_spec?.link_data?.child_attachments ?? []) {
-        const resolved = card.image_hash ? dimMap.get(card.image_hash)?.url : undefined;
-        const url = resolved ?? card.picture;
-        if (url) cardUrls.push(url);
-      }
-      if (cardUrls.length) {
-        servingUrls = cardUrls;
-        liveSource = "carousel_cards";
-      }
-    }
-
-    // 3. Static fallback: the creative's own serving image URL.
-    if (!servingUrls.length && data.creative?.image_url) {
-      servingUrls = [data.creative.image_url];
-      liveSource = "creative_image_url";
-    }
-
-    // 4. Last resort: the pool. If the customization-rules filter narrowed it to
-    //    the live assets, that's now reliable; otherwise it may still be stale.
-    //    The clean path is #1 (effective post) — it requires the token to have
-    //    pages_read_engagement; without it the post read 401s and we land here.
-    if (!servingUrls.length) {
-      liveSource = rulesFilterActive
-        ? "pool_rules_filtered"
-        : isCarousel
-        ? "carousel_pool_fallback"
-        : "pool_fallback";
-    }
-  }
-
-  // --- DIAGNOSTIC: raw stale-asset signals -------------------------------
-  // When live_source is still *_fallback, this line shows WHY: whether the ad
-  // exposes an effective_object_story_id, whether creative.image_url is present,
-  // and whether asset_customization_rules + image adlabels exist to filter on.
-  // If rules/labels are absent, the pool can't be filtered and we need a
-  // different ground-truth source (e.g. the ad /previews endpoint).
-  console.log(
-    `[meta-api][stale-dbg] ad=${adId} story_id=${data.creative?.effective_object_story_id ? "yes" : "no"} ` +
-      `creative_image_url=${data.creative?.image_url ? "yes" : "no"} ` +
-      `serving_urls=${servingUrls.length} rules=${customizationRules.length} ` +
+  // Diagnostic (gated behind QA_DEBUG): which stale-asset signals were present.
+  dbg(
+    `[meta-api][stale-dbg] ad=${adId} ` +
+      `rules=${customizationRules.length} ` +
       `labeled_images=${rawFeedImages.filter((i) => imgLabelNames(i).length).length}/${rawFeedImages.length} ` +
       `live_hashes=${liveImageHashes.size} rules_filter_active=${rulesFilterActive}`
   );
 
-  // Build the final URL list: serving image (when resolved) else chosen pool
-  // images, then video thumbnails.
+  // Build the final URL list from the chosen pool images, then video thumbnails.
   const MAX_QA_IMAGES = 6;
   const seenUrls = new Set<string>();
   const creativeImageUrls: string[] = [];
@@ -1046,25 +908,21 @@ export async function fetchAdContent(
       creativeImageUrls.push(u);
     }
   }
-  if (servingUrls.length) {
-    for (const u of servingUrls) addUrl(u);
-  } else {
-    for (const c of chosenImageCandidates) addUrl(c.url);
-  }
+  for (const c of chosenImageCandidates) addUrl(c.url);
   const videoThumbUrls = new Set<string>();
   for (const vid of data.creative?.asset_feed_spec?.videos ?? []) {
     if (vid.thumbnail_url) videoThumbUrls.add(vid.thumbnail_url);
     addUrl(vid.thumbnail_url);
   }
 
-  // --- Per-image placement + date context (flag-gated) --------------------
+  // --- Per-image placement + date context ---------------------------------
   // Tag each chosen image with the placement(s) it serves and the date its
   // asset was created, and flag any asset much older than the newest one in
   // this ad as a likely previous-promo leftover. This is what lets the QA model
   // say "the Story placement uses a Feb-dated asset" instead of silently
-  // surfacing old creative as a phantom. Empty when the flag is off.
+  // surfacing old creative as a phantom.
   const creativeImageContext: CreativeImageContext[] = [];
-  if (PLACEMENT_AWARE_CREATIVE) {
+  {
     const hashContext = buildHashContext(data.creative?.asset_feed_spec);
     const urlToHash = new Map<string, string>();
     for (const c of feedImageCandidates) if (c.hash) urlToHash.set(c.url, c.hash);
@@ -1091,8 +949,8 @@ export async function fetchAdContent(
     }
   }
 
-  // Tag video thumbnails regardless of the placement-aware flag: a thumbnail is
-  // ONE auto-selected frame of the video, not the creative itself. Without this
+  // Tag video thumbnails: a thumbnail is ONE auto-selected frame of the video,
+  // not the creative itself. Without this
   // label the QA model treats the frame as a static and flags text present in
   // other parts of the video as "missing" (or vice versa) — phantom mismatches.
   for (const url of creativeImageUrls) {
@@ -1109,7 +967,7 @@ export async function fetchAdContent(
   const poolSizes = feedImageCandidates
     .map((c) => (c.width && c.height ? `${c.width}x${c.height}` : "??"))
     .join(",");
-  console.log(
+  dbg(
     `[meta-api][img] ad=${adId} name="${data.name ?? ""}" carousel=${isCarousel} ` +
       `optimization_type=${optType} pool=${feedImageCandidates.length} [${poolSizes}] ` +
       `published_hash=${publishedHash ? "yes" : "no"} live_source=${liveSource} → chosen=${creativeImageUrls.length}`

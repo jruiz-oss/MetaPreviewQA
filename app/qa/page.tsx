@@ -146,6 +146,27 @@ function consolidateCriticalIssues(units: UnitResult[]): ConsolidatedIssue[] {
     .sort((a, c) => c.units.length - a.units.length);
 }
 
+// How a check renders in the per-unit card. The Advantage+ AI-enhancements
+// check is special: the Meta API can't confirm those toggles, so the server
+// always returns it as "warning" with a manual-verification note. When nothing
+// was actually detected ON, that's not a real warning — render it as a neutral
+// N/A with a short manual reminder so a clean ad doesn't show a perpetual amber
+// card. When something IS ON, keep it amber (a genuine finding) and drop the
+// manual tail.
+const MANUAL_TAIL_RE =
+  /\s*(Manual check also required|The following must (?:still )?be verified manually|API enhancement data unavailable)[\s\S]*/i;
+function displayCheckResult(key: string, check: CheckResult): CheckResult {
+  if (key !== "ai_enhancements" || !check.note) return check;
+  const hasOnFinding = /\bON\b/.test(check.note);
+  const cleaned = check.note.replace(MANUAL_TAIL_RE, "").trim();
+  if (hasOnFinding) return { ...check, status: "warning", note: cleaned };
+  return {
+    ...check,
+    status: "unknown",
+    note: "Verify Advantage+ AI enhancements manually in Ads Manager.",
+  };
+}
+
 function StatusBadge({ status }: { status: string }) {
   const styles: Record<string, string> = {
     pass: "bg-emerald-50 text-emerald-700 border border-emerald-200",
@@ -1599,7 +1620,11 @@ export default function QAPage() {
                     </p>
                   )}
                   {unit.checks && (() => {
-                    const entries = Object.entries(unit.checks ?? {});
+                    // Transform each check for display first (see displayCheckResult),
+                    // then group by the DISPLAYED status so colour and grouping agree.
+                    const entries = Object.entries(unit.checks ?? {}).map(
+                      ([key, check]) => [key, displayCheckResult(key, check)] as const
+                    );
                     const failing = entries.filter(([, c]) => c.status === "fail");
                     const warning = entries.filter(([, c]) => c.status === "warning");
                     const passing = entries.filter(([, c]) => c.status === "pass" || c.status === "unknown");
@@ -1609,13 +1634,9 @@ export default function QAPage() {
                           <div>
                             <p className="text-xs font-semibold text-red-600 uppercase tracking-wide mb-2">Fail</p>
                             <div className="space-y-2">
-                              {failing.map(([key, check]) => {
-                                const displayResult =
-                                  key === "ai_enhancements" && check.note
-                                    ? { ...check, note: check.note.replace(/\s*(Manual check also required|The following must (?:still )?be verified manually|API enhancement data unavailable)[\s\S]*/i, "").trim() }
-                                    : check;
-                                return <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={displayResult} />;
-                              })}
+                              {failing.map(([key, check]) => (
+                                <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={check} />
+                              ))}
                             </div>
                           </div>
                         )}
@@ -1623,13 +1644,9 @@ export default function QAPage() {
                           <div>
                             <p className="text-xs font-semibold text-amber-600 uppercase tracking-wide mb-2">Warning</p>
                             <div className="space-y-2">
-                              {warning.map(([key, check]) => {
-                                const displayResult =
-                                  key === "ai_enhancements" && check.note
-                                    ? { ...check, note: check.note.replace(/\s*(Manual check also required|The following must (?:still )?be verified manually|API enhancement data unavailable)[\s\S]*/i, "").trim() }
-                                    : check;
-                                return <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={displayResult} />;
-                              })}
+                              {warning.map(([key, check]) => (
+                                <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={check} />
+                              ))}
                             </div>
                           </div>
                         )}
@@ -1637,13 +1654,9 @@ export default function QAPage() {
                           <div>
                             <p className="text-xs font-semibold text-emerald-600 uppercase tracking-wide mb-2">Pass</p>
                             <div className="space-y-2">
-                              {passing.map(([key, check]) => {
-                                const displayResult =
-                                  key === "ai_enhancements" && check.note
-                                    ? { ...check, note: check.note.replace(/\s*(Manual check also required|The following must (?:still )?be verified manually|API enhancement data unavailable)[\s\S]*/i, "").trim() }
-                                    : check;
-                                return <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={displayResult} />;
-                              })}
+                              {passing.map(([key, check]) => (
+                                <CheckCard key={key} label={CHECK_LABELS[key] ?? key} result={check} />
+                              ))}
                             </div>
                           </div>
                         )}

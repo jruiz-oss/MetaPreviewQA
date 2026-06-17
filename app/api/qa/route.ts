@@ -12,6 +12,12 @@ export const maxDuration = 300;
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// Diagnostic logging is gated behind QA_DEBUG so production logs stay quiet and
+// never echo work-order copy or the model's chain-of-thought. Set QA_DEBUG=1
+// to re-enable verbose tracing.
+const dbg: (...args: unknown[]) => void =
+  process.env.QA_DEBUG === "1" ? console.log.bind(console) : () => {};
+
 const SYSTEM_PROMPT = `You are a QA reviewer for social media ads at a digital marketing agency. Your job is to check each ad unit against the work order provided.
 
 For each ad unit you will receive:
@@ -252,6 +258,26 @@ function computeUrlComparisonLine(approvedUrl: string | null | undefined, conten
     return `\nURL comparison (computed): MISMATCH — these live URL(s) do not point at the approved destination ${approvedUrl}: ${hardMismatches.map((m) => m.url).join(" , ")}. URL matching = FAIL.`;
   }
   return `\nURL comparison (computed): primary destination matches the approved URL, but ${cardDeepLinks.length} carousel card URL(s) deep-link to other pages on the approved domain: ${cardDeepLinks.map((m) => m.url).join(" , ")}. URL matching = WARNING (verify the card deep-links are intentional); do not mark this a FAIL on URL matching alone.`;
+}
+
+// Same verdict as computeUrlComparisonLine, but as a status so the result
+// assembly can make URL matching authoritative on the url_cta check (the model
+// only judges the CTA). "unknown" = nothing to compare, so don't penalize.
+function computeUrlMatchStatus(
+  approvedUrl: string | null | undefined,
+  content: string | null | undefined
+): "pass" | "fail" | "warning" | "unknown" {
+  if (!approvedUrl) return "unknown";
+  const liveUrls = extractLiveUrls(content);
+  if (!liveUrls.length) return "unknown";
+  const mismatches = liveUrls.filter((u) => !urlsMatch(approvedUrl, u.url));
+  if (!mismatches.length) return "pass";
+  const approvedHost = normalizeUrlForCompare(approvedUrl)?.host ?? null;
+  const sameHost = (u: string) =>
+    !!approvedHost && normalizeUrlForCompare(u)?.host === approvedHost;
+  const hardMismatches = mismatches.filter((m) => !m.isCard || !sameHost(m.url));
+  if (hardMismatches.length) return "fail";
+  return "warning"; // only carousel card deep-links differ
 }
 
 // format_size: name tokens are the primary intent signal, dimensions the
@@ -527,7 +553,7 @@ async function prepareImageForClaude(raw: Buffer): Promise<PreparedImage[]> {
         }
       }
       if (out.length) {
-        console.log(`[qa] Animated GIF: extracted ${out.length} of ${pages} frame(s) for review.`);
+        dbg(`[qa] Animated GIF: extracted ${out.length} of ${pages} frame(s) for review.`);
         return out;
       }
       // Frame extraction failed entirely — fall through to the static path.
@@ -546,17 +572,17 @@ async function downloadUrlImage(url: string, context?: string | null): Promise<F
   try {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) {
-      console.log(`[qa] SKIP live Meta image — HTTP ${res.status} for ${url}`);
+      dbg(`[qa] SKIP live Meta image — HTTP ${res.status} for ${url}`);
       return [];
     }
     const rawBuf = Buffer.from(await res.arrayBuffer());
     const prepared = await prepareImageForClaude(rawBuf);
     if (!prepared.length) {
-      console.log(`[qa] SKIP live Meta image — not a decodable image: ${url}`);
+      dbg(`[qa] SKIP live Meta image — not a decodable image: ${url}`);
       return [];
     }
     const baseName = url.split("/").pop()?.split("?")[0] ?? "meta-creative.jpg";
-    console.log(`[qa] DOWNLOADED live Meta image "${baseName}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${prepared.length} image(s)).`);
+    dbg(`[qa] DOWNLOADED live Meta image "${baseName}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${prepared.length} image(s)).`);
     return prepared.map((p) => ({
       name: p.frame ? `${baseName} (GIF frame ${p.frame.index}/${p.frame.total})` : baseName,
       mediaType: p.mediaType,
@@ -567,7 +593,7 @@ async function downloadUrlImage(url: string, context?: string | null): Promise<F
     }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown error";
-    console.log(`[qa] SKIP live Meta image — download failed: ${msg}`);
+    dbg(`[qa] SKIP live Meta image — download failed: ${msg}`);
     return [];
   }
 }
@@ -587,7 +613,7 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
       const isVideo = ALLOWED_VIDEO_MEDIA_TYPES.includes(ref.mediaType);
       const isImage = (ALLOWED_IMAGE_MEDIA_TYPES as string[]).includes(ref.mediaType);
       if (!ref.id || (!isImage && !isVideo)) {
-        console.log(`[qa] SKIP "${ref.name}" — unsupported type ${ref.mediaType}.`);
+        dbg(`[qa] SKIP "${ref.name}" — unsupported type ${ref.mediaType}.`);
         return;
       }
       try {
@@ -604,7 +630,7 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
           });
           const rawThumbUrl = metaRes.data.thumbnailLink;
           if (!rawThumbUrl) {
-            console.log(`[qa] SKIP video "${ref.name}" — Drive has not generated a thumbnail yet (file may still be processing).`);
+            dbg(`[qa] SKIP video "${ref.name}" — Drive has not generated a thumbnail yet (file may still be processing).`);
             return;
           }
           // Drive thumbnails default to small sizes; swap in =s1568 for a larger frame.
@@ -612,9 +638,9 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
           const imgs = await downloadUrlImage(thumbUrl);
           if (imgs.length) {
             out.set(ref.name, imgs.map((img) => ({ ...img, name: `${ref.name} (Drive thumbnail frame)` })));
-            console.log(`[qa] DOWNLOADED Drive thumbnail for video "${ref.name}" → cross-referenced.`);
+            dbg(`[qa] DOWNLOADED Drive thumbnail for video "${ref.name}" → cross-referenced.`);
           } else {
-            console.log(`[qa] SKIP video "${ref.name}" — Drive thumbnail URL returned no image.`);
+            dbg(`[qa] SKIP video "${ref.name}" — Drive thumbnail URL returned no image.`);
           }
           return;
         }
@@ -626,10 +652,10 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
         const rawBuf = Buffer.from(res.data as ArrayBuffer);
         const prepared = await prepareImageForClaude(rawBuf);
         if (!prepared.length) {
-          console.log(`[qa] SKIP image "${ref.name}" — not a decodable image.`);
+          dbg(`[qa] SKIP image "${ref.name}" — not a decodable image.`);
           return;
         }
-        console.log(`[qa] DOWNLOADED image "${ref.name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${prepared.length} image(s)) → cross-referenced.`);
+        dbg(`[qa] DOWNLOADED image "${ref.name}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${prepared.length} image(s)) → cross-referenced.`);
         out.set(
           ref.name,
           prepared.map((p) => ({
@@ -640,7 +666,7 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : "unknown error";
-        console.log(`[qa] SKIP "${ref.name}" — download failed: ${msg}`);
+        dbg(`[qa] SKIP "${ref.name}" — download failed: ${msg}`);
       }
     })
   );
@@ -816,9 +842,14 @@ export async function POST(request: Request) {
     if ((unit.name ?? "").toLowerCase().includes("carousel")) return true;
     return (unit.content ?? "").toLowerCase().includes("carousel cards");
   }
-  // Is this DRIVE FILE a carousel asset? Their carousel exports live in a
-  // "Carousels/" subfolder and carry "Carousel" in the filename.
-  const refIsCarousel = (name: string) => name.toLowerCase().includes("carousel");
+  // Is this DRIVE FILE a carousel asset? Match the FILENAME or its immediate
+  // parent folder only (carousels live in a "Carousels/" subfolder or carry
+  // "Carousel" in the filename). A distant ancestor like a campaign-level
+  // "Summer Carousel Push/" must NOT retag every static beneath it.
+  const refIsCarousel = (name: string) => {
+    const segs = name.toLowerCase().split("/");
+    return segs.slice(-2).some((s) => s.includes("carousel"));
+  };
 
   // ── AD-SET FOLDER SCOPING ────────────────────────────────────────────────
   // Location/variant campaigns keep each ad set's approved images in a folder
@@ -888,7 +919,7 @@ export async function POST(request: Request) {
         folderSegments(ref.name).some((s) => segmentMatchesAdset(s, adsetTokens))
       );
       if (scoped.length > 0 && scoped.length < pool.length) {
-        console.log(
+        dbg(
           `[qa] AD-SET SCOPE: unit "${unitName}" (ad set "${adsetName}") → ${scoped.length}/${pool.length} Drive image(s) in matching folder(s).`
         );
         pool = scoped;
@@ -964,7 +995,7 @@ export async function POST(request: Request) {
       ? refs.some((r) => !refIsCarousel(r.name))
       : refs.some((r) => refIsCarousel(r.name));
     if (crossFormat) {
-      console.log(
+      dbg(
         `[qa] CROSS-FORMAT FALLBACK: unit "${unitName}" (${carouselUnit ? "carousel" : "non-carousel"}) matched opposite-format approved file(s): ${refs.map((r) => r.name).join(" | ")}`
       );
     }
@@ -1114,7 +1145,7 @@ export async function POST(request: Request) {
     // filenames going into this call so a bad finding can be traced to its input.
     for (const unit of batchUnits) {
       const liveNames = ((unit as { creativeImages?: FetchedImage[] }).creativeImages ?? []).map((i) => i.name);
-      console.log(
+      dbg(
         `[qa][sent] unit="${unit.name || "Unnamed"}" adId=${unit.adId ?? "?"} | ` +
           `approvedDrive(${batchDriveImages.length})=[${batchDriveImages.map((d) => d.name).join(" | ")}] | ` +
           `liveMeta(${liveNames.length})=[${liveNames.join(" | ")}]`
@@ -1184,7 +1215,7 @@ export async function POST(request: Request) {
               : Math.min(60_000, 5_000 * 2 ** attempt);
           const jitter = Math.floor(Math.random() * 3_000);
           const wait = base + jitter;
-          console.log(
+          dbg(
             `[qa] Rate limited — waiting ${(wait / 1000).toFixed(1)}s before retry ${attempt + 2}/${MAX_ATTEMPTS}`
           );
           await new Promise((r) => setTimeout(r, wait));
@@ -1207,7 +1238,7 @@ export async function POST(request: Request) {
       const cacheRead = u.cache_read_input_tokens ?? 0;
       const estCost =
         (inTok * 3 + outTok * 15 + cacheWrite * 3.75 + cacheRead * 0.3) / 1_000_000;
-      console.log(
+      dbg(
         `[qa] TOKENS input=${inTok} output=${outTok} cache_write=${cacheWrite} cache_read=${cacheRead} | ~$${estCost.toFixed(4)} (est)`
       );
     }
@@ -1226,7 +1257,7 @@ export async function POST(request: Request) {
       const thinkBlock = message.content.find((b) => b.type === "thinking");
       const thinkText =
         thinkBlock && thinkBlock.type === "thinking" ? thinkBlock.thinking : "(no thinking block returned)";
-      console.log(`[qa][think] unit="${batchUnits.map((u) => u.name || "Unnamed").join(", ")}":\n${thinkText}`);
+      dbg(`[qa][think] unit="${batchUnits.map((u) => u.name || "Unnamed").join(", ")}":\n${thinkText}`);
     }
 
     // Prefer the structured tool result. When the model calls submit_qa_report,
@@ -1272,7 +1303,7 @@ export async function POST(request: Request) {
       /(enhancement|advantage\+|aspect ratio|\bdimensions?\b|image size|asset size|\b9:16\b|\b4:5\b|\b1:1\b|letterbox|tracking param|utm_)/i;
     const parsedCritical = rawCritical.filter((c) => {
       if (CODE_OWNED_CRITICAL_RE.test(c)) {
-        console.log(`[qa][guard] dropped model critical about a code-owned check: "${c}"`);
+        dbg(`[qa][guard] dropped model critical about a code-owned check: "${c}"`);
         return false;
       }
       return true;
@@ -1288,7 +1319,7 @@ export async function POST(request: Request) {
       const checks = u?.checks as Record<string, Record<string, unknown>> | undefined;
       const cca = checks?.creative_alignment;
       if (cca) {
-        console.log(
+        dbg(
           `[qa][extract] "${String(u.name)}" status=${String(cca.status)} | ` +
             `text_in_approved=${JSON.stringify(cca.text_in_approved ?? null)} | ` +
             `text_in_live=${JSON.stringify(cca.text_in_live ?? null)}`
@@ -1344,7 +1375,7 @@ export async function POST(request: Request) {
       const existing = typeof cca.note === "string" && cca.note.trim() ? `${cca.note.trim()} ` : "";
       cca.note = `${existing}(${reason})`.trim();
       if (u.status === "pass") u.status = "warning";
-      console.log(
+      dbg(
         `[qa][guard] "${String(u.name)}" creative_alignment pass→warning — ${reason}`
       );
     });
@@ -1461,14 +1492,14 @@ export async function POST(request: Request) {
     const fieldHashes = Object.fromEntries(
       Object.entries(p).map(([k, v]) => [k, shortHash(v)])
     );
-    console.log(
+    dbg(
       `[qa][fp] unit#${i} "${unitContents[i].name}" adId=${unitContents[i].adId ?? "?"} ` +
         `→ group#${repOfUnit[i]} | fields=${JSON.stringify(fieldHashes)} | ` +
         `nameSig="${p.nameSig}" liveImgs=${(p.liveImgHashes as string[]).length} ` +
         `driveImgs=${JSON.stringify(p.driveImgs)} contentLen=${(unitContents[i].content ?? "").length}`
     );
   }
-  console.log(
+  dbg(
     `[qa][fp] grouped ${unitContents.length} unit(s) into ${repIndices.length} unique version(s).`
   );
 
@@ -1495,7 +1526,7 @@ export async function POST(request: Request) {
     crossFormat: refsPerUnit[i].crossFormat,
   }));
 
-  console.log(
+  dbg(
     `[qa] ${unitContents.length} ad unit(s) → ${batches.length} unique version(s); running ${batches.length} Claude call(s) (saved ${unitContents.length - batches.length}).`
   );
 
@@ -1515,7 +1546,7 @@ export async function POST(request: Request) {
         const i = nextIndex++;
         if (i >= batches.length) return;
         const b = batches[i];
-        console.log(`[qa] Batch ${i + 1}/${batches.length}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
+        dbg(`[qa] Batch ${i + 1}/${batches.length}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
         batchResults[i] = await runBatch(b.units, b.driveImages, b.crossFormat);
       }
     };
@@ -1570,6 +1601,24 @@ export async function POST(request: Request) {
           (rep as { formatInfo?: FormatInfo | null }).formatInfo
         ),
       };
+
+      // Make URL matching authoritative: escalate url_cta to the code-computed
+      // verdict so a real destination mismatch can't be hidden by the model. We
+      // only ever escalate (never downgrade), so the model still owns the CTA
+      // judgment. "unknown" means there was nothing to compare.
+      {
+        const urlComputed = computeUrlMatchStatus(destinationUrl, rep.content);
+        const sev = (s?: string) => (s === "fail" ? 2 : s === "warning" ? 1 : 0);
+        const urlCheck = (finalChecks as Record<string, { status?: string; note?: string }>).url_cta;
+        if (urlCheck && urlComputed !== "unknown" && sev(urlComputed) > sev(urlCheck.status)) {
+          urlCheck.status = urlComputed;
+          const tag =
+            urlComputed === "fail"
+              ? "Live destination URL does not match the approved URL (computed)."
+              : "Carousel card URL(s) deep-link off the approved page (computed) — verify intentional.";
+          urlCheck.note = urlCheck.note ? `${urlCheck.note} ${tag}` : tag;
+        }
+      }
 
       // Size profile for the CLIENT-SIDE cross-ad comparison (V1 vs V2 statics,
       // carousel vs carousel). Campaigns are chunked into multiple /api/qa
