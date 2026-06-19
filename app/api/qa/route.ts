@@ -3,8 +3,7 @@ import { createHash } from "crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { google } from "googleapis";
 import sharp from "sharp";
-import { getOAuthClient } from "@/lib/google-auth";
-import { getStoredRefreshToken } from "@/lib/token-store";
+import { getGoogleAuth } from "@/lib/google-auth";
 import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, MANUAL_CHECK_ITEMS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
@@ -604,8 +603,7 @@ async function downloadUrlImage(url: string, context?: string | null): Promise<F
 async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, FetchedImage[]>> {
   const out = new Map<string, FetchedImage[]>();
   if (!refs.length) return out;
-  const storedToken = await getStoredRefreshToken();
-  const drive = google.drive({ version: "v3", auth: getOAuthClient(storedToken) });
+  const drive = google.drive({ version: "v3", auth: getGoogleAuth() });
 
   // Download in parallel — sequential was needless latency.
   await Promise.all(
@@ -674,13 +672,14 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
 }
 
 export async function POST(request: Request) {
-  const { wo, units, labeledDocs, destinationUrl, driveImages, ignoreCopyDoc } = (await request.json()) as {
+  const { wo, units, labeledDocs, destinationUrl, driveImages, ignoreCopyDoc, instructions } = (await request.json()) as {
     wo: string;
     units: AdUnit[];
     labeledDocs?: LabeledDoc[];
     destinationUrl?: string | null;
     driveImages?: DriveImageRef[];
     ignoreCopyDoc?: boolean;
+    instructions?: string;
   };
 
   if (!wo || !units?.length) {
@@ -801,6 +800,13 @@ export async function POST(request: Request) {
   // are meaningless without it (the model's internal "today" is its training
   // date, not the run date).
   const todayLine = `TODAY'S DATE: ${new Date().toISOString().slice(0, 10)} — use this as ground truth when judging whether promo months/dates are current or stale.`;
+
+  // Reviewer-supplied overrides — optional free-text instructions that take
+  // priority over default QA behaviour (e.g. "ignore misspellings", "skip the
+  // 9:16 folder"). Appended last so they read as the most recent context.
+  if (instructions?.trim()) {
+    sourceSections.push(`\n\nREVIEWER NOTES (supplemental context from the reviewer — keep these in mind while running your normal full QA, but do not skip or reduce any checks because of them):\n${instructions.trim()}`);
+  }
 
   const woSection = `${todayLine}\n\nWORK ORDER SUMMARY:\n${wo}${sourceSections.join("")}`;
 

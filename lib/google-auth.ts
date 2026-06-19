@@ -1,29 +1,41 @@
 import { google } from "googleapis";
 
 /**
- * Returns an authenticated OAuth2 client.
+ * Returns an OAuth2 client authenticated with a long-lived refresh token.
  *
- * Token resolution order:
- *   1. refreshTokenOverride — passed in from the request's cookie
- *   2. GOOGLE_REFRESH_TOKEN env var — fallback / initial setup
+ * The refresh token is stored permanently as an environment variable — it
+ * never expires unless manually revoked, so no reconnect flow is needed.
  *
- * Env vars required:
+ * Required env vars:
  *   GOOGLE_CLIENT_ID
  *   GOOGLE_CLIENT_SECRET
- *   GOOGLE_REFRESH_TOKEN  (fallback when no cookie is present)
+ *   GOOGLE_REFRESH_TOKEN  ← get this once via the OAuth flow, then hardcode it
+ *
+ * To get the refresh token for the first time:
+ *   1. Run the app locally (npm run dev)
+ *   2. Log in and click "Connect Google" — complete the consent screen
+ *   3. The token is printed to the server console (we log it below)
+ *   4. Copy it into GOOGLE_REFRESH_TOKEN in your Vercel env vars
+ *   5. Remove the connect/callback routes once confirmed working
  */
-export function getOAuthClient(refreshTokenOverride?: string) {
+export function getGoogleAuth() {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  const refreshToken = refreshTokenOverride ?? process.env.GOOGLE_REFRESH_TOKEN;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
 
   if (!clientId || !clientSecret || !refreshToken) {
     throw new Error(
-      "Missing Google credentials. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REFRESH_TOKEN in .env.local"
+      "Missing Google credentials. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, " +
+      "and GOOGLE_REFRESH_TOKEN in your environment variables."
     );
   }
 
   const auth = new google.auth.OAuth2(clientId, clientSecret);
   auth.setCredentials({ refresh_token: refreshToken });
   return auth;
+}
+
+// Alias so existing call sites in fetch-doc and qa routes work without changes.
+export function getOAuthClient(_refreshTokenOverride?: string) {
+  return getGoogleAuth();
 }

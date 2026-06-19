@@ -313,22 +313,11 @@ function asErrorMessage(v: unknown, fallback: string): string {
   }
 }
 
-// Returns true if the error message looks like an expired/revoked Google token.
-function isGoogleAuthError(msg: string): boolean {
-  return (
-    msg.includes("invalid_grant") ||
-    msg.includes("Token has been expired") ||
-    msg.includes("Token has been revoked") ||
-    msg.includes("Missing Google") ||
-    msg.includes("credentials")
-  );
-}
-
 export default function QAPage() {
   const router = useRouter();
-  const [googleBanner, setGoogleBanner] = useState<"connected" | "error" | null>(null);
   const [wo, setWo] = useState("");
   const [ignoreCopyDoc, setIgnoreCopyDoc] = useState(false);
+  const [instructions, setInstructions] = useState("");
   const [detectedDocs, setDetectedDocs] = useState<{ url: string; woLabel: string; content: string | null; images: DriveImage[]; error: string | null; loading: boolean }[]>([]);
   const [woDestinationUrl, setWoDestinationUrl] = useState<string | null>(null);
   const [units, setUnits] = useState<AdUnit[]>([]);
@@ -341,21 +330,10 @@ export default function QAPage() {
   const resultsRef = useRef<HTMLDivElement>(null);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
 
-  // Show a banner if redirected back from the Google OAuth flow
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("google_connected")) {
-      setGoogleBanner("connected");
-      router.replace("/qa", { scroll: false });
-      setTimeout(() => setGoogleBanner(null), 4000);
-    } else if (params.get("google_error")) {
-      setGoogleBanner("error");
-      router.replace("/qa", { scroll: false });
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // Campaign import state — supports multiple campaigns
+  type ActiveRule = { id: string; name: string; summary: string };
+
   type CampaignRow = {
     id: string;
     campaignId: string;
@@ -367,6 +345,7 @@ export default function QAPage() {
     cooldown: boolean;   // true for 60s after an error to prevent rapid retries
     error: string;
     skipNote: string;    // post-load summary of what was filtered out
+    activeRules: ActiveRule[]; // automation rules that are currently ENABLED
   };
   // Default the updated-since cutoff to ~30 days ago. We never QA old ads through
   // Vera, so pre-filling this means one less field to think about — the user can
@@ -389,6 +368,7 @@ export default function QAPage() {
     cooldown: false,
     error: "",
     skipNote: "",
+    activeRules: [],
   });
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([newCampaignRow("c1")]);
 
@@ -584,11 +564,13 @@ export default function QAPage() {
       const skippedOld = data.skippedOld ?? 0;
       const skipNote =
         `Loaded ${imported.length} ad${imported.length === 1 ? "" : "s"}` +
-        (campaignName ? ` from “${campaignName}”` : "") +
+        (campaignName ? ` from "${campaignName}"` : "") +
         (skippedOld > 0 ? ` · skipped ${skippedOld} not updated since cutoff` : "");
 
+      const activeRules: ActiveRule[] = data.activeRules ?? [];
+
       setCampaigns((prev) =>
-        prev.map((c) => (c.id === rowId ? { ...c, loading: false, loaded: true, skipNote, campaignName } : c))
+        prev.map((c) => (c.id === rowId ? { ...c, loading: false, loaded: true, skipNote, campaignName, activeRules } : c))
       );
     } catch (err) {
       setCampaigns((prev) =>
@@ -774,6 +756,7 @@ export default function QAPage() {
             driveImages,
             destinationUrl: woDestinationUrl ?? null,
             ignoreCopyDoc,
+            instructions: instructions.trim() || undefined,
           }),
         });
 
@@ -946,6 +929,7 @@ export default function QAPage() {
     setResult(null);
     setError("");
     setProgress({ done: 0, total: 0 });
+    setInstructions("");
   }
 
   const CHECK_NAMES = [
@@ -996,33 +980,9 @@ export default function QAPage() {
               ← New check
             </button>
           )}
-          <a
-            href="/api/google/connect"
-            className="text-xs text-gray-400 hover:text-gray-700 transition-colors border border-gray-200 rounded-lg px-3 py-1.5"
-          >
-            Switch Google account
-          </a>
         </div>
       </header>
 
-      {/* Google OAuth banners */}
-      {googleBanner === "connected" && (
-        <div className="bg-emerald-50 border-b border-emerald-200 px-6 py-2.5 flex items-center gap-2 text-sm text-emerald-700">
-          <span>✓</span>
-          <span>Google Drive connected successfully.</span>
-        </div>
-      )}
-      {googleBanner === "error" && (
-        <div className="bg-red-50 border-b border-red-200 px-6 py-2.5 flex items-center justify-between text-sm text-red-700">
-          <span>Google authorization failed. Try connecting again.</span>
-          <a
-            href="/api/google/connect"
-            className="ml-4 px-3 py-1 rounded-lg bg-red-700 text-white text-xs font-medium hover:bg-red-800 transition-colors"
-          >
-            Reconnect Google
-          </a>
-        </div>
-      )}
 
       <main className="max-w-3xl mx-auto px-6 py-8">
         {loading ? (
@@ -1174,21 +1134,12 @@ export default function QAPage() {
                         <span className="shrink-0 inline-block w-4 h-4 border-2 border-gray-300 border-t-gray-700 rounded-full animate-spin mt-1" />
                       )}
                       {doc.error && !doc.loading && (
-                        isGoogleAuthError(doc.error) ? (
-                          <a
-                            href="/api/google/connect"
-                            className="shrink-0 px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-medium hover:bg-red-700 transition-colors whitespace-nowrap"
-                          >
-                            Reconnect Google
-                          </a>
-                        ) : (
-                          <button
-                            onClick={() => loadDoc(doc.url)}
-                            className="shrink-0 px-3 py-1.5 rounded-lg bg-gray-900 text-white text-xs font-medium hover:bg-gray-800 transition-colors"
-                          >
-                            Retry
-                          </button>
-                        )
+                        <button
+                          onClick={() => loadDoc(doc.url)}
+                          className="shrink-0 px-3 py-1.5 rounded-lg bg-gray-900 text-white text-xs font-medium hover:bg-gray-800 transition-colors"
+                        >
+                          Retry
+                        </button>
                       )}
                     </div>
                   ))}
@@ -1302,6 +1253,22 @@ export default function QAPage() {
                     {row.error && (
                       <p className="text-xs text-red-600 pl-1">{row.error}</p>
                     )}
+                    {row.activeRules.length > 0 && (
+                      <div className="mt-1.5 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 space-y-1.5">
+                        <p className="text-xs font-semibold text-amber-800">
+                          ⚠ {row.activeRules.length} active automation rule{row.activeRules.length === 1 ? "" : "s"} on this campaign
+                        </p>
+                        {row.activeRules.map((rule) => (
+                          <div key={rule.id} className="text-xs text-amber-700 leading-snug">
+                            <span className="font-medium">{rule.name}</span>
+                            {rule.summary ? <span className="text-amber-600"> — {rule.summary}</span> : null}
+                          </div>
+                        ))}
+                        <p className="text-xs text-amber-600 mt-0.5">
+                          Check that none of these will pause or modify the campaign unexpectedly.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 ))}
 
@@ -1379,6 +1346,26 @@ export default function QAPage() {
                 />
               </button>
             </label>
+
+            {/* Optional reviewer instructions */}
+            <details className="group">
+              <summary className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 cursor-pointer select-none list-none">
+                <div>
+                  <p className="text-sm font-medium text-gray-800">Reviewer instructions <span className="text-gray-400 font-normal">(optional)</span></p>
+                  <p className="text-xs text-gray-500 mt-0.5">Override or focus the audit — e.g. "ignore misspellings", "skip the carousel folder"</p>
+                </div>
+                <span className="text-gray-400 text-xs shrink-0 group-open:rotate-180 transition-transform">▼</span>
+              </summary>
+              <div className="mt-2">
+                <textarea
+                  value={instructions}
+                  onChange={(e) => setInstructions(e.target.value)}
+                  rows={3}
+                  placeholder={"e.g. Ignore any spelling variations in the resort name.\nDo not flag the disclaimer copy — it's pre-approved.\nSkip the 9:16 folder, those files are not live yet."}
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent resize-y min-h-[88px]"
+                />
+              </div>
+            </details>
 
             <button
               onClick={runQA}

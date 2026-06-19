@@ -20,11 +20,12 @@ export default function LoginPage() {
       body: JSON.stringify({ password }),
     });
 
-    setLoading(false);
-
     if (res.ok) {
+      // Brief pause so the dashboard has time to hydrate before the transition
+      await new Promise((r) => setTimeout(r, 1800));
       router.push("/qa");
     } else {
+      setLoading(false);
       setError("Incorrect password. Try again.");
     }
   }

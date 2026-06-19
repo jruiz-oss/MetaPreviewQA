@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
-import { setStoredRefreshToken } from "@/lib/token-store";
 
+/**
+ * One-time OAuth callback to capture a long-lived refresh token.
+ * After you've copied GOOGLE_REFRESH_TOKEN into your env vars and confirmed
+ * the app works, this route can stay as-is (it just won't be linked anywhere).
+ */
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
@@ -26,14 +30,13 @@ export async function GET(request: Request) {
     const refreshToken = tokens.refresh_token;
 
     if (!refreshToken) {
-      // This can happen if the user already authorized and Google didn't
-      // re-issue a refresh token. The connect route uses prompt=consent to
-      // prevent this, but handle it gracefully just in case.
       return NextResponse.redirect(`${base}/qa?google_error=no_refresh_token`);
     }
 
-    // Store globally so ALL users get the new token, not just the one who reconnected
-    await setStoredRefreshToken(refreshToken);
+    // ⬇️ COPY THIS VALUE into GOOGLE_REFRESH_TOKEN in your env vars / Vercel dashboard
+    console.log("=== GOOGLE REFRESH TOKEN (copy into env vars) ===");
+    console.log(refreshToken);
+    console.log("=================================================");
 
     return NextResponse.redirect(`${base}/qa?google_connected=1`);
   } catch (err) {

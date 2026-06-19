@@ -23,6 +23,73 @@ const STALE_ASSET_AGE_GAP_DAYS = 25;
 const dbg: (...args: unknown[]) => void =
   process.env.QA_DEBUG === "1" ? console.log.bind(console) : () => {};
 
+// ── Automated Rules ──────────────────────────────────────────────────────────
+
+export type CampaignRule = {
+  id: string;
+  name: string;
+  status: "ENABLED" | "DISABLED" | string;
+  // Human-readable summary of what the rule does, e.g. "PAUSE if spend > $X"
+  summary: string;
+};
+
+export type FetchRulesResult = {
+  rules: CampaignRule[];
+  error: string | null;
+};
+
+export async function fetchCampaignRules(
+  campaignId: string,
+  accessToken: string
+): Promise<FetchRulesResult> {
+  try {
+    const url = `${GRAPH_API}/${campaignId}/adrules_library?fields=id,name,status,trigger,actions,filters&access_token=${accessToken}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
+    const data = await res.json();
+
+    if (data.error) {
+      // Graceful degradation — rules are supplemental, not critical
+      return { rules: [], error: data.error.message ?? "Could not fetch rules" };
+    }
+
+    const rules: CampaignRule[] = (data.data ?? []).map((r: {
+      id: string;
+      name?: string;
+      status?: string;
+      actions?: { type?: string; value?: unknown }[];
+      trigger?: { type?: string };
+      filters?: { field?: string; operator?: string; value?: unknown }[];
+    }) => {
+      // Build a plain-English summary from the rule fields
+      const actionStr = (r.actions ?? [])
+        .map((a) => a.type ?? "")
+        .filter(Boolean)
+        .join(", ") || "unknown action";
+      const triggerStr = r.trigger?.type ?? "unknown trigger";
+      const filterStr = (r.filters ?? [])
+        .map((f) => `${f.field ?? ""} ${f.operator ?? ""} ${JSON.stringify(f.value ?? "")}`)
+        .filter(Boolean)
+        .join("; ");
+      const summary = filterStr
+        ? `${actionStr} when ${filterStr} (trigger: ${triggerStr})`
+        : `${actionStr} (trigger: ${triggerStr})`;
+
+      return {
+        id: r.id,
+        name: r.name ?? "Unnamed rule",
+        status: r.status ?? "UNKNOWN",
+        summary,
+      };
+    });
+
+    return { rules, error: null };
+  } catch (err) {
+    return { rules: [], error: `Network error: ${(err as Error).message}` };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export type CampaignAd = {
   id: string;
   name: string;

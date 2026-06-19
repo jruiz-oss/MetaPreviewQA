@@ -7,8 +7,11 @@ const SCOPES = [
   "https://www.googleapis.com/auth/documents.readonly",
 ];
 
+/**
+ * One-time OAuth connect route — used once to capture a long-lived refresh token.
+ * After GOOGLE_REFRESH_TOKEN is set in your env vars, this route is unused but harmless.
+ */
 export async function GET() {
-  // Only allow authenticated users
   const cookieStore = await cookies();
   const authCookie = cookieStore.get("qa_auth");
   if (!authCookie) {
@@ -23,7 +26,7 @@ export async function GET() {
   const oAuth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
   const url = oAuth2Client.generateAuthUrl({
     access_type: "offline",
-    prompt: "consent", // force Google to return a refresh token every time
+    prompt: "consent",
     scope: SCOPES,
   });
 

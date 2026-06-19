@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
-import { getOAuthClient } from "@/lib/google-auth";
-import { getStoredRefreshToken } from "@/lib/token-store";
+import { getGoogleAuth } from "@/lib/google-auth";
 import mammoth from "mammoth";
 
 // Diagnostic logging is gated behind QA_DEBUG so production logs stay quiet.
@@ -30,7 +29,7 @@ function extractFileId(url: string): string | null {
 
 // ─── Readers ──────────────────────────────────────────────────────────────────
 
-async function readGoogleDoc(docId: string, auth: ReturnType<typeof getOAuthClient>): Promise<string> {
+async function readGoogleDoc(docId: string, auth: ReturnType<typeof getGoogleAuth>): Promise<string> {
   const docs = google.docs({ version: "v1", auth });
   const res = await docs.documents.get({ documentId: docId });
   const doc = res.data;
@@ -106,7 +105,7 @@ type ScanState = { foldersVisited: number; visitedIds: Set<string> };
 
 async function readDriveFolder(
   folderId: string,
-  auth: ReturnType<typeof getOAuthClient>,
+  auth: ReturnType<typeof getGoogleAuth>,
   depth = 0,
   folderName?: string,
   images?: DriveImageRef[],
@@ -435,9 +434,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "No URL provided" }, { status: 400 });
   }
 
-  // Resolve auth: KV-stored token (set after browser OAuth) wins over env var
-  const storedToken = await getStoredRefreshToken();
-  const auth = getOAuthClient(storedToken);
+  const auth = getGoogleAuth();
 
   try {
     // 1. Direct Google Doc link
