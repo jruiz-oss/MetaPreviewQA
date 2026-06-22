@@ -1352,7 +1352,7 @@ export default function QAPage() {
               <summary className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 cursor-pointer select-none list-none">
                 <div>
                   <p className="text-sm font-medium text-gray-800">Reviewer instructions <span className="text-gray-400 font-normal">(optional)</span></p>
-                  <p className="text-xs text-gray-500 mt-0.5">Override or focus the audit — e.g. "ignore misspellings", "skip the carousel folder"</p>
+                  <p className="text-xs text-gray-500 mt-0.5">Add focus or context to the audit — e.g. "the resort name is spelled 'Tahoe'", "double-check the disclaimer copy". Notes add to the QA; they don't skip checks.</p>
                 </div>
                 <span className="text-gray-400 text-xs shrink-0 group-open:rotate-180 transition-transform">▼</span>
               </summary>
@@ -1361,7 +1361,7 @@ export default function QAPage() {
                   value={instructions}
                   onChange={(e) => setInstructions(e.target.value)}
                   rows={3}
-                  placeholder={"e.g. Ignore any spelling variations in the resort name.\nDo not flag the disclaimer copy — it's pre-approved.\nSkip the 9:16 folder, those files are not live yet."}
+                  placeholder={"e.g. The resort name is correctly spelled 'Tahoe' — flag anything else.\nThe summer promo runs through August, so August dates are current.\nThe carousel cards intentionally deep-link to different pages."}
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent resize-y min-h-[88px]"
                 />
               </div>

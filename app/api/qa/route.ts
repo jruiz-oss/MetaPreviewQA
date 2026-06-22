@@ -801,9 +801,11 @@ export async function POST(request: Request) {
   // date, not the run date).
   const todayLine = `TODAY'S DATE: ${new Date().toISOString().slice(0, 10)} — use this as ground truth when judging whether promo months/dates are current or stale.`;
 
-  // Reviewer-supplied overrides — optional free-text instructions that take
-  // priority over default QA behaviour (e.g. "ignore misspellings", "skip the
-  // 9:16 folder"). Appended last so they read as the most recent context.
+  // Reviewer notes — optional free-text context that ADDS focus to the audit
+  // (e.g. "pay attention to the disclaimer copy", "the resort name is spelled
+  // 'Tahoe'"). These are a supplement, NOT an override: the full default QA
+  // always runs and no check is skipped or softened because of them. Appended
+  // last so they read as the most recent context.
   if (instructions?.trim()) {
     sourceSections.push(`\n\nREVIEWER NOTES (supplemental context from the reviewer — keep these in mind while running your normal full QA, but do not skip or reduce any checks because of them):\n${instructions.trim()}`);
   }
