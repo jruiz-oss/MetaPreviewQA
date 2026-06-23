@@ -218,6 +218,97 @@ function AdIdBadge({ adId }: { adId: string }) {
   );
 }
 
+// The manual-review side note. Most of what it lists is the same fixed checklist
+// on every run (the MANUAL_CHECK_ITEMS in lib/meta-api) — "the regular stuff we
+// already know we can't read from the API". That doesn't need to shout on every
+// result, so it collapses to a single quiet line. Anything OUT of the ordinary —
+// an enhancement the API didn't report for this specific ad, or the whole
+// enhancement spec being unavailable — is genuinely new info for this run, so it
+// gets surfaced in an amber box up top.
+function ManualReviewNote({ note }: { note: string }) {
+  const [open, setOpen] = useState(false);
+
+  // Split "<lead-in>: item, item, item." into the list of items.
+  const colon = note.indexOf(": ");
+  const itemsStr = colon === -1 ? "" : note.slice(colon + 2).replace(/\.\s*$/, "");
+  const items = itemsStr
+    ? itemsStr.split(", ").map((s) => s.trim()).filter(Boolean)
+    : [];
+
+  // Items tagged this way aren't on the fixed checklist — the API just didn't
+  // return them for this ad, so they're the part worth flagging.
+  const EXTRA_RE = /not reported by the API/i;
+  const extra = items.filter((it) => EXTRA_RE.test(it));
+  const standard = items.filter((it) => !EXTRA_RE.test(it));
+
+  // The enhancement spec being entirely missing is also an off-nominal condition.
+  const dataUnavailable = /enhancement data unavailable/i.test(note);
+  const needsAttention = extra.length > 0 || dataUnavailable;
+
+  if (!needsAttention) {
+    // Nothing unusual — just the standard checklist. Keep it quiet and collapsed.
+    return (
+      <div className="bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 w-full">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700"
+        >
+          <span className="text-gray-400">{open ? "▾" : "▸"}</span>
+          <span>Standard manual review — the usual checklist items, nothing unexpected</span>
+        </button>
+        {open && standard.length > 0 && (
+          <ul className="mt-2 ml-4 space-y-0.5">
+            {standard.map((it, i) => (
+              <li key={i} className="text-xs text-gray-500 list-disc list-inside">{it}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 w-full">
+      <p className="text-xs font-semibold text-amber-700 mb-1">
+        Manual review — needs attention
+      </p>
+      {dataUnavailable && (
+        <p className="text-xs text-amber-700/90 leading-snug mb-1">
+          The Meta API returned no enhancement data for this ad — verify all Advantage+ enhancements manually in Ads Manager.
+        </p>
+      )}
+      {extra.length > 0 && (
+        <ul className="space-y-0.5 mb-1">
+          {extra.map((it, i) => (
+            <li key={i} className="text-xs text-amber-700/90 leading-snug list-disc list-inside">
+              {it.replace(/\s*\(not reported by the API[^)]*\)/i, "")}
+              <span className="text-amber-700/60"> — not reported by the API for this ad; Meta may default it ON</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {standard.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="flex items-center gap-1.5 text-xs text-amber-700/70 hover:text-amber-700 mt-0.5"
+        >
+          <span>{open ? "▾" : "▸"}</span>
+          <span>Plus {standard.length} standard checklist {standard.length === 1 ? "item" : "items"}</span>
+        </button>
+      )}
+      {open && standard.length > 0 && (
+        <ul className="mt-1 ml-4 space-y-0.5">
+          {standard.map((it, i) => (
+            <li key={i} className="text-xs text-amber-700/70 list-disc list-inside">{it}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function CheckCard({ label, result }: { label: string; result: CheckResult }) {
   // Fails and warnings start open; passes start collapsed.
   const defaultOpen = result.status === "fail" || result.status === "warning";
@@ -1559,16 +1650,7 @@ export default function QAPage() {
                       </ul>
                     </div>
                   )}
-                  {manualNote && (
-                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 w-full">
-                      <p className="text-xs font-semibold text-amber-700 mb-1">
-                        Manual review
-                      </p>
-                      <p className="text-xs text-amber-700/90 leading-snug">
-                        {manualNote}
-                      </p>
-                    </div>
-                  )}
+                  {manualNote && <ManualReviewNote note={manualNote} />}
                 </div>
               );
             })()}
