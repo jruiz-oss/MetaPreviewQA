@@ -603,7 +603,7 @@ async function downloadUrlImage(url: string, context?: string | null): Promise<F
 async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, FetchedImage[]>> {
   const out = new Map<string, FetchedImage[]>();
   if (!refs.length) return out;
-  const drive = google.drive({ version: "v3", auth: getGoogleAuth() });
+  const drive = google.drive({ version: "v3", auth: await getGoogleAuth() });
 
   // Download in parallel — sequential was needless latency.
   await Promise.all(

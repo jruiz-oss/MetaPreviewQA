@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
+import { setStoredRefreshToken } from "@/lib/token-store";
 
 /**
- * One-time OAuth callback to capture a long-lived refresh token.
- * After you've copied GOOGLE_REFRESH_TOKEN into your env vars and confirmed
- * the app works, this route can stay as-is (it just won't be linked anywhere).
+ * OAuth callback for the "Reconnect Google" flow. Exchanges the auth code for a
+ * fresh refresh token and persists it to the shared token store (Redis) so the
+ * new token takes effect immediately across all serverless instances — no
+ * redeploy or manual env-var copy required.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -33,10 +35,9 @@ export async function GET(request: Request) {
       return NextResponse.redirect(`${base}/qa?google_error=no_refresh_token`);
     }
 
-    // ⬇️ COPY THIS VALUE into GOOGLE_REFRESH_TOKEN in your env vars / Vercel dashboard
-    console.log("=== GOOGLE REFRESH TOKEN (copy into env vars) ===");
-    console.log(refreshToken);
-    console.log("=================================================");
+    // Persist the new token to the shared store so every serverless instance
+    // picks it up immediately. Falls back gracefully if Redis isn't configured.
+    await setStoredRefreshToken(refreshToken);
 
     return NextResponse.redirect(`${base}/qa?google_connected=1`);
   } catch (err) {

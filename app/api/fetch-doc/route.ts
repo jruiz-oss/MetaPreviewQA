@@ -29,7 +29,7 @@ function extractFileId(url: string): string | null {
 
 // ─── Readers ──────────────────────────────────────────────────────────────────
 
-async function readGoogleDoc(docId: string, auth: ReturnType<typeof getGoogleAuth>): Promise<string> {
+async function readGoogleDoc(docId: string, auth: Awaited<ReturnType<typeof getGoogleAuth>>): Promise<string> {
   const docs = google.docs({ version: "v1", auth });
   const res = await docs.documents.get({ documentId: docId });
   const doc = res.data;
@@ -105,7 +105,7 @@ type ScanState = { foldersVisited: number; visitedIds: Set<string> };
 
 async function readDriveFolder(
   folderId: string,
-  auth: ReturnType<typeof getGoogleAuth>,
+  auth: Awaited<ReturnType<typeof getGoogleAuth>>,
   depth = 0,
   folderName?: string,
   images?: DriveImageRef[],
@@ -434,7 +434,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "No URL provided" }, { status: 400 });
   }
 
-  const auth = getGoogleAuth();
+  const auth = await getGoogleAuth();
 
   try {
     // 1. Direct Google Doc link

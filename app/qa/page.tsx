@@ -324,6 +324,27 @@ export default function QAPage() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<QAResult | null>(null);
   const [error, setError] = useState("");
+  // Google reconnect banner — driven by ?google_connected / ?google_error
+  // returned from the OAuth callback. Cleared from the URL after reading.
+  const [googleNotice, setGoogleNotice] = useState<{ kind: "ok" | "error"; msg: string } | null>(null);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("google_connected")) {
+      setGoogleNotice({ kind: "ok", msg: "Google reconnected. Re-run your QA check or retry the links." });
+    } else if (params.get("google_error")) {
+      const code = params.get("google_error");
+      setGoogleNotice({
+        kind: "error",
+        msg:
+          code === "no_refresh_token"
+            ? "Google didn't return a refresh token. Remove Vera under your Google account's third-party access, then reconnect."
+            : `Google reconnect failed (${code}). Try again.`,
+      });
+    }
+    if (params.has("google_connected") || params.has("google_error")) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
   // Progress across per-campaign QA requests (done / total campaigns).
   const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
   // PDF export: ref wraps the results block we capture; flag drives button state.
@@ -980,8 +1001,37 @@ export default function QAPage() {
               ← New check
             </button>
           )}
+          <a
+            href="/api/google/connect"
+            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+            title="Re-authorize Google Drive access (fixes 'invalid_grant' errors)"
+          >
+            Reconnect Google
+          </a>
         </div>
       </header>
+
+      {googleNotice && (
+        <div
+          className={
+            "border-b px-6 py-3 text-sm " +
+            (googleNotice.kind === "ok"
+              ? "border-green-200 bg-green-50 text-green-800"
+              : "border-red-200 bg-red-50 text-red-800")
+          }
+        >
+          <div className="max-w-3xl mx-auto flex items-center justify-between gap-4">
+            <span>{googleNotice.msg}</span>
+            <button
+              onClick={() => setGoogleNotice(null)}
+              className="text-current/60 hover:text-current"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
 
       <main className="max-w-3xl mx-auto px-6 py-8">
