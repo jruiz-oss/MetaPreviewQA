@@ -992,58 +992,6 @@ export async function POST(request: Request) {
       }
     }
 
-    // MONTH / PROMO-CYCLE discrimination — the fix for "it's pulling old ads".
-    // Promo campaigns reuse one Drive folder month over month ("May Static",
-    // "June Static", …). A June ad shares the concept/format tokens with last
-    // month's May file, so the May file can win on score and the live ad gets
-    // graded against OLD approved creative → phantom "wrong/old creative" flag.
-    // Mirror the version-token rule: derive month tokens from the ad NAME only
-    // (body copy may mention a month incidentally), and if the name carries a
-    // month AND at least one matched file carries that same month, drop files
-    // tagged with a DIFFERENT month (month-agnostic files are kept).
-    const MONTH_TOKEN =
-      /^(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|jul(y)?|aug(ust)?|sep(t|tember)?|oct(ober)?|nov(ember)?|dec(ember)?)$/;
-    const monthKey = (t: string) => t.slice(0, 3); // "june"/"jun" → "jun"
-    const unitMonthTokens = tokenize(unitName)
-      .filter((t) => MONTH_TOKEN.test(t))
-      .map(monthKey);
-    if (unitMonthTokens.length > 0) {
-      const fileMonths = (x: { ref: DriveImageRef }) =>
-        tokenize(x.ref.name).filter((t) => MONTH_TOKEN.test(t)).map(monthKey);
-      const hasMonthMatch = filtered.some((x) =>
-        fileMonths(x).some((m) => unitMonthTokens.includes(m))
-      );
-      if (hasMonthMatch) {
-        filtered = filtered.filter((x) => {
-          const fm = fileMonths(x);
-          if (fm.length === 0) return true; // month-agnostic asset — keep
-          return fm.some((m) => unitMonthTokens.includes(m)); // same month only
-        });
-      }
-    }
-
-    // CONFIDENCE GATE — skip the Drive comparison when the match is ambiguous.
-    // If two or more files survive at a near-tied score but the top pick shares
-    // NO distinctive token with the unit (every shared token appears in ALL Drive
-    // files, e.g. only the concept name overlaps), the "winner" is essentially
-    // whichever sorted first — arbitrary, and a common source of grading against
-    // the wrong/old asset. In that case attach no Drive image: the downstream
-    // guard then reports creative_alignment as "couldn't verify" (warning) rather
-    // than a false fail. Only fires when there's genuine ambiguity (≥2 candidates),
-    // so a confident single match is never dropped.
-    if (filtered.length >= 2) {
-      const bestTokens = new Set(tokenize(filtered[0].ref.name));
-      const sharesDistinctive = Array.from(unitTokens).some(
-        (t) => bestTokens.has(t) && (docFreq.get(t) ?? 0) < totalRefs
-      );
-      if (!sharesDistinctive) {
-        dbg(
-          `[qa] AMBIGUOUS MATCH skipped: unit "${unitName}" shared only corpus-wide tokens across ${filtered.length} candidate file(s) — no Drive comparison attached.`
-        );
-        return { refs: [], crossFormat: false };
-      }
-    }
-
     // For carousel units, raise the per-unit cap to cover all cards (carousels
     // can have 6+ cards, each needing its own approved image for comparison).
     const perUnitCap = carouselUnit ? Math.max(MAX_DRIVE_IMAGES_PER_UNIT, 10) : MAX_DRIVE_IMAGES_PER_UNIT;
