@@ -5,6 +5,7 @@ import { google } from "googleapis";
 import sharp from "sharp";
 import { getGoogleAuth } from "@/lib/google-auth";
 import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, MANUAL_CHECK_ITEMS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
+import { computeCompletenessLine } from "@/lib/completeness";
 import { isAuthedRequest } from "@/lib/auth";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
@@ -52,6 +53,7 @@ Review each ad unit on seven criteria:
    STEP 2 — COMPARISON: With the extracted text in hand, compare the two lists. Flag any difference — a word, number, date, or phrase that appears in one but not the other, or differs between them. Also check visual theme, colors, logo, and layout match. Match Drive assets to ad units by filename/concept and size (e.g. "1080x1920 V2", "Carousel"). If only one source is present, check what you can. If no images at all, note that visual creative could not be checked.
    STEP 3 — COPY DOC CROSS-CHECK (only when the COPY DOCUMENT specifies on-image / per-card copy): compare the live image text you extracted in STEP 1 against the on-image copy the doc assigns to THIS specific ad unit/variant/option. The live image matching the approved Drive file is NOT sufficient on its own — if the live and Drive images both carry on-image text that differs from what the copy doc assigns this unit (e.g. the cards carry a different option's copy), flag it and name which option the on-image text actually belongs to. Use only text literally extracted from the pixels in STEP 1 — the image-reading rules above still apply. If the copy doc does not specify on-image copy, skip this step and do not penalize the ad for it.
    The step names above (STEP 1/2/3) are internal instructions only — NEVER reference them in your notes or summary. Just state the issue plainly, e.g. "live cards carry Option 1 on-image copy; copy doc assigns Option 2 copy to this unit."
+   COMPLETENESS IS NOT YOUR JOB TO INFER: each unit includes a "Creative completeness (computed)" line — a code-level inventory of exactly which sizes/cards the live ad actually serves vs what the approved Drive provides. Treat it as AUTHORITATIVE. NEVER report a size, aspect ratio (e.g. 1080×1920 / Story / vertical), or carousel card as "missing" or "extra" based on the set of images attached below — that set may be a representative SAMPLE, not the full ad. Only flag a missing/extra asset when the computed line explicitly says "GENUINE GAP". Your visual comparison is limited to whether the creative CONTENT you can actually see matches the approved Drive design; absence of an image from the attached set is never, by itself, a defect.
 3. promo_month_date — Are any promo months, dates, or time-limited references correct? Flag stale or incorrect date references. Use the TODAY'S DATE line provided with the work order as the ground truth for what is current vs stale — never rely on your own sense of the current date. Only evaluate dates you can actually read — from the API copy text, the copy doc, or text legibly visible in the image. Never report a date as appearing in the creative unless you can literally read it in the pixels.
 4. url_cta — Does the CTA match what was specified? For the destination URL, each ad unit includes a "URL comparison (computed)" line — a code-level comparison of the live URL(s) against the approved destination that already normalizes hosts/paths and ignores tracking parameters (utm_*, fbclid, etc.). Treat that computed verdict as authoritative for URL matching: do NOT re-derive URL matching yourself, and never flag tracking parameters as a mismatch. Your job in this check is the CTA (and echoing the computed URL verdict).
 5. grammar_typos — Any grammar errors, typos, or awkward phrasing?
@@ -865,8 +867,25 @@ export async function POST(request: Request) {
   // out. We now rank by how many words from the unit name appear in the filename
   // and keep only the best few. No match → no Drive comparison for that unit
   // (the prompt already handles a missing approved image gracefully).
-  const MAX_DRIVE_IMAGES_PER_UNIT = 4;
+  // A static concept normally has several size variants (e.g. 1080x1080 and
+  // 1080x1920) plus multiple design variants per size. 4 was too low: it let a
+  // single size monopolize all the slots, so other sizes were never sent to the
+  // model and got reported as "missing". 8 covers the common 3-square + 3-tall
+  // layouts with margin; carousels still bump higher below.
+  const MAX_DRIVE_IMAGES_PER_UNIT = 8;
   const allDriveRefs = driveImages ?? [];
+
+  // A "Copy of …" file in a duplicate approval folder is the SAME creative as
+  // the primary file — it must not consume a per-unit slot that a different
+  // size/variant needs. Normalize to a creative key (drop folder path + any
+  // "Copy of" prefix) and prefer the primary (non-"Copy of") file.
+  const isCopyAsset = (n: string) => /(^|\/)\s*copy of\s+/i.test(n);
+  const creativeKeyOf = (n: string) =>
+    (n.split("/").pop() ?? n).replace(/^\s*copy of\s+/i, "").trim().toLowerCase();
+  // Extract a size token ("1080x1920") from a filename, or "other" when absent.
+  // Used to guarantee every distinct size is represented before the cap fills.
+  const sizeKeyOf = (n: string) =>
+    (n.match(/(\d{3,4})\s*x\s*(\d{3,4})/i)?.[0] ?? "other").replace(/\s+/g, "").toLowerCase();
 
   // Pre-compute document frequency of each token across ALL Drive image names.
   // A token in every file (e.g. "june", "hrok", the concept name) carries no
@@ -1033,9 +1052,45 @@ export async function POST(request: Request) {
     // For carousel units, raise the per-unit cap to cover all cards (carousels
     // can have 6+ cards, each needing its own approved image for comparison).
     const perUnitCap = carouselUnit ? Math.max(MAX_DRIVE_IMAGES_PER_UNIT, 10) : MAX_DRIVE_IMAGES_PER_UNIT;
-    const refs = filtered
-      .slice(0, perUnitCap)
-      .map((x) => x.ref);
+
+    // 1) Collapse "Copy of …" duplicates onto the primary creative so duplicate
+    //    copies of one size don't crowd out other sizes. Keep the primary file
+    //    when both exist; otherwise the higher-scored ref.
+    const byCreative = new Map<string, { ref: DriveImageRef; score: number }>();
+    for (const x of filtered) {
+      const k = creativeKeyOf(x.ref.name);
+      const cur = byCreative.get(k);
+      if (!cur) {
+        byCreative.set(k, x);
+      } else {
+        const curCopy = isCopyAsset(cur.ref.name);
+        const xCopy = isCopyAsset(x.ref.name);
+        if (curCopy && !xCopy) byCreative.set(k, x);
+        else if (curCopy === xCopy && x.score > cur.score) byCreative.set(k, x);
+      }
+    }
+    const deduped = Array.from(byCreative.values()).sort((a, b) => b.score - a.score);
+
+    // 2) Bucket by size, then pick round-robin across sizes so EVERY size is
+    //    represented before any single size takes a second slot. This is the
+    //    fix for "other sizing isn't apparent" — previously one size could fill
+    //    all 4 slots and the rest were silently dropped.
+    const bySize = new Map<string, { ref: DriveImageRef; score: number }[]>();
+    for (const x of deduped) {
+      const k = sizeKeyOf(x.ref.name);
+      const bucket = bySize.get(k) ?? [];
+      bucket.push(x);
+      bySize.set(k, bucket);
+    }
+    const sizeQueues = Array.from(bySize.values()); // each already score-sorted
+    const picked: { ref: DriveImageRef; score: number }[] = [];
+    let rr = 0;
+    while (picked.length < perUnitCap && sizeQueues.some((q) => q.length > 0)) {
+      const q = sizeQueues[rr % sizeQueues.length];
+      if (q.length > 0) picked.push(q.shift()!);
+      rr++;
+    }
+    const refs = picked.sort((a, b) => b.score - a.score).map((x) => x.ref);
     // Did the fallback hand this unit opposite-format approved assets?
     const crossFormat = carouselUnit
       ? refs.some((r) => !refIsCarousel(r.name))
@@ -1079,6 +1134,11 @@ export async function POST(request: Request) {
     // Format & placement block
     let formatBlock = "";
     const fi = (unit as { formatInfo?: FormatInfo | null }).formatInfo;
+
+    // Deterministic creative-completeness — computed from the authoritative live
+    // inventory + approved Drive sizes, so the model never reports a size/card
+    // "missing" from a capped/sampled image set.
+    const completenessLine = computeCompletenessLine(fi?.creativeInventory, unitDriveImages);
     if (fi) {
       const lines: string[] = [];
       if (fi.placements) {
@@ -1125,7 +1185,7 @@ export async function POST(request: Request) {
 
     blocks.push({
       type: "text",
-      text: `\n---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${contentBlock}${urlComparisonLine}${formatBlock}${imageNote}`,
+      text: `\n---\nAd unit: ${unit.name || "Unnamed"}${urlLine}\n${contentBlock}${urlComparisonLine}${completenessLine}${formatBlock}${imageNote}`,
     });
 
     for (const img of liveImages) {

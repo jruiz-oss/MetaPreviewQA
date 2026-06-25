@@ -132,6 +132,21 @@ export type ImageDimensions = {
   height: number;
 };
 
+// Authoritative inventory of the LIVE creative, computed from the full served
+// asset pool BEFORE any visual-QA image cap is applied. The QA route compares
+// completeness (which sizes/cards exist live vs approved) against this in code,
+// instead of having the vision model infer presence/absence from the image set
+// it was handed — which may be a capped sample. Without this, a live carousel
+// whose pool exceeds the QA cap looks like it is "missing" the trailing sizes.
+export type CreativeInventory = {
+  isCarousel: boolean;
+  cardCount: number; // configured carousel cards (0 for single-image ads)
+  imageCount: number; // total live image assets served (pre-cap)
+  sizes: { size: string; count: number }[]; // e.g. [{size:"1080x1080",count:4},{size:"1080x1920",count:4}]
+  imagesSentForVisualQa: number; // how many image assets were actually attached for vision
+  truncated: boolean; // imagesSentForVisualQa < imageCount (the cap dropped some)
+};
+
 export type FormatInfo = {
   placements: PlacementInfo | null;
   creativeDimensions: ImageDimensions[]; // all unique dimensions found across creative assets
@@ -145,7 +160,70 @@ export type FormatInfo = {
   // legitimately ship at different resolutions than statics, so consistency
   // rules must not compare across the two.
   imageDimensions?: ImageDimensions[];
+  // Authoritative live-creative inventory (see CreativeInventory). Used by the
+  // QA route for a code-level completeness check.
+  creativeInventory?: CreativeInventory;
 };
+
+/**
+ * Plans which live creative images go to visual QA, and records what the live ad
+ * actually contains. Pure (no I/O) so it is unit-testable and shared by the
+ * fetch path. Two jobs:
+ *   1. ORDER: carousel pools arrive grouped by size (all 1:1, then all 9:16), so
+ *      a flat cap would drop one whole size. Round-robin across size buckets so
+ *      that if the cap bites it keeps a balanced sample of every size.
+ *   2. INVENTORY: counts cards and per-size assets from the FULL pool (pre-cap)
+ *      and records how many were actually sent — the authoritative completeness
+ *      record, so the model never infers a "missing" size from a capped sample.
+ */
+export function planQaImages<T extends { url?: string | null; width?: number; height?: number }>(
+  candidates: T[],
+  isCarousel: boolean,
+  cardCount: number,
+  maxImages: number
+): { ordered: T[]; inventory: CreativeInventory } {
+  const sizeKey = (c: { width?: number; height?: number }) =>
+    c.width && c.height ? `${c.width}x${c.height}` : "unknown";
+
+  const sizeCounts = new Map<string, number>();
+  for (const c of candidates) sizeCounts.set(sizeKey(c), (sizeCounts.get(sizeKey(c)) ?? 0) + 1);
+
+  let ordered = candidates;
+  if (isCarousel) {
+    const buckets = new Map<string, T[]>();
+    for (const c of candidates) {
+      const k = sizeKey(c);
+      const b = buckets.get(k);
+      if (b) b.push(c);
+      else buckets.set(k, [c]);
+    }
+    const queues = Array.from(buckets.values());
+    const out: T[] = [];
+    for (let more = true; more; ) {
+      more = false;
+      for (const q of queues) {
+        const next = q.shift();
+        if (next) {
+          out.push(next);
+          more = true;
+        }
+      }
+    }
+    ordered = out;
+  }
+
+  const sendable = ordered.filter((c) => !!c.url).length;
+  const imagesSent = Math.min(sendable, maxImages);
+  const inventory: CreativeInventory = {
+    isCarousel,
+    cardCount,
+    imageCount: candidates.length,
+    sizes: Array.from(sizeCounts.entries()).map(([size, count]) => ({ size, count })),
+    imagesSentForVisualQa: imagesSent,
+    truncated: imagesSent < candidates.length,
+  };
+  return { ordered, inventory };
+}
 
 /**
  * Fetches all ads under a campaign ID from the Meta Graph API, following
@@ -970,8 +1048,25 @@ export async function fetchAdContent(
       `live_hashes=${liveImageHashes.size} rules_filter_active=${rulesFilterActive}`
   );
 
+  // Plan which live images to send and record the authoritative inventory.
+  // Carousels legitimately carry many assets (cards × per-placement sizes); the
+  // Drive side caps carousels at 10, so the live cap MUST match or exceed it. A
+  // lower live cap silently drops live cards and makes the model report them
+  // "missing" — the asymmetric-cap false positive. Single-image ads keep the
+  // small cap (their pool is one creative plus size/stale variants). planQaImages
+  // also round-robins the carousel pool across sizes so any future truncation
+  // degrades gracefully instead of dropping one whole size.
+  const MAX_QA_IMAGES = isCarousel ? 12 : 6;
+  const { ordered: plannedCandidates, inventory } = planQaImages(
+    chosenImageCandidates,
+    isCarousel,
+    cardDimensions.length,
+    MAX_QA_IMAGES
+  );
+  chosenImageCandidates = plannedCandidates;
+  formatInfo.creativeInventory = inventory;
+
   // Build the final URL list from the chosen pool images, then video thumbnails.
-  const MAX_QA_IMAGES = 6;
   const seenUrls = new Set<string>();
   const creativeImageUrls: string[] = [];
   function addUrl(u: string | undefined | null) {
@@ -1042,7 +1137,9 @@ export async function fetchAdContent(
   dbg(
     `[meta-api][img] ad=${adId} name="${data.name ?? ""}" carousel=${isCarousel} ` +
       `optimization_type=${optType} pool=${feedImageCandidates.length} [${poolSizes}] ` +
-      `published_hash=${publishedHash ? "yes" : "no"} live_source=${liveSource} → chosen=${creativeImageUrls.length}`
+      `published_hash=${publishedHash ? "yes" : "no"} live_source=${liveSource} ` +
+      `cap=${MAX_QA_IMAGES} → chosen=${creativeImageUrls.length}` +
+      `${formatInfo.creativeInventory?.truncated ? " TRUNCATED" : ""}`
   );
 
   // Per-ad manual-check list. Confirmed enhancement toggles MISSING from
