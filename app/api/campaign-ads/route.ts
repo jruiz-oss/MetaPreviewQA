@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { fetchCampaignAdsList, fetchCampaignRules } from "@/lib/meta-api";
+import { isAuthedRequest } from "@/lib/auth";
 
 export async function POST(request: Request) {
+  if (!isAuthedRequest(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   const { campaignId, sinceDate } = (await request.json()) as {
     campaignId: string;
     sinceDate?: string;

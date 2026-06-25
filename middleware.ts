@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { isValidAuthToken } from "@/lib/auth";
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -9,14 +10,9 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  const expectedToken = process.env.AUTH_TOKEN;
+  // Fail closed (handled inside isValidAuthToken) + constant-time comparison.
   const authCookie = request.cookies.get("qa_auth");
-  // Fail closed: if AUTH_TOKEN is unset, no cookie can ever match (prevents the
-  // `undefined === undefined` case that would otherwise authenticate everyone).
-  const isAuthed =
-    !!expectedToken &&
-    !!authCookie?.value &&
-    authCookie.value === expectedToken;
+  const isAuthed = isValidAuthToken(authCookie?.value);
 
   if (!isAuthed) {
     return NextResponse.redirect(new URL("/", request.url));

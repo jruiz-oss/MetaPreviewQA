@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 import { getGoogleAuth } from "@/lib/google-auth";
+import { isAuthedRequest } from "@/lib/auth";
 import mammoth from "mammoth";
 
 // Diagnostic logging is gated behind QA_DEBUG so production logs stay quiet.
@@ -428,6 +429,9 @@ async function readDriveFolder(
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function POST(request: Request) {
+  if (!isAuthedRequest(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   const { url } = await request.json();
 
   if (!url) {

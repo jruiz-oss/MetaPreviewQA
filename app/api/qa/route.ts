@@ -5,6 +5,7 @@ import { google } from "googleapis";
 import sharp from "sharp";
 import { getGoogleAuth } from "@/lib/google-auth";
 import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, MANUAL_CHECK_ITEMS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
+import { isAuthedRequest } from "@/lib/auth";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
 export const maxDuration = 300;
@@ -564,12 +565,46 @@ async function prepareImageForClaude(raw: Buffer): Promise<PreparedImage[]> {
   }
 }
 
+// SSRF guard: only allow https image downloads from known creative/CDN hosts.
+// These URLs come from external API responses (Meta Graph, Google Drive), so we
+// must not blindly fetch them — a manipulated response could point at internal
+// addresses (e.g. cloud metadata 169.254.169.254) or other private services.
+const ALLOWED_IMAGE_HOST_SUFFIXES = [
+  ".fbcdn.net",
+  ".facebook.com",
+  "graph.facebook.com",
+  ".cdninstagram.com",
+  ".googleusercontent.com",
+  ".ggpht.com",
+];
+
+function isSafeImageUrl(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:") return false;
+  const host = u.hostname.toLowerCase();
+  // Reject literal IP hosts outright (blocks private ranges + metadata IPs).
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(":")) return false;
+  if (host === "localhost") return false;
+  return ALLOWED_IMAGE_HOST_SUFFIXES.some(
+    (suffix) => host === suffix.replace(/^\./, "") || host.endsWith(suffix)
+  );
+}
+
 // Download a URL-based image server-side, resize, and return as base64.
 // `context` (optional) is a human-readable placement/date note attached to this
 // specific live image so the QA prompt can label it; null when the flag is off.
 async function downloadUrlImage(url: string, context?: string | null): Promise<FetchedImage[]> {
   try {
-    const res = await fetch(url, { cache: "no-store" });
+    if (!isSafeImageUrl(url)) {
+      dbg(`[qa] SKIP live image — host not in allowlist or unsafe URL: ${url}`);
+      return [];
+    }
+    const res = await fetch(url, { cache: "no-store", redirect: "error" });
     if (!res.ok) {
       dbg(`[qa] SKIP live Meta image — HTTP ${res.status} for ${url}`);
       return [];
@@ -672,6 +707,9 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
 }
 
 export async function POST(request: Request) {
+  if (!isAuthedRequest(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   const { wo, units, labeledDocs, destinationUrl, driveImages, ignoreCopyDoc, instructions } = (await request.json()) as {
     wo: string;
     units: AdUnit[];

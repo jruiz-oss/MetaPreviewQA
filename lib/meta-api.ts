@@ -283,7 +283,12 @@ export async function resolveAdId(input: string): Promise<string | null> {
       url.searchParams.get("ad_id") ||
       url.searchParams.get("creative_id") ||
       url.searchParams.get("selected_ad_ids");
-    if (fromParams) return fromParams.split(",")[0].trim();
+    if (fromParams) {
+      const candidate = fromParams.split(",")[0].trim();
+      // Meta IDs are numeric. Reject anything else so it can never be
+      // concatenated into a Graph API URL path/query.
+      return /^\d{6,}$/.test(candidate) ? candidate : null;
+    }
 
     return null;
   } catch {
