@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { google } from "googleapis";
+import { google, docs_v1 } from "googleapis";
 import { getGoogleAuth } from "@/lib/google-auth";
 import { classifyFetchError } from "@/lib/error-classify";
 import { isAuthedRequest } from "@/lib/auth";
@@ -31,35 +31,55 @@ function extractFileId(url: string): string | null {
 
 // ─── Readers ──────────────────────────────────────────────────────────────────
 
-async function readGoogleDoc(docId: string, auth: Awaited<ReturnType<typeof getGoogleAuth>>): Promise<string> {
-  const docs = google.docs({ version: "v1", auth });
-  const res = await docs.documents.get({ documentId: docId });
-  const doc = res.data;
+// A text run is treated as "deleted" when it's struck through. In our copy /
+// work-order docs, strikethrough marks wording that was removed in revision and
+// the replacement is typically highlighted right after it (e.g. CTA "See You
+// ~~at the Bar~~ There"). If we keep the struck text, QA ends up comparing the
+// live ad against BOTH the old and the new wording, so a legitimately changed
+// CTA / offer can read as a false match (or get flagged against the wrong
+// version). Dropping struck runs leaves only the surviving, current copy.
+//
+// Scope note (intentionally conservative): we ONLY drop manual strikethrough.
+// We do NOT inject any marker for highlighted ("new") text — the copy check
+// matches the live ad against this text more or less verbatim, and an inline
+// tag like "[new]" would corrupt that match. Once the struck text is gone, the
+// highlighted text is simply what remains, which is exactly what we want.
+// Suggesting-mode tracked changes (suggestedDeletionIds) are a different data
+// path and are NOT handled here.
+function runIsDeleted(el: docs_v1.Schema$ParagraphElement): boolean {
+  return el.textRun?.textStyle?.strikethrough === true;
+}
 
-  // Walk the body content and extract plain text
-  const text: string[] = [];
-  for (const block of doc.body?.content ?? []) {
-    if (block.paragraph) {
-      for (const el of block.paragraph.elements ?? []) {
-        if (el.textRun?.content) {
-          text.push(el.textRun.content);
-        }
+// Walk a Google Docs body and extract plain text, skipping struck-through runs.
+function extractDocText(content: docs_v1.Schema$StructuralElement[] | undefined): string {
+  const out: string[] = [];
+  const pushParagraph = (para: docs_v1.Schema$Paragraph | null | undefined) => {
+    for (const el of para?.elements ?? []) {
+      if (el.textRun?.content && !runIsDeleted(el)) {
+        out.push(el.textRun.content);
       }
+    }
+  };
+  for (const block of content ?? []) {
+    if (block.paragraph) {
+      pushParagraph(block.paragraph);
     } else if (block.table) {
       for (const row of block.table.tableRows ?? []) {
         for (const cell of row.tableCells ?? []) {
           for (const cellBlock of cell.content ?? []) {
-            for (const el of cellBlock.paragraph?.elements ?? []) {
-              if (el.textRun?.content) {
-                text.push(el.textRun.content);
-              }
-            }
+            pushParagraph(cellBlock.paragraph);
           }
         }
       }
     }
   }
-  return text.join("").trim();
+  return out.join("").trim();
+}
+
+async function readGoogleDoc(docId: string, auth: Awaited<ReturnType<typeof getGoogleAuth>>): Promise<string> {
+  const docs = google.docs({ version: "v1", auth });
+  const res = await docs.documents.get({ documentId: docId });
+  return extractDocText(res.data.body?.content);
 }
 
 const WORD_MIME_TYPES = new Set([
@@ -256,27 +276,9 @@ async function readDriveFolder(
       let content = "";
 
       if (file.mimeType === "application/vnd.google-apps.document") {
-        // Native Google Doc
+        // Native Google Doc — same strikethrough-aware extraction as readGoogleDoc
         const docRes = await docs.documents.get({ documentId: file.id });
-        const text: string[] = [];
-        for (const block of docRes.data.body?.content ?? []) {
-          if (block.paragraph) {
-            for (const el of block.paragraph.elements ?? []) {
-              if (el.textRun?.content) text.push(el.textRun.content);
-            }
-          } else if (block.table) {
-            for (const row of block.table.tableRows ?? []) {
-              for (const cell of row.tableCells ?? []) {
-                for (const cellBlock of cell.content ?? []) {
-                  for (const el of cellBlock.paragraph?.elements ?? []) {
-                    if (el.textRun?.content) text.push(el.textRun.content);
-                  }
-                }
-              }
-            }
-          }
-        }
-        content = text.join("").trim();
+        content = extractDocText(docRes.data.body?.content);
 
       } else if (WORD_MIME_TYPES.has(file.mimeType)) {
         // Word document — download binary and extract text with mammoth

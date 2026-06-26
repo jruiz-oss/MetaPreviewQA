@@ -164,8 +164,18 @@ type AdUnit = {
 // Tokenize a name (filename or ad unit name) into lowercase alphanumeric
 // tokens. Keeps short-but-meaningful tokens like "v1", "v2", "1x1", "9x16"
 // (length ≥ 2) which are exactly the version/format discriminators we need.
+//
+// Pre-step: split camelCase boundaries (lower→Upper) before lowercasing, so a
+// glued filename token like "LuckyEmber" becomes ["lucky","ember"] and matches
+// an ad unit named "Lucky Ember". Without this, "luckyember" matches neither
+// "lucky" nor "ember", so the unit gets zero signal from its own approved files
+// and the ranker falls back to generic tokens (mis-routing the assets to
+// another unit). This is purely additive: names that already contain a space or
+// separator (e.g. "Oak Fork", "Caesars") are unaffected and tokenize exactly as
+// before.
 function tokenize(s: string): string[] {
   return s
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((t) => t.length >= 2);
