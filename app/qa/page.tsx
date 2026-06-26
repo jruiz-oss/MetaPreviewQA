@@ -409,7 +409,7 @@ export default function QAPage() {
   const [wo, setWo] = useState("");
   const [ignoreCopyDoc, setIgnoreCopyDoc] = useState(false);
   const [instructions, setInstructions] = useState("");
-  const [detectedDocs, setDetectedDocs] = useState<{ url: string; woLabel: string; content: string | null; images: DriveImage[]; error: string | null; loading: boolean }[]>([]);
+  const [detectedDocs, setDetectedDocs] = useState<{ url: string; woLabel: string; content: string | null; images: DriveImage[]; error: string | null; errorKind: string | null; loading: boolean }[]>([]);
   const [woDestinationUrl, setWoDestinationUrl] = useState<string | null>(null);
   const [units, setUnits] = useState<AdUnit[]>([]);
   const [loading, setLoading] = useState(false);
@@ -578,14 +578,14 @@ export default function QAPage() {
       const toAdd = labeled.filter((l) => !existingUrls.has(l.url));
       return [
         ...toKeep,
-        ...toAdd.map((l) => ({ url: l.url, woLabel: l.woLabel, content: null, images: [], error: null, loading: false })),
+        ...toAdd.map((l) => ({ url: l.url, woLabel: l.woLabel, content: null, images: [], error: null, errorKind: null, loading: false })),
       ];
     });
   }
 
   async function loadDoc(url: string) {
     setDetectedDocs((prev) =>
-      prev.map((d) => (d.url === url ? { ...d, loading: true, error: null } : d))
+      prev.map((d) => (d.url === url ? { ...d, loading: true, error: null, errorKind: null } : d))
     );
     try {
       const res = await fetch("/api/fetch-doc", {
@@ -594,7 +594,16 @@ export default function QAPage() {
         body: JSON.stringify({ url }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(asErrorMessage(data.error, `Failed to fetch doc (HTTP ${res.status})`));
+      if (!res.ok) {
+        const msg = asErrorMessage(data.error, `Failed to fetch doc (HTTP ${res.status})`);
+        const kind = typeof data.kind === "string" ? data.kind : "unknown";
+        setDetectedDocs((prev) =>
+          prev.map((d) =>
+            d.url === url ? { ...d, loading: false, error: msg, errorKind: kind } : d
+          )
+        );
+        return;
+      }
       setDetectedDocs((prev) =>
         prev.map((d) =>
           d.url === url ? { ...d, loading: false, content: data.content, images: data.images ?? [] } : d
@@ -604,7 +613,7 @@ export default function QAPage() {
       setDetectedDocs((prev) =>
         prev.map((d) =>
           d.url === url
-            ? { ...d, loading: false, error: err instanceof Error ? err.message : "Failed" }
+            ? { ...d, loading: false, error: err instanceof Error ? err.message : "Failed", errorKind: "network" }
             : d
         )
       );
@@ -1275,12 +1284,22 @@ export default function QAPage() {
                         <span className="shrink-0 inline-block w-4 h-4 border-2 border-gray-300 border-t-gray-700 rounded-full animate-spin mt-1" />
                       )}
                       {doc.error && !doc.loading && (
-                        <button
-                          onClick={() => loadDoc(doc.url)}
-                          className="shrink-0 px-3 py-1.5 rounded-lg bg-gray-900 text-white text-xs font-medium hover:bg-gray-800 transition-colors"
-                        >
-                          Retry
-                        </button>
+                        (doc.errorKind === "auth" || doc.errorKind === "config") ? (
+                          <a
+                            href="/api/google/connect"
+                            className="shrink-0 px-3 py-1.5 rounded-lg bg-gray-900 text-white text-xs font-medium hover:bg-gray-800 transition-colors"
+                            title="Re-authorize Google access, then retry"
+                          >
+                            Reconnect Google
+                          </a>
+                        ) : (
+                          <button
+                            onClick={() => loadDoc(doc.url)}
+                            className="shrink-0 px-3 py-1.5 rounded-lg bg-gray-900 text-white text-xs font-medium hover:bg-gray-800 transition-colors"
+                          >
+                            Retry
+                          </button>
+                        )
                       )}
                     </div>
                   ))}

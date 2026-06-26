@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { google } from "googleapis";
 import { getGoogleAuth } from "@/lib/google-auth";
+import { classifyFetchError } from "@/lib/error-classify";
 import { isAuthedRequest } from "@/lib/auth";
 import mammoth from "mammoth";
 
@@ -485,12 +486,21 @@ export async function POST(request: Request) {
     );
   } catch (err: unknown) {
     console.error("fetch-doc error:", err);
-    const message =
-      err instanceof Error ? err.message : "Failed to read document";
-    const isAuth = message.includes("credentials") || message.includes("Missing Google");
+    const { kind, message, raw } = classifyFetchError(err);
+    // Auth/config -> needs user action (reconnect); permission/notfound -> client
+    // mistake (4xx); ratelimit/network/unknown -> upstream/transient (5xx).
+    const statusByKind: Record<string, number> = {
+      auth: 401,
+      config: 401,
+      permission: 403,
+      notfound: 404,
+      ratelimit: 429,
+      network: 504,
+      unknown: 502,
+    };
     return NextResponse.json(
-      { error: isAuth ? message : `Could not read this link: ${message}` },
-      { status: isAuth ? 500 : 502 }
+      { error: message, kind, raw },
+      { status: statusByKind[kind] ?? 502 }
     );
   }
 }
