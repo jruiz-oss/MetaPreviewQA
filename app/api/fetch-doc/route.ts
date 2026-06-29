@@ -54,11 +54,21 @@ function runIsDeleted(el: docs_v1.Schema$ParagraphElement): boolean {
 function extractDocText(content: docs_v1.Schema$StructuralElement[] | undefined): string {
   const out: string[] = [];
   const pushParagraph = (para: docs_v1.Schema$Paragraph | null | undefined) => {
+    // FIX #5: collect the paragraph's surviving runs, then guarantee a trailing
+    // newline. Google Docs usually ends a paragraph's last run with "\n", but
+    // table cells (and some structural elements) do NOT, so adjacent cells used
+    // to glue together ("Price" + "Free" → "PriceFree") and produce phantom
+    // copy-mismatch findings. Terminating every non-empty paragraph keeps cell
+    // and paragraph boundaries intact. Trailing whitespace is harmless — the QA
+    // prompt treats whitespace/line-break differences as non-findings.
+    let text = "";
     for (const el of para?.elements ?? []) {
       if (el.textRun?.content && !runIsDeleted(el)) {
-        out.push(el.textRun.content);
+        text += el.textRun.content;
       }
     }
+    if (text.length === 0) return;
+    out.push(text.endsWith("\n") ? text : `${text}\n`);
   };
   for (const block of content ?? []) {
     if (block.paragraph) {
@@ -137,7 +147,13 @@ async function readDriveFolder(
   images?: DriveImageRef[],
   pathPrefix = "",
   insideApprovalFolder = false,  // true once we've entered an "approval"-named folder
-  scan: ScanState = { foldersVisited: 0, visitedIds: new Set() }
+  scan: ScanState = { foldersVisited: 0, visitedIds: new Set() },
+  // FIX #3: when true, the approval-folder gate is bypassed — every non-Creative,
+  // non-OLD folder's images are queued. The route only sets this on a SECOND pass,
+  // after the strict (approval-gated) pass queued zero images, so real creative in
+  // a folder that simply isn't named "approval" (e.g. "Final Exports/" sitting
+  // beside an empty "For Approval/") is no longer silently skipped.
+  forceApprove = false
 ): Promise<string> {
   const drive = google.drive({ version: "v3", auth });
   const docs = google.docs({ version: "v1", auth });
@@ -179,7 +195,7 @@ async function readDriveFolder(
   // directly into the approved assets (e.g. "Carousel/" or "Static/"), there
   // is no "approval"-named ancestor — auto-approve at that point.
   const selfIsApproval = (selfName ?? "").toLowerCase().includes("approval");
-  let effectiveInsideApproval = insideApprovalFolder || selfIsApproval;
+  let effectiveInsideApproval = insideApprovalFolder || selfIsApproval || forceApprove;
   if (selfIsApproval && !insideApprovalFolder) {
     dbg(`[fetch-doc] Folder "${selfName}" is itself an approval folder — images inside will be queued.`);
   }
@@ -419,7 +435,7 @@ async function readDriveFolder(
       dbg(`[fetch-doc] Entering approval subfolder "${folder.name}" — images WILL be queued from here.`);
     }
     try {
-      const subContent = await readDriveFolder(folder.id, auth, depth + 1, folder.name, passImages, `${pathPrefix}${folder.name}/`, nextInsideApproval, scan);
+      const subContent = await readDriveFolder(folder.id, auth, depth + 1, folder.name, passImages, `${pathPrefix}${folder.name}/`, nextInsideApproval, scan, forceApprove);
       sections.push(`[Sub-folder: ${folder.name}]\n${subContent}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -462,7 +478,18 @@ export async function POST(request: Request) {
     const folderId = extractFolderId(url);
     if (folderId) {
       const images: DriveImageRef[] = [];
-      const content = await readDriveFolder(folderId, auth, 0, undefined, images);
+      let content = await readDriveFolder(folderId, auth, 0, undefined, images);
+      // FIX #3: the strict pass only queues images from "approval"-named folders.
+      // If it found NONE, the creative may simply live in a folder that isn't
+      // named "approval" (e.g. "Final Exports/" beside an empty "For Approval/").
+      // Re-scan once with the approval gate bypassed so that creative is queued
+      // rather than reported as "no creative in Drive". Creative/OLD folders are
+      // still skipped on this pass. A fresh scan state avoids the cycle guard
+      // short-circuiting the repeat visit.
+      if (images.length === 0) {
+        dbg(`[fetch-doc] Strict approval pass queued 0 images — retrying with approval gate bypassed.`);
+        content = await readDriveFolder(folderId, auth, 0, undefined, images, "", false, { foldersVisited: 0, visitedIds: new Set() }, true);
+      }
       return NextResponse.json({ content: content.slice(0, 30000), type: "folder", images });
     }
 

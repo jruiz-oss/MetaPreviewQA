@@ -524,6 +524,7 @@ type CreativeFields = {
         call_to_action?: { type?: string; value?: { link?: string } };
         image_hash?: string; // the configured card image — ground truth for a carousel card
         picture?: string;    // viewable URL for the card, when image_hash isn't resolvable
+        video_id?: string;   // present when the card is a VIDEO (image_hash is then just the cover frame)
       }>;
     };
     video_data?: {
@@ -908,7 +909,15 @@ export async function fetchAdContent(
 
   // Per-card dims for the configured carousel cards (order preserved, no dedup)
   // so the QA route can flag a single odd-sized card among uniform siblings.
-  const cardDimensions: ImageDimensions[] = cardHashes
+  // FIX #4: exclude VIDEO cards. A video card's image_hash is only its cover
+  // frame, which legitimately ships at a different resolution than sibling
+  // static cards — including it made the carousel-uniformity check hard-FAIL a
+  // perfectly valid mixed image+video carousel. Uniformity is judged across
+  // IMAGE cards only (mirrors the imageDimensions-vs-videoDims split above).
+  const imageCardHashes = (data.creative?.object_story_spec?.link_data?.child_attachments ?? [])
+    .filter((c) => !c.video_id && c.image_hash)
+    .map((c) => c.image_hash as string);
+  const cardDimensions: ImageDimensions[] = imageCardHashes
     .map((h) => dimMap.get(h))
     .filter((d): d is ImageMeta => !!d?.width && !!d?.height)
     .map(({ width, height }) => ({ width, height }));

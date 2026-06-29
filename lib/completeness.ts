@@ -34,10 +34,19 @@ export function computeCompletenessLine(
   const approvedSizeSet = parseSizeTokens(driveImages.map((d) => d.name));
   let coverage = "";
   if (approvedSizeSet.size > 0) {
-    const missingLive = Array.from(approvedSizeSet).filter((s) => !liveSizeSet.has(s));
-    coverage = missingLive.length
-      ? ` GENUINE GAP — size(s) in approved Drive but NOT served live: ${missingLive.join(", ")}; flag this.`
-      : ` All approved Drive sizes are present in the live ad — do NOT report any size/card as missing.`;
+    if (liveSizeSet.size === 0) {
+      // FIX #1: the live ad served image assets but Meta returned no readable
+      // width/height for ANY of them (every entry is "unknown"), so we cannot
+      // compute coverage. Asserting a GENUINE GAP here is a false positive — the
+      // sizes ARE being served, we just couldn't read them. Degrade to
+      // couldn't-verify rather than flagging every approved size as missing.
+      coverage = ` Live asset dimensions could not be read from the Meta API, so size coverage could NOT be computed — do NOT report any size/card as missing on this basis.`;
+    } else {
+      const missingLive = Array.from(approvedSizeSet).filter((s) => !liveSizeSet.has(s));
+      coverage = missingLive.length
+        ? ` GENUINE GAP — size(s) in approved Drive but NOT served live: ${missingLive.join(", ")}; flag this.`
+        : ` All approved Drive sizes are present in the live ad — do NOT report any size/card as missing.`;
+    }
   }
 
   const sampleNote = inv.truncated

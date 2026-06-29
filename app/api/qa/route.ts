@@ -1027,7 +1027,30 @@ export async function POST(request: Request) {
       .filter((x) => x.score > 0) // require at least one shared token
       .sort((a, b) => b.score - a.score);
 
-    if (!scored.length) return { refs: [], crossFormat: false }; // no match → no Drive comparison for this unit
+    if (!scored.length) {
+      // FIX #2: no filename token overlapped the unit name/copy. This is the #1
+      // cause of false "no approved creative in Drive" findings — generic unit
+      // names ("May Static V1") vs concept-named files route ZERO images even
+      // though the creative exists. Rather than send nothing, fall back to the
+      // (format-gated, ad-set-scoped) eligible pool when it is small enough to
+      // attach safely. The model still matches by filename/concept/size; a tiny
+      // pool of plausibly-related assets beats an empty comparison. Only skip the
+      // fallback when the pool is too large to attach without risking timeouts.
+      const fallbackCap = carouselUnit
+        ? Math.max(MAX_DRIVE_IMAGES_PER_UNIT, 10)
+        : MAX_DRIVE_IMAGES_PER_UNIT;
+      if (eligible.length > 0 && eligible.length <= fallbackCap) {
+        const refs = eligible.map((x) => x.ref);
+        const crossFormat = carouselUnit
+          ? refs.some((r) => !refIsCarousel(r.name))
+          : refs.some((r) => refIsCarousel(r.name));
+        dbg(
+          `[qa] ZERO-TOKEN FALLBACK: unit "${unitName}" had no filename token match — attaching all ${refs.length} eligible Drive asset(s) rather than skipping the comparison.`
+        );
+        return { refs, crossFormat };
+      }
+      return { refs: [], crossFormat: false }; // pool too large to attach blindly
+    }
 
     // Keep only images close to the best score (so a unit doesn't pull in
     // weakly-related extras from the wrong version), capped.
