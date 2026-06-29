@@ -781,8 +781,6 @@ export async function POST(request: Request) {
       const bits: string[] = [];
       if (c.videoThumbnail) bits.push("VIDEO THUMBNAIL: a single auto-selected frame of a video creative — NOT the full video");
       if (c.placement) bits.push(`serves placement(s): ${c.placement}`);
-      if (c.assetDate) bits.push(`asset uploaded: ${c.assetDate}`);
-      if (c.staleNote) bits.push(`⚠️ ${c.staleNote}`);
       if (bits.length) contextByUrl.set(c.url, bits.join(" — "));
     }
 
