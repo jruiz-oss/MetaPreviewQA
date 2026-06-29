@@ -657,9 +657,9 @@ async function fetchBatchImageDimensions(
  * Fetches video dimensions from the Video object using a video ID.
  * Uses the "format" field which returns an array of renditions — we pick the largest (original).
  */
-async function fetchVideoDimensions(videoId: string, accessToken: string): Promise<ImageDimensions | null> {
+async function fetchVideoDimensions(videoId: string, accessToken: string): Promise<(ImageDimensions & { thumbnailUrl?: string }) | null> {
   try {
-    const url = `${GRAPH_API}/${videoId}?fields=format&access_token=${accessToken}`;
+    const url = `${GRAPH_API}/${videoId}?fields=format,picture&access_token=${accessToken}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
     const data = await res.json();
     if (data.error || !data.format?.length) return null;
@@ -672,7 +672,7 @@ async function fetchVideoDimensions(videoId: string, accessToken: string): Promi
         (f.width ?? 0) * (f.height ?? 0) > (best.width ?? 0) * (best.height ?? 0) ? f : best
       , formats[0]);
     if (!original?.width || !original?.height) return null;
-    return { width: original.width, height: original.height };
+    return { width: original.width, height: original.height, thumbnailUrl: typeof data.picture === "string" ? data.picture : undefined };
   } catch {
     return null;
   }
@@ -877,7 +877,7 @@ export async function fetchAdContent(
       : Promise.resolve(new Map<string, ImageMeta>()),
     allVideoIds.length > 0
       ? Promise.all(allVideoIds.map((id) => fetchVideoDimensions(id, accessToken)))
-      : Promise.resolve([] as (ImageDimensions | null)[]),
+      : Promise.resolve([] as ((ImageDimensions & { thumbnailUrl?: string }) | null)[]),
     fetchMusicStatus(adId, accessToken),
   ]);
 
@@ -1012,23 +1012,17 @@ export async function fetchAdContent(
     }
     chosenImageCandidates = [...Array.from(bySize.values()), ...unknownDim];
 
-    // Additionally drop assets that are stale relative to the newest dated asset
-    // in the pool. The WxH dedup above keeps a unique-size asset even if it's the
-    // only one at that size — but a Reel (e.g. 1152×2048) from March is still
-    // stale creative even if nothing newer has that exact size. Same 25-day
-    // threshold used for titles and staleNote.
-    {
-      const newestCandMs = feedImageCandidates.reduce(
-        (max, c) => (c.dateMs != null && c.dateMs > max ? c.dateMs : max),
-        -Infinity
-      );
-      if (Number.isFinite(newestCandMs)) {
-        const staleThresholdMs = STALE_ASSET_AGE_GAP_DAYS * 24 * 60 * 60 * 1000;
-        chosenImageCandidates = chosenImageCandidates.filter(
-          (c) => c.dateMs == null || newestCandMs - c.dateMs <= staleThresholdMs
-        );
-      }
-    }
+    // NOTE: We intentionally do NOT apply a cross-size stale-date filter here.
+    // A previous version dropped any unique-size asset dated 25+ days behind the
+    // newest asset in the pool, intending to catch old-promo Reels left in the
+    // asset_feed_spec. In practice it caused false GENUINE GAP reports: a multi-
+    // format ad (e.g. 1080×1080 for Feed from June + 1080×1920 for Stories from
+    // July) would have the older size silently dropped because June is ~30 days
+    // behind July — over the threshold — even though both sizes are actively
+    // serving. After WxH dedup, each size bucket already has exactly one
+    // representative (the newest same-size asset), so there's no same-size
+    // duplicate to remove. Stale unique-size leftovers are still surfaced via
+    // the per-image staleNote in creativeImageContext so the model can flag them.
   }
 
   // --- Select the live creative images ------------------------------------
@@ -1080,6 +1074,20 @@ export async function fetchAdContent(
   for (const vid of data.creative?.asset_feed_spec?.videos ?? []) {
     if (vid.thumbnail_url) videoThumbUrls.add(vid.thumbnail_url);
     addUrl(vid.thumbnail_url);
+  }
+  // Single-video ads using object_story_spec.video_data don't have a thumbnail_url
+  // in the creative JSON — they only have a video_id. The fetchVideoDimensions call
+  // above now also fetches `picture` (Meta's auto-selected thumbnail frame) so we
+  // can add it here. Without this, these ads produce zero creativeImageUrls and the
+  // QA model incorrectly reports "no live image returned by the Meta API."
+  if (singleVideoId) {
+    const vidIdx = allVideoIds.indexOf(singleVideoId);
+    const vidMeta = vidIdx >= 0 ? videoDims[vidIdx] : null;
+    const thumb = vidMeta?.thumbnailUrl;
+    if (thumb && !seenUrls.has(thumb)) {
+      videoThumbUrls.add(thumb);
+      addUrl(thumb);
+    }
   }
 
   // --- Per-image placement + date context ---------------------------------
