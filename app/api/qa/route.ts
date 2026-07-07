@@ -6,12 +6,28 @@ import sharp from "sharp";
 import { getGoogleAuth } from "@/lib/google-auth";
 import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, MANUAL_CHECK_ITEMS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
 import { computeCompletenessLine } from "@/lib/completeness";
+import { computeUrlComparisonLine, computeUrlMatchStatus } from "@/lib/url-compare";
 import { isAuthedRequest } from "@/lib/auth";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
 export const maxDuration = 300;
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// QA model — env-overridable so switching models is a config change, not a
+// deploy. Default is Sonnet 5 (released June 2026): stronger vision/reasoning
+// than Sonnet 4.6 at equal-or-lower cost ($2/$10 intro until Aug 2026, then
+// $3/$15 — same as 4.6). Set QA_MODEL=claude-sonnet-4-6 to roll back, or
+// QA_MODEL=claude-opus-4-8 to escalate.
+const QA_MODEL = process.env.QA_MODEL || "claude-sonnet-5";
+// Extended-thinking budget. 1500 was tight for the multi-image work each call
+// does (extract all legible text from up to ~18 images, then diff). 3000
+// costs ~$0.02 more per unit and measurably reduces missed/hallucinated
+// findings. Env-overridable; must stay < max_tokens (16000).
+const QA_THINKING_BUDGET = Math.min(
+  Number(process.env.QA_THINKING_BUDGET) || 3000,
+  12000
+);
 
 // Diagnostic logging is gated behind QA_DEBUG so production logs stay quiet and
 // never echo work-order copy or the model's chain-of-thought. Set QA_DEBUG=1
@@ -189,108 +205,8 @@ function tokenize(s: string): string[] {
 
 type ComputedCheck = { status: "pass" | "fail" | "warning" | "unknown"; note: string };
 
-// Query params that are tracking noise — never a URL mismatch finding.
-const TRACKING_PARAM_RE = /^(utm_|fbclid$|gclid$|gbraid$|wbraid$|msclkid$|ttclid$|mc_cid$|mc_eid$|igshid$|ref$)/i;
-
-function normalizeUrlForCompare(raw: string): { host: string; path: string; params: Map<string, string> } | null {
-  try {
-    const u = new URL(raw.trim());
-    const host = u.hostname.toLowerCase().replace(/^www\./, "");
-    const path = (u.pathname.replace(/\/+$/, "") || "/").toLowerCase();
-    const params = new Map<string, string>();
-    u.searchParams.forEach((v, k) => {
-      if (!TRACKING_PARAM_RE.test(k)) params.set(k.toLowerCase(), v);
-    });
-    return { host, path, params };
-  } catch {
-    return null;
-  }
-}
-
-// True when the live URL points at the approved destination: same host (www
-// ignored) + same path (trailing slash/case ignored), and every meaningful
-// (non-tracking) query param on the approved URL is present on the live URL.
-// Extra non-tracking params on the live side are tolerated.
-function urlsMatch(approved: string, live: string): boolean {
-  const a = normalizeUrlForCompare(approved);
-  const l = normalizeUrlForCompare(live);
-  if (!a || !l) return false;
-  if (a.host !== l.host || a.path !== l.path) return false;
-  for (const [k, v] of Array.from(a.params.entries())) {
-    if (l.params.get(k) !== v) return false;
-  }
-  return true;
-}
-
-// Pull every URL out of the formatted Meta creative content (Destination URL,
-// Link URL, CTA URL, Landing URLs, carousel card urls all appear as plain text).
-// Line-based so each URL can be tagged as a carousel-card URL ("  Card N: …")
-// vs a primary destination — cards may legitimately deep-link to different
-// pages on the approved domain, which must not hard-FAIL the whole ad.
-function extractLiveUrls(content: string | null | undefined): { url: string; isCard: boolean }[] {
-  if (!content) return [];
-  const out: { url: string; isCard: boolean }[] = [];
-  const seen = new Set<string>();
-  for (const line of content.split("\n")) {
-    const isCard = /^\s*Card \d+:/.test(line);
-    for (const u of line.match(/https?:\/\/[^\s|,")\]]+/g) ?? []) {
-      if (!seen.has(u)) {
-        seen.add(u);
-        out.push({ url: u, isCard });
-      }
-    }
-  }
-  return out;
-}
-
-function computeUrlComparisonLine(approvedUrl: string | null | undefined, content: string | null | undefined): string {
-  // No approved URL in the WO → say so explicitly. Without this line the model
-  // would eyeball-match URLs itself — the exact failure mode the computed
-  // verdict exists to prevent.
-  if (!approvedUrl) {
-    return `\nURL comparison (computed): no approved destination URL was provided in the work order — do NOT judge URL matching; evaluate only the CTA.`;
-  }
-  const liveUrls = extractLiveUrls(content);
-  if (!liveUrls.length) {
-    return `\nURL comparison (computed): no destination URL found in the ad's creative fields — URL match could not be verified.`;
-  }
-  const mismatches = liveUrls.filter((u) => !urlsMatch(approvedUrl, u.url));
-  if (!mismatches.length) {
-    return `\nURL comparison (computed): all ${liveUrls.length} live URL(s) match the approved destination (host + path compared; tracking params ignored). URL matching = PASS; evaluate only the CTA.`;
-  }
-  // Split mismatches: a carousel-card URL on the approved HOST but a different
-  // path is a deep-link (often intentional) → warning. Anything else — a
-  // primary URL mismatch, or a card pointing at a different domain — is a FAIL.
-  const approvedHost = normalizeUrlForCompare(approvedUrl)?.host ?? null;
-  const sameHost = (u: string) =>
-    !!approvedHost && normalizeUrlForCompare(u)?.host === approvedHost;
-  const hardMismatches = mismatches.filter((m) => !m.isCard || !sameHost(m.url));
-  const cardDeepLinks = mismatches.filter((m) => m.isCard && sameHost(m.url));
-  if (hardMismatches.length) {
-    return `\nURL comparison (computed): MISMATCH — these live URL(s) do not point at the approved destination ${approvedUrl}: ${hardMismatches.map((m) => m.url).join(" , ")}. URL matching = FAIL.`;
-  }
-  return `\nURL comparison (computed): primary destination matches the approved URL, but ${cardDeepLinks.length} carousel card URL(s) deep-link to other pages on the approved domain: ${cardDeepLinks.map((m) => m.url).join(" , ")}. URL matching = WARNING (verify the card deep-links are intentional); do not mark this a FAIL on URL matching alone.`;
-}
-
-// Same verdict as computeUrlComparisonLine, but as a status so the result
-// assembly can make URL matching authoritative on the url_cta check (the model
-// only judges the CTA). "unknown" = nothing to compare, so don't penalize.
-function computeUrlMatchStatus(
-  approvedUrl: string | null | undefined,
-  content: string | null | undefined
-): "pass" | "fail" | "warning" | "unknown" {
-  if (!approvedUrl) return "unknown";
-  const liveUrls = extractLiveUrls(content);
-  if (!liveUrls.length) return "unknown";
-  const mismatches = liveUrls.filter((u) => !urlsMatch(approvedUrl, u.url));
-  if (!mismatches.length) return "pass";
-  const approvedHost = normalizeUrlForCompare(approvedUrl)?.host ?? null;
-  const sameHost = (u: string) =>
-    !!approvedHost && normalizeUrlForCompare(u)?.host === approvedHost;
-  const hardMismatches = mismatches.filter((m) => !m.isCard || !sameHost(m.url));
-  if (hardMismatches.length) return "fail";
-  return "warning"; // only carousel card deep-links differ
-}
+// URL matching lives in lib/url-compare.ts (FIX #13 + FIX #15: field-line-only
+// extraction, primary/secondary severity) so it is unit-testable.
 
 // format_size: name tokens are the primary intent signal, dimensions the
 // evidence, placements the tiebreaker — same rules the prompt used to describe,
@@ -781,6 +697,12 @@ export async function POST(request: Request) {
       const bits: string[] = [];
       if (c.videoThumbnail) bits.push("VIDEO THUMBNAIL: a single auto-selected frame of a video creative — NOT the full video");
       if (c.placement) bits.push(`serves placement(s): ${c.placement}`);
+      // Asset date + stale flag were computed in meta-api but never wired into
+      // the prompt — restoring them here is what lets the model report "the
+      // Story placement uses a much older asset" as an EXPLAINED finding
+      // instead of surfacing old creative as a phantom mismatch.
+      if (c.assetDate) bits.push(`asset created ${c.assetDate}`);
+      if (c.staleNote) bits.push(`STALE-ASSET FLAG: ${c.staleNote}`);
       if (bits.length) contextByUrl.set(c.url, bits.join(" — "));
     }
 
@@ -908,10 +830,15 @@ export async function POST(request: Request) {
   const totalRefs = allDriveRefs.length;
   const idf = (t: string) => Math.log((totalRefs + 1) / ((docFreq.get(t) ?? 0) + 1));
 
-  // Is this AD UNIT a carousel? Name is the primary signal ("Carousel" in the
-  // name); the Meta-fetched content is a backup (formatCreative emits a
-  // "Carousel cards (" block for carousel ads).
-  function unitIsCarousel(unit: { name?: string | null; content?: string | null }): boolean {
+  // Is this AD UNIT a carousel? The Meta-computed inventory is the strongest
+  // signal (asset-feed carousels have no child_attachments, so their content
+  // never mentions "Carousel cards" and their unit names are often generic —
+  // name/content alone misclassified them as statics, mis-gating the Drive
+  // matcher). Name and content remain as fallbacks when formatInfo is absent.
+  function unitIsCarousel(unit: { name?: string | null; content?: string | null; formatInfo?: FormatInfo | null }): boolean {
+    const fi = unit.formatInfo;
+    if (fi?.creativeInventory?.isCarousel) return true;
+    if (fi?.adFormats?.some((f) => f.toUpperCase().includes("CAROUSEL"))) return true;
     if ((unit.name ?? "").toLowerCase().includes("carousel")) return true;
     return (unit.content ?? "").toLowerCase().includes("carousel cards");
   }
@@ -1264,6 +1191,16 @@ export async function POST(request: Request) {
           source: { type: "base64", media_type: img.mediaType, data: img.data },
         });
       }
+    } else if (allDriveRefs.length > 0) {
+      // The WO's Drive folder DOES contain creative, but the matcher couldn't
+      // confidently route any of it to this unit (zero token overlap + pool too
+      // large to attach blindly). Without this line the model reports "no
+      // approved creative found in Drive" — the recurring false finding. State
+      // the truth: creative exists, comparison skipped, couldn't verify.
+      messageContent.push({
+        type: "text",
+        text: `\n\nAPPROVED CREATIVE FROM DRIVE: the work order's Drive folder contains ${allDriveRefs.length} creative file(s), but none could be automatically matched to this ad unit, so no approved images are attached. Do NOT report that approved creative is missing or doesn't exist in Drive — it exists but was not auto-matched. Mark creative_alignment as "warning" (couldn't verify against approved creative) unless the live creative itself shows a defect.`,
+      });
     }
 
     messageContent.push({ type: "text", text: `\n\nAD UNITS TO REVIEW:` });
@@ -1301,7 +1238,7 @@ export async function POST(request: Request) {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
         message = await client.messages.create({
-          model: "claude-sonnet-4-6",
+          model: QA_MODEL,
           max_tokens: 16000,
           // Extended thinking: give the model a private scratchpad to do the
           // multi-step work this QA demands (extract all legible text from each
@@ -1312,7 +1249,7 @@ export async function POST(request: Request) {
           // NOTE: the API requires temperature=1 (the default) whenever
           // thinking is enabled, so temperature is intentionally not set.
           // budget_tokens must be < max_tokens.
-          thinking: { type: "enabled", budget_tokens: 1500 },
+          thinking: { type: "enabled", budget_tokens: QA_THINKING_BUDGET },
           // Structured output: the model returns its report by calling this tool,
           // so the result arrives as a validated object rather than free-text
           // JSON we have to parse (and that used to crash on unescaped quotes).
@@ -1365,8 +1302,9 @@ export async function POST(request: Request) {
 
     // Token-usage log — added to monitor cost/latency after raising image
     // resolution to 1568px (bigger images = more input tokens per run).
-    // Sonnet 4.6 pricing per million tokens: $3 input, $15 output,
-    // $3.75 cache write, $0.30 cache read. Cost here is an estimate.
+    // Estimate uses Sonnet-tier pricing per million tokens ($3 in, $15 out,
+    // $3.75 cache write, $0.30 cache read). If QA_MODEL is set to Opus/other,
+    // the real cost differs — treat this as a relative gauge, not a bill.
     {
       const u = message.usage;
       const inTok = u.input_tokens ?? 0;
@@ -1497,7 +1435,12 @@ export async function POST(request: Request) {
       if (!hasLive && !hasDrive) {
         reason = "No creative images were available — visual creative could not be verified.";
       } else if (hasLive && !hasDrive) {
-        reason = "Approved Drive asset not available for comparison — could not fully verify.";
+        // Distinguish "no Drive creative was linked at all" from "Drive has
+        // creative but none matched this unit" — the second must never read as
+        // a missing-creative finding.
+        reason = allDriveRefs.length > 0
+          ? "Drive folder has creative but none auto-matched this unit — comparison skipped, could not verify (creative is NOT missing)."
+          : "No approved Drive creative was linked — could not fully verify.";
       } else if (hasDrive && !hasLive) {
         reason = "Live Meta image could not be retrieved — could not fully verify against the approved creative.";
       } else if (videoFrameInvolved) {
@@ -1752,7 +1695,7 @@ export async function POST(request: Request) {
           const tag =
             urlComputed === "fail"
               ? "Live destination URL does not match the approved URL (computed)."
-              : "Carousel card URL(s) deep-link off the approved page (computed) — verify intentional.";
+              : "Secondary URL(s) (carousel card / per-asset landing URL) deep-link off the approved page (computed) — verify intentional.";
           urlCheck.note = urlCheck.note ? `${urlCheck.note} ${tag}` : tag;
         }
       }

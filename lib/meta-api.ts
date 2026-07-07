@@ -891,7 +891,45 @@ export async function fetchAdContent(
     aiEnhancements = aiEnhancements ? [...aiEnhancements, musicEntry] : [musicEntry];
   }
 
-  // Deduplicate by WxH
+  // --- Identify live vs stale pool assets via asset_customization_rules ----
+  // (Computed BEFORE dimensions so stale assets can't feed the dimension
+  // checks either — see dimensionHashes below.) asset_customization_rules are
+  // Meta's own map of which image serves for which placement (by image label).
+  // An image present in images[] but referenced by NO rule is a stale leftover
+  // from an earlier edit. When rules exist AND images carry labels, only the
+  // rule-referenced images are "live".
+  const rawFeedImages = data.creative?.asset_feed_spec?.images ?? [];
+  const customizationRules = data.creative?.asset_feed_spec?.asset_customization_rules ?? [];
+  const liveLabels = new Set(
+    customizationRules.map((r) => r.image_label?.name).filter(Boolean) as string[]
+  );
+  const imgLabelNames = (img: { adlabels?: Array<{ name?: string }> }) =>
+    (img.adlabels ?? []).map((l) => l.name).filter(Boolean) as string[];
+  const anyImageLabeled = rawFeedImages.some((img) => imgLabelNames(img).length > 0);
+  const liveImageHashes = new Set<string>();
+  if (liveLabels.size > 0 && anyImageLabeled) {
+    for (const img of rawFeedImages) {
+      if (img.hash && imgLabelNames(img).some((n) => liveLabels.has(n))) liveImageHashes.add(img.hash);
+    }
+  }
+  // Only apply the filter when it confidently identifies ≥1 live image — never
+  // narrow to empty (that would drop the whole comparison).
+  const rulesFilterActive = liveImageHashes.size > 0;
+
+  // Deduplicate by WxH — over LIVE hashes only. creativeDimensions and
+  // imageDimensions feed the deterministic format/consistency checks, so a
+  // stale leftover from a previous promo (correctly excluded from visual QA by
+  // the rules filter above) must not trigger a false "multiple sizes share the
+  // same aspect ratio" warning or satisfy a format expectation it no longer
+  // serves. Card hashes and the published single-image hash are configured
+  // creative and always count as live.
+  const dimensionHashes = rulesFilterActive
+    ? Array.from(new Set([
+        ...feedHashes.filter((h) => liveImageHashes.has(h)),
+        ...cardHashes,
+        ...(singleHash ? [singleHash] : []),
+      ]))
+    : allHashes;
   const seenSizes = new Set<string>();
   const creativeDimensions: ImageDimensions[] = [];
   function addDim(d: ImageDimensions | null | undefined) {
@@ -899,7 +937,7 @@ export async function fetchAdContent(
     const key = `${d.width}x${d.height}`;
     if (!seenSizes.has(key)) { seenSizes.add(key); creativeDimensions.push(d); }
   }
-  for (const hash of allHashes) addDim(dimMap.get(hash));
+  for (const hash of dimensionHashes) addDim(dimMap.get(hash));
   // Image-only snapshot BEFORE video dims are mixed in — consistency checks
   // must not compare image sizes against video renditions.
   const imageDimensions: ImageDimensions[] = [...creativeDimensions];
@@ -939,31 +977,11 @@ export async function fetchAdContent(
     !!data.creative?.object_story_spec?.link_data?.child_attachments?.length ||
     adFormats.some((f) => f.toUpperCase().includes("CAROUSEL"));
 
-  // --- Drop stale (un-served) pool assets via asset_customization_rules ----
-  // The effective-post / image_url anchors return nothing on these dynamic
-  // PLACEMENT ads, so we still landed on the stale pool. asset_customization_rules
-  // are Meta's own map of which image serves for which placement (by image
-  // label). An image present in images[] but referenced by NO rule is a stale
-  // leftover from an earlier edit — exactly the old "April" assets. When rules
-  // exist AND images carry labels, keep only the live (rule-referenced) images.
-  const rawFeedImages = data.creative?.asset_feed_spec?.images ?? [];
-  const customizationRules = data.creative?.asset_feed_spec?.asset_customization_rules ?? [];
-  const liveLabels = new Set(
-    customizationRules.map((r) => r.image_label?.name).filter(Boolean) as string[]
-  );
-  const imgLabelNames = (img: { adlabels?: Array<{ name?: string }> }) =>
-    (img.adlabels ?? []).map((l) => l.name).filter(Boolean) as string[];
-  const anyImageLabeled = rawFeedImages.some((img) => imgLabelNames(img).length > 0);
-  const liveImageHashes = new Set<string>();
-  if (liveLabels.size > 0 && anyImageLabeled) {
-    for (const img of rawFeedImages) {
-      if (img.hash && imgLabelNames(img).some((n) => liveLabels.has(n))) liveImageHashes.add(img.hash);
-    }
-  }
-  // Only apply the filter when it confidently identifies ≥1 live image — never
-  // narrow to empty (that would drop the whole comparison).
-  const rulesFilterActive = liveImageHashes.size > 0;
-
+  // --- Drop stale (un-served) pool assets from the visual-QA candidates ----
+  // Uses liveImageHashes / rulesFilterActive computed above (before the
+  // dimension checks). The effective-post / image_url anchors return nothing on
+  // dynamic PLACEMENT ads, so without this filter we'd land on the stale pool —
+  // exactly the old "April" assets.
   type ImgCandidate = { url: string; hash?: string; width?: number; height?: number; dateMs?: number | null };
   const feedImageCandidates: ImgCandidate[] = [];
   for (const img of rawFeedImages) {
@@ -1060,10 +1078,17 @@ export async function fetchAdContent(
   // also round-robins the carousel pool across sizes so any future truncation
   // degrades gracefully instead of dropping one whole size.
   const MAX_QA_IMAGES = isCarousel ? 12 : 6;
+  // FIX #14: cardCount must be the FULL configured card count. cardDimensions
+  // excludes video cards (FIX #4's uniformity filter) and is empty for
+  // asset-feed carousels, so passing its length told the model "Live carousel
+  // has 3 configured card(s)" for a 5-card mixed image+video carousel (or 0 for
+  // an asset-feed one) — in a line the prompt calls AUTHORITATIVE.
+  const configuredCardCount =
+    data.creative?.object_story_spec?.link_data?.child_attachments?.length ?? 0;
   const { ordered: plannedCandidates, inventory } = planQaImages(
     chosenImageCandidates,
     isCarousel,
-    cardDimensions.length,
+    configuredCardCount,
     MAX_QA_IMAGES
   );
   chosenImageCandidates = plannedCandidates;
