@@ -198,6 +198,40 @@ prompt says creative "could not be matched" (wrong reason, same conservative
 outcome); TODAY'S DATE uses UTC, so late-evening runs near a month boundary
 judge promo dates against the next day.
 
+# Round 4 (2026-07-07) — all shipped ✅
+
+Fresh audit; FIX #1–#15 confirmed intact. Two new faults found and fixed.
+**Intentional patches — do not remove.**
+
+## 16. Fallback-matched Drive refs asserted GENUINE GAPs ✅ fixed
+
+`computeCompletenessLine` treated the attached Drive filenames' size tokens as
+"this unit's approved sizes" even when the refs arrived via the zero-token
+fallback (FIX #2's whole-pool attach) or the cross-format gate — files that may
+belong to a different concept/format. A cross-format static "… 1080x1920.jpg"
+attached to a 1080x1080-card carousel produced "GENUINE GAP — flag this" in a
+line the prompt calls authoritative. `rankRefsForUnit` now returns
+`confidentMatch` (false on either fallback), wired through the batch into
+`computeCompletenessLine`, which degrades the gap to couldn't-verify; the flag
+is also in the dedup fingerprint so confidence differences don't merge.
+Regression test: `lib/__tests__/completeness-fallback-match.test.ts`.
+
+## 17. "static" in the ad name forced a feed-size expectation ✅ fixed
+
+`computePlacementFormatCheck`: the token "static" set `expectsFeed`, but in ad
+naming "static" means still-image (vs video/carousel), not feed placement — a
+"Story Static" / "Static 9x16" unit with only a 1080x1920 asset hard-FAILed
+format_size. "static" is dropped from the feed signals (feed/1x1/4x5/square/
+ratio notation still enforce). The format/size check moved to
+`lib/format-check.ts` for testability (route files can't export helpers).
+Regression test: `lib/__tests__/format-check-static-token.test.ts`.
+
+Known-residual (not fixed): FIX #3's approval-gate bypass only fires when the
+strict pass queues ZERO images total — one stray image inside an old
+"For Approval/" folder suppresses the rescan and a sibling "Final Exports/"
+stays skipped. Degrades to a conservative "not matched" warning, not a false
+fail.
+
 ## Model config
 
 Model + thinking budget are env vars now: `QA_MODEL` (default

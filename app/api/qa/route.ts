@@ -7,6 +7,7 @@ import { getGoogleAuth } from "@/lib/google-auth";
 import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, MANUAL_CHECK_ITEMS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
 import { computeCompletenessLine } from "@/lib/completeness";
 import { computeUrlComparisonLine, computeUrlMatchStatus } from "@/lib/url-compare";
+import { tokenize, computeFormatSizeCheck, type ComputedCheck } from "@/lib/format-check";
 import { isAuthedRequest } from "@/lib/auth";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
@@ -177,25 +178,8 @@ type AdUnit = {
   adsetName?: string;
 };
 
-// Tokenize a name (filename or ad unit name) into lowercase alphanumeric
-// tokens. Keeps short-but-meaningful tokens like "v1", "v2", "1x1", "9x16"
-// (length ≥ 2) which are exactly the version/format discriminators we need.
-//
-// Pre-step: split camelCase boundaries (lower→Upper) before lowercasing, so a
-// glued filename token like "LuckyEmber" becomes ["lucky","ember"] and matches
-// an ad unit named "Lucky Ember". Without this, "luckyember" matches neither
-// "lucky" nor "ember", so the unit gets zero signal from its own approved files
-// and the ranker falls back to generic tokens (mis-routing the assets to
-// another unit). This is purely additive: names that already contain a space or
-// separator (e.g. "Oak Fork", "Caesars") are unaffected and tokenize exactly as
-// before.
-function tokenize(s: string): string[] {
-  return s
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length >= 2);
-}
+// tokenize() lives in lib/format-check.ts (FIX #17 extraction) — shared by the
+// Drive matcher below and the deterministic format/size check.
 
 // ─── Deterministic checks (computed in code, not by the model) ──────────────
 // url_cta URL matching, format_size, and ai_enhancements are pure logic over
@@ -203,140 +187,10 @@ function tokenize(s: string): string[] {
 // ratio/string comparisons (hallucinated findings) and run-to-run inconsistency.
 // They are computed here and the model's output for those checks is overwritten.
 
-type ComputedCheck = { status: "pass" | "fail" | "warning" | "unknown"; note: string };
-
 // URL matching lives in lib/url-compare.ts (FIX #13 + FIX #15: field-line-only
 // extraction, primary/secondary severity) so it is unit-testable.
-
-// format_size: name tokens are the primary intent signal, dimensions the
-// evidence, placements the tiebreaker — same rules the prompt used to describe,
-// now applied deterministically.
-function classifyDim(width: number, height: number): "story" | "feed" | "landscape" | "other" {
-  const ratio = width / height;
-  if (ratio >= 0.54 && ratio <= 0.58) return "story"; // 9:16
-  if (ratio >= 0.78 && ratio <= 0.82) return "feed"; // 4:5
-  if (ratio >= 0.98 && ratio <= 1.02) return "feed"; // 1:1
-  if (ratio >= 1.88 && ratio <= 1.94) return "landscape"; // 1.91:1
-  return "other";
-}
-
-// Dimension-consistency rules (computed deterministically from per-asset dims):
-//  1. CAROUSEL CARDS — all cards in one carousel must share ONE exact size.
-//     One 2040×1080 card among 1080×1080 siblings is a real defect → FAIL.
-//  2. SAME-RATIO MIXED SIZES — two unique sizes with the SAME aspect ratio in
-//     one ad (e.g. 920×920 + 1080×1080, both 1:1) can't be placement variants
-//     (those differ in ratio: 1:1 vs 4:5 vs 9:16) → WARNING. Different-ratio
-//     sizes are legitimate placement customization and are never flagged.
-function checkDimensionConsistency(fi: FormatInfo | null | undefined): { failNote: string | null; warnNote: string | null } {
-  // Rule 1: carousel card uniformity (exact WxH, per-card, not deduped).
-  let failNote: string | null = null;
-  const cards = fi?.cardDimensions ?? [];
-  if (cards.length >= 2) {
-    const counts = new Map<string, number>();
-    for (const c of cards) {
-      const key = `${c.width}×${c.height}`;
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    if (counts.size > 1) {
-      const parts = Array.from(counts.entries())
-        .sort((a, b) => b[1] - a[1])
-        .map(([size, n]) => `${n}× ${size}`);
-      failNote = `carousel cards have mixed sizes (${parts.join(", ")}) — all cards in a carousel should share one size`;
-    }
-  }
-
-  // Rule 2: same aspect ratio, different pixel sizes (unique IMAGE dims only —
-  // videos legitimately ship at other resolutions and are excluded).
-  let warnNote: string | null = null;
-  const dims = fi?.imageDimensions ?? [];
-  const byRatio = new Map<string, string[]>();
-  for (const d of dims) {
-    const key = (d.width / d.height).toFixed(2);
-    if (!byRatio.has(key)) byRatio.set(key, []);
-    byRatio.get(key)!.push(`${d.width}×${d.height}`);
-  }
-  const mixed = Array.from(byRatio.values()).filter((sizes) => sizes.length > 1);
-  if (mixed.length) {
-    warnNote = `multiple sizes share the same aspect ratio within this ad (${mixed
-      .map((s) => s.join(" vs "))
-      .join("; ")}) — same-format assets should be one size; verify this is intentional`;
-  }
-  return { failNote, warnNote };
-}
-
-// Combines the placement/format expectation check with the dimension
-// consistency rules above. Consistency failures dominate (fail > warning),
-// and notes are merged so neither finding hides the other.
-function computeFormatSizeCheck(unitName: string, fi: FormatInfo | null | undefined): ComputedCheck {
-  const base = computePlacementFormatCheck(unitName, fi);
-  const { failNote, warnNote } = checkDimensionConsistency(fi);
-  if (!failNote && !warnNote) return base;
-
-  const notes: string[] = [];
-  if (failNote) notes.push(failNote);
-  if (warnNote) notes.push(warnNote);
-  if (base.status === "fail" || (base.status === "warning" && base.note)) notes.push(base.note);
-
-  const status: ComputedCheck["status"] =
-    failNote || base.status === "fail" ? "fail" : "warning";
-  return { status, note: notes.join("; ") };
-}
-
-function computePlacementFormatCheck(unitName: string, fi: FormatInfo | null | undefined): ComputedCheck {
-  const dims = fi?.creativeDimensions ?? [];
-  if (!dims.length) return { status: "unknown", note: "Creative dimensions not available." };
-
-  const kinds = dims.map((d) => classifyDim(d.width, d.height));
-  const has916 = kinds.includes("story");
-  const hasFeed = kinds.includes("feed");
-  const sizesStr = dims.map((d) => `${d.width}×${d.height}`).join(", ");
-
-  const tokens = new Set(tokenize(unitName));
-  // Colon ratio notation ("9:16", "4:5", "1:1") tokenizes into bare numbers
-  // ("9" is even dropped for being too short), so it's matched on the raw name.
-  const rawName = unitName.toLowerCase();
-  const expectsStory =
-    tokens.has("story") || tokens.has("stories") || tokens.has("reel") || tokens.has("reels") ||
-    tokens.has("9x16") || /\b9\s*:\s*16\b/.test(rawName);
-  const expectsFeed =
-    tokens.has("feed") || tokens.has("static") || tokens.has("1x1") || tokens.has("4x5") ||
-    tokens.has("square") || /\b(1\s*:\s*1|4\s*:\s*5)\b/.test(rawName);
-
-  const issues: string[] = [];
-  if (expectsStory && !has916) {
-    issues.push(`ad name indicates Story/Reel but no 9:16 asset exists (sizes: ${sizesStr}) — content will be cut off or letterboxed`);
-  }
-  if (expectsFeed && !hasFeed) {
-    issues.push(`ad name indicates Feed/Static but no 1:1 or 4:5 asset exists (sizes: ${sizesStr}) — will appear cropped in feed`);
-  }
-  if (issues.length) return { status: "fail", note: issues.join("; ") };
-  if (expectsStory || expectsFeed) {
-    return { status: "pass", note: `Asset sizes (${sizesStr}) match the format indicated by the ad name.` };
-  }
-
-  // No format signal in the name — judge by placements.
-  if (fi?.placements?.automatic) {
-    if (has916 && hasFeed) {
-      return { status: "pass", note: `Advantage+ automatic placements with both feed and story sizes (${sizesStr}).` };
-    }
-    return {
-      status: "warning",
-      note: `Advantage+ automatic placements but only ${sizesStr} — some placements may crop or letterbox this size.`,
-    };
-  }
-  const p = fi?.placements;
-  if (p) {
-    const wantsStory =
-      p.facebook_positions.some((x) => x.includes("story") || x.includes("reel")) ||
-      p.instagram_positions.some((x) => x.includes("story") || x.includes("reel"));
-    const wantsFeed = p.facebook_positions.includes("feed") || p.instagram_positions.includes("stream");
-    const probs: string[] = [];
-    if (wantsStory && !has916) probs.push("story/reels placement targeted but no 9:16 asset");
-    if (wantsFeed && !hasFeed) probs.push("feed placement targeted but no 1:1/4:5 asset");
-    if (probs.length) return { status: "warning", note: `${probs.join("; ")} (sizes: ${sizesStr}).` };
-  }
-  return { status: "pass", note: `Asset sizes: ${sizesStr} — no format conflict detected.` };
-}
+// format_size lives in lib/format-check.ts (FIX #17: "static" is not a feed
+// signal; extracted for the same testability reason).
 
 // ai_enhancements: a fixed decision over API booleans. `flaggedOn` feeds the
 // status rollup — manual-reminder-only warnings must not block "All clear".
@@ -876,10 +730,15 @@ export async function POST(request: Request) {
   // vice versa, via the fallback paths below). The prompt then tells the model
   // to compare offer/text/theme only — not layout — so the fallback doesn't
   // produce "wrong layout" false flags.
-  type RankedRefs = { refs: DriveImageRef[]; crossFormat: boolean };
+  // `confidentMatch` (FIX #16): true only when the refs were routed by a real
+  // token-score match in the unit's own format. False on the zero-token
+  // fallback and on cross-format refs — those files may belong to a different
+  // concept/format, so downstream completeness must not assert a GENUINE GAP
+  // from their filename sizes.
+  type RankedRefs = { refs: DriveImageRef[]; crossFormat: boolean; confidentMatch: boolean };
   function rankRefsForUnit(unit: { name?: string | null; content?: string | null; adsetName?: string }): RankedRefs {
     const unitName = unit.name ?? "";
-    if (!allDriveRefs.length) return { refs: [], crossFormat: false };
+    if (!allDriveRefs.length) return { refs: [], crossFormat: false, confidentMatch: false };
     // Build token set from the unit name AND the ad body copy from the Meta API.
     // Unit names are often generic ("May Static V1", "May Carousel V2") — they
     // encode format and version but NOT the campaign concept. The ad copy, on the
@@ -894,7 +753,7 @@ export async function POST(request: Request) {
       ...tokenize(unitName),
       ...tokenize(unit.content ?? ""),
     ]);
-    if (!unitTokens.size) return { refs: [], crossFormat: false };
+    if (!unitTokens.size) return { refs: [], crossFormat: false, confidentMatch: false };
 
     // FORMAT-TYPE GATE — the fix for static units being QA'd against carousel
     // designs (and vice versa). Token overlap alone can't tell them apart when
@@ -941,7 +800,7 @@ export async function POST(request: Request) {
       // same creative, different format label.
       eligible = nonCarousel.length > 0 ? nonCarousel : eligible;
     }
-    if (!eligible.length) return { refs: [], crossFormat: false };
+    if (!eligible.length) return { refs: [], crossFormat: false, confidentMatch: false };
 
     const scored = eligible
       .map(({ ref, i }) => {
@@ -974,9 +833,11 @@ export async function POST(request: Request) {
         dbg(
           `[qa] ZERO-TOKEN FALLBACK: unit "${unitName}" had no filename token match — attaching all ${refs.length} eligible Drive asset(s) rather than skipping the comparison.`
         );
-        return { refs, crossFormat };
+        // FIX #16: fallback-attached refs are NOT a confident match — their
+        // filename sizes must not drive a GENUINE GAP assertion.
+        return { refs, crossFormat, confidentMatch: false };
       }
-      return { refs: [], crossFormat: false }; // pool too large to attach blindly
+      return { refs: [], crossFormat: false, confidentMatch: false }; // pool too large to attach blindly
     }
 
     // Keep only images close to the best score (so a unit doesn't pull in
@@ -1058,7 +919,9 @@ export async function POST(request: Request) {
         `[qa] CROSS-FORMAT FALLBACK: unit "${unitName}" (${carouselUnit ? "carousel" : "non-carousel"}) matched opposite-format approved file(s): ${refs.map((r) => r.name).join(" | ")}`
       );
     }
-    return { refs, crossFormat };
+    // FIX #16: cross-format refs are the opposite layout of this unit, so their
+    // filename sizes can't be asserted as this unit's required live sizes.
+    return { refs, crossFormat, confidentMatch: !crossFormat };
   }
 
   // Match first, then download ONLY the images actually used by some unit —
@@ -1072,7 +935,8 @@ export async function POST(request: Request) {
   // Build content blocks for a single ad unit (text + image blocks)
   function buildUnitBlocks(
     unit: (typeof unitContents)[number],
-    unitDriveImages: FetchedImage[]
+    unitDriveImages: FetchedImage[],
+    confidentMatch: boolean
   ): ContentBlock[] {
     const blocks: ContentBlock[] = [];
 
@@ -1096,7 +960,7 @@ export async function POST(request: Request) {
     // Deterministic creative-completeness — computed from the authoritative live
     // inventory + approved Drive sizes, so the model never reports a size/card
     // "missing" from a capped/sampled image set.
-    const completenessLine = computeCompletenessLine(fi?.creativeInventory, unitDriveImages);
+    const completenessLine = computeCompletenessLine(fi?.creativeInventory, unitDriveImages, confidentMatch);
     if (fi) {
       const lines: string[] = [];
       if (fi.placements) {
@@ -1163,7 +1027,8 @@ export async function POST(request: Request) {
   async function runBatch(
     batchUnits: (typeof unitContents),
     batchDriveImages: FetchedImage[],
-    crossFormat = false
+    crossFormat = false,
+    confidentMatch = true
   ): Promise<{ units: unknown[]; critical_issues: string[]; notes: string }> {
     const messageContent: ContentBlock[] = [];
 
@@ -1207,7 +1072,7 @@ export async function POST(request: Request) {
 
     for (const unit of batchUnits) {
       const unitDriveImages = batchDriveImages; // already pre-filtered for this batch
-      for (const block of buildUnitBlocks(unit, unitDriveImages)) {
+      for (const block of buildUnitBlocks(unit, unitDriveImages, confidentMatch)) {
         messageContent.push(block);
       }
     }
@@ -1540,6 +1405,9 @@ export async function POST(request: Request) {
       liveImgHashes: liveImgs.map((img) => sha1(img.data)).sort(),
       driveImgs: refsPerUnit[i].refs.map((r) => r.name).sort(),
       driveCrossFormat: refsPerUnit[i].crossFormat,
+      // FIX #16: confidence changes the completeness line sent to the model,
+      // so two otherwise-identical units must not merge across it.
+      driveConfident: refsPerUnit[i].confidentMatch,
       nameSig: nameSignature(u.name ?? ""),
     };
   }
@@ -1599,11 +1467,12 @@ export async function POST(request: Request) {
   // fast call (~5-15s). Many of these run concurrently and fail in isolation,
   // keeping every request comfortably under Vercel's limit. We only call Claude
   // for representatives — duplicate versions reuse the representative's result.
-  type Batch = { units: (typeof unitContents); driveImages: FetchedImage[]; crossFormat: boolean };
+  type Batch = { units: (typeof unitContents); driveImages: FetchedImage[]; crossFormat: boolean; confidentMatch: boolean };
   const batches: Batch[] = repIndices.map((i) => ({
     units: [unitContents[i]],
     driveImages: refsPerUnit[i].refs.flatMap((r) => driveByName.get(r.name) ?? []),
     crossFormat: refsPerUnit[i].crossFormat,
+    confidentMatch: refsPerUnit[i].confidentMatch,
   }));
 
   dbg(
@@ -1627,7 +1496,7 @@ export async function POST(request: Request) {
         if (i >= batches.length) return;
         const b = batches[i];
         dbg(`[qa] Batch ${i + 1}/${batches.length}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
-        batchResults[i] = await runBatch(b.units, b.driveImages, b.crossFormat);
+        batchResults[i] = await runBatch(b.units, b.driveImages, b.crossFormat, b.confidentMatch);
       }
     };
 

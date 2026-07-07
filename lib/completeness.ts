@@ -20,7 +20,14 @@ export function parseSizeTokens(names: string[]): Set<string> {
 // there is no inventory to report.
 export function computeCompletenessLine(
   inv: CreativeInventory | undefined,
-  driveImages: { name: string }[]
+  driveImages: { name: string }[],
+  // FIX #16: false when the Drive refs reached this unit via a FALLBACK path
+  // (zero-token-overlap pool attach or the cross-format gate) rather than a
+  // confident token match. Fallback refs may belong to a different concept or
+  // format, so their filename sizes are NOT authoritative for this unit — a
+  // size they carry that the live ad doesn't serve must never be asserted as
+  // a GENUINE GAP (degrade to couldn't-verify instead).
+  confidentMatch = true
 ): string {
   if (!inv) return "";
   const liveSizes = inv.sizes.filter((s) => s.size !== "unknown");
@@ -69,6 +76,12 @@ export function computeCompletenessLine(
       const missingLive = Array.from(approvedSizeSet).filter((s) => !liveSizeSet.has(s));
       if (!missingLive.length) {
         coverage = ` All approved Drive sizes are present in the live ad — do NOT report any size/card as missing.`;
+      } else if (!confidentMatch) {
+        // FIX #16: the approved refs were attached by a fallback (no token
+        // match / cross-format), so the "missing" size may simply belong to a
+        // different concept or format than this unit. Never assert a defect
+        // from uncertain input.
+        coverage = ` Size(s) in attached Drive file(s) not seen live: ${missingLive.join(", ")} — but these files were fallback-matched to this unit (not a confident match) and may belong to a different concept/format, so this could NOT be verified. Do NOT report these sizes as missing; note only that size coverage couldn't be verified against a confirmed approved set.`;
       } else if (unknownCount > 0) {
         // FIX #12: some live assets had unreadable dimensions, so the live size
         // set is incomplete — the "missing" size(s) may be among them. Never
