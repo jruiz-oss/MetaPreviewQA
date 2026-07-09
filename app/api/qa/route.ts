@@ -8,6 +8,7 @@ import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, MANUAL_CHECK_ITE
 import { computeCompletenessLine } from "@/lib/completeness";
 import { computeUrlComparisonLine, computeUrlMatchStatus } from "@/lib/url-compare";
 import { tokenize, computeFormatSizeCheck, type ComputedCheck } from "@/lib/format-check";
+import { monthsInProse, expectedMonthsForUnit, filterRefsByExpectedMonths } from "@/lib/month-match";
 import { isAuthedRequest } from "@/lib/auth";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
@@ -623,7 +624,17 @@ export async function POST(request: Request) {
   // Ground the model's sense of "now" — promo_month_date staleness judgments
   // are meaningless without it (the model's internal "today" is its training
   // date, not the run date).
-  const todayLine = `TODAY'S DATE: ${new Date().toISOString().slice(0, 10)} — use this as ground truth when judging whether promo months/dates are current or stale.`;
+  // FIX #25 (was a known-minor): toISOString() is UTC, so a late-evening run
+  // near a month boundary judged promo dates against the NEXT day/month.
+  // Format in the agency's timezone instead; env-overridable via QA_TIMEZONE.
+  // en-CA locale renders as YYYY-MM-DD.
+  const todayStr = new Intl.DateTimeFormat("en-CA", {
+    timeZone: process.env.QA_TIMEZONE || "America/Phoenix",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  const todayLine = `TODAY'S DATE: ${todayStr} — use this as ground truth when judging whether promo months/dates are current or stale.`;
 
   // Reviewer notes — optional free-text context that ADDS focus to the audit
   // (e.g. "pay attention to the disclaimer copy", "the resort name is spelled
@@ -676,6 +687,11 @@ export async function POST(request: Request) {
   // signal and gets weight ~0; a rare token ("v1", "static") gets high weight.
   // This is what makes matching general across clients — it learns which tokens
   // are distinctive from the files themselves rather than hardcoding names.
+  // FIX #18: months mentioned in the WO text (prose-parsed, so "ads may vary"
+  // can't create a false May expectation). Used as the fallback month signal
+  // when a unit's name/copy carries none — see filterRefsByExpectedMonths.
+  const woMonths = monthsInProse(wo);
+
   const refTokenSets = allDriveRefs.map((r) => new Set(tokenize(r.name)));
   const docFreq = new Map<string, number>();
   refTokenSets.forEach((toks) => {
@@ -813,6 +829,15 @@ export async function POST(request: Request) {
       .filter((x) => x.score > 0) // require at least one shared token
       .sort((a, b) => b.score - a.score);
 
+    // FIX #18: the unit's expected month(s) — from its name first ("July
+    // Static V1"), then its body copy (prose-parsed), then the WO text. Used
+    // by both routing paths below to keep a sibling month folder's leftovers
+    // ("June/…" beside "July/…") from being attached as this unit's approved
+    // creative. The filter mirrors the version-token rule: it only fires when
+    // at least one candidate carries an expected month, month-agnostic files
+    // always survive, and it never empties the set.
+    const expectedMonths = expectedMonthsForUnit(unitName, unit.content, woMonths);
+
     if (!scored.length) {
       // FIX #2: no filename token overlapped the unit name/copy. This is the #1
       // cause of false "no approved creative in Drive" findings — generic unit
@@ -822,11 +847,22 @@ export async function POST(request: Request) {
       // attach safely. The model still matches by filename/concept/size; a tiny
       // pool of plausibly-related assets beats an empty comparison. Only skip the
       // fallback when the pool is too large to attach without risking timeouts.
+      //
+      // FIX #18: month-filter the pool BEFORE the cap decision — a two-month
+      // pool (June + July exports) both routes the right month AND can now fit
+      // under the cap where the unfiltered pool couldn't.
+      const monthFiltered = filterRefsByExpectedMonths(eligible, (x) => x.ref.name, expectedMonths);
+      if (monthFiltered.dropped.length) {
+        dbg(
+          `[qa] MONTH FILTER (fallback): unit "${unitName}" expects month(s) [${Array.from(expectedMonths).join(",")}] — dropped ${monthFiltered.dropped.length} other-month file(s): ${monthFiltered.dropped.map((x) => x.ref.name).join(" | ")}`
+        );
+      }
+      const monthEligible = monthFiltered.kept;
       const fallbackCap = carouselUnit
         ? Math.max(MAX_DRIVE_IMAGES_PER_UNIT, 10)
         : MAX_DRIVE_IMAGES_PER_UNIT;
-      if (eligible.length > 0 && eligible.length <= fallbackCap) {
-        const refs = eligible.map((x) => x.ref);
+      if (monthEligible.length > 0 && monthEligible.length <= fallbackCap) {
+        const refs = monthEligible.map((x) => x.ref);
         const crossFormat = carouselUnit
           ? refs.some((r) => !refIsCarousel(r.name))
           : refs.some((r) => refIsCarousel(r.name));
@@ -866,6 +902,22 @@ export async function POST(request: Request) {
           return !toks.some((t) => VERSION_TOKEN.test(t));
         });
       }
+    }
+
+    // FIX #18: month-token discrimination — the month analogue of the version
+    // rule above. A "July Static V1" unit whose score-filtered set still holds
+    // a June-pathed file (concept/version tokens tie, and June scans first
+    // alphabetically) would hand the model LAST promo's creative as approved →
+    // phantom mismatch findings. Drop other-month files only when a same-month
+    // (or month-agnostic-only) alternative exists; never filter to empty.
+    {
+      const monthFiltered = filterRefsByExpectedMonths(filtered, (x) => x.ref.name, expectedMonths);
+      if (monthFiltered.dropped.length) {
+        dbg(
+          `[qa] MONTH FILTER: unit "${unitName}" expects month(s) [${Array.from(expectedMonths).join(",")}] — dropped ${monthFiltered.dropped.length} other-month file(s): ${monthFiltered.dropped.map((x) => x.ref.name).join(" | ")}`
+        );
+      }
+      filtered = monthFiltered.kept;
     }
 
     // For carousel units, raise the per-unit cap to cover all cards (carousels
@@ -999,8 +1051,15 @@ export async function POST(request: Request) {
 
     // Live Meta creative images (pre-downloaded as base64)
     const liveImages = (unit as { creativeImages?: FetchedImage[] }).creativeImages ?? [];
+    // FIX #24: distinguish "Meta returned no image" from "Meta returned image
+    // URL(s) but the download failed" (expired CDN link, 403, non-decodable
+    // bytes). The old wording blamed the Meta API either way — a wrong-reason
+    // message that sent people chasing token/permission issues.
+    const liveUrlCount = (unit as { creativeImageUrls?: string[] }).creativeImageUrls?.length ?? 0;
     const imageNote = liveImages.length > 0
       ? `\nLive Meta creative: ${liveImages.length} image(s) follow below for visual review.`
+      : liveUrlCount > 0
+      ? `\nLive Meta creative: Meta returned ${liveUrlCount} image URL(s) for this ad but none could be downloaded (CDN links expire) — the live creative could NOT be retrieved. Treat the visual comparison as couldn't-verify; do NOT conclude the ad is missing creative.`
       : unitDriveImages.length > 0
       ? "\nLive Meta creative: no live image returned by the Meta API for this ad — check the approved Drive creative above against this unit's copy/spec and note that the live Meta image could not be retrieved for a direct comparison."
       : "\nCreative images: not available — visual creative check cannot be performed.";
@@ -1028,7 +1087,12 @@ export async function POST(request: Request) {
     batchUnits: (typeof unitContents),
     batchDriveImages: FetchedImage[],
     crossFormat = false,
-    confidentMatch = true
+    confidentMatch = true,
+    // FIX #24 (was the documented known-minor): how many Drive refs the matcher
+    // routed to this unit. When > 0 but batchDriveImages is empty, every matched
+    // file failed to DOWNLOAD — a different truth than "nothing matched", and
+    // the prompt must say so instead of blaming the matcher.
+    matchedRefCount = 0
   ): Promise<{ units: unknown[]; critical_issues: string[]; notes: string }> {
     const messageContent: ContentBlock[] = [];
 
@@ -1056,6 +1120,16 @@ export async function POST(request: Request) {
           source: { type: "base64", media_type: img.mediaType, data: img.data },
         });
       }
+    } else if (matchedRefCount > 0) {
+      // FIX #24: refs WERE matched to this unit but every download failed
+      // (Drive permissions hiccup, video with no thumbnail yet, non-decodable
+      // bytes). The old message claimed "none could be matched" — the wrong
+      // reason, which pointed debugging at the matcher instead of the
+      // downloads. Same conservative outcome, honest cause.
+      messageContent.push({
+        type: "text",
+        text: `\n\nAPPROVED CREATIVE FROM DRIVE: ${matchedRefCount} approved file(s) in the work order's Drive folder were matched to this ad unit, but their image bytes could not be downloaded, so no approved images are attached. Do NOT report that approved creative is missing — it exists and was matched; it just could not be retrieved. Mark creative_alignment as "warning" (couldn't verify against approved creative) unless the live creative itself shows a defect.`,
+      });
     } else if (allDriveRefs.length > 0) {
       // The WO's Drive folder DOES contain creative, but the matcher couldn't
       // confidently route any of it to this unit (zero token overlap + pool too
@@ -1301,9 +1375,12 @@ export async function POST(request: Request) {
         reason = "No creative images were available — visual creative could not be verified.";
       } else if (hasLive && !hasDrive) {
         // Distinguish "no Drive creative was linked at all" from "Drive has
-        // creative but none matched this unit" — the second must never read as
-        // a missing-creative finding.
-        reason = allDriveRefs.length > 0
+        // creative but none matched this unit" from "matched but the download
+        // failed" (FIX #24) — none of these may read as a missing-creative
+        // finding.
+        reason = matchedRefCount > 0
+          ? "Matched approved Drive file(s) could not be downloaded — comparison skipped, could not verify (creative is NOT missing)."
+          : allDriveRefs.length > 0
           ? "Drive folder has creative but none auto-matched this unit — comparison skipped, could not verify (creative is NOT missing)."
           : "No approved Drive creative was linked — could not fully verify.";
       } else if (hasDrive && !hasLive) {
@@ -1467,12 +1544,15 @@ export async function POST(request: Request) {
   // fast call (~5-15s). Many of these run concurrently and fail in isolation,
   // keeping every request comfortably under Vercel's limit. We only call Claude
   // for representatives — duplicate versions reuse the representative's result.
-  type Batch = { units: (typeof unitContents); driveImages: FetchedImage[]; crossFormat: boolean; confidentMatch: boolean };
+  type Batch = { units: (typeof unitContents); driveImages: FetchedImage[]; crossFormat: boolean; confidentMatch: boolean; matchedRefCount: number };
   const batches: Batch[] = repIndices.map((i) => ({
     units: [unitContents[i]],
     driveImages: refsPerUnit[i].refs.flatMap((r) => driveByName.get(r.name) ?? []),
     crossFormat: refsPerUnit[i].crossFormat,
     confidentMatch: refsPerUnit[i].confidentMatch,
+    // FIX #24: lets runBatch tell "nothing matched" apart from "matched but
+    // every download failed" — different prompt messages.
+    matchedRefCount: refsPerUnit[i].refs.length,
   }));
 
   dbg(
@@ -1496,7 +1576,7 @@ export async function POST(request: Request) {
         if (i >= batches.length) return;
         const b = batches[i];
         dbg(`[qa] Batch ${i + 1}/${batches.length}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
-        batchResults[i] = await runBatch(b.units, b.driveImages, b.crossFormat, b.confidentMatch);
+        batchResults[i] = await runBatch(b.units, b.driveImages, b.crossFormat, b.confidentMatch, b.matchedRefCount);
       }
     };
 

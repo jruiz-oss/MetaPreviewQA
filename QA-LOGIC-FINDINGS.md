@@ -232,8 +232,113 @@ strict pass queues ZERO images total — one stray image inside an old
 stays skipped. Degrades to a conservative "not matched" warning, not a false
 fail.
 
+# Round 5 (2026-07-09) — all shipped ✅
+
+Fresh audit focused on folder-sorting/creative-alignment and image sourcing;
+FIX #1–#17 confirmed intact. Nine faults found and fixed, including both
+Round 3/4 "known-minor / known-residual" items. **Intentional patches — do
+not remove.**
+
+## 18. No month awareness in the Drive matcher ✅ fixed
+
+Sibling month folders ("June 2026/" beside "July 2026/") both queue creative,
+and the matcher had no month signal: a June-pathed file sharing
+concept/version tokens with a July unit tied on score — and ties resolve by
+queue order, which is alphabetical, so the OLD month won. The model was handed
+last promo's creative as "approved" → phantom mismatches. New
+`lib/month-match.ts` mirrors the version-token rule: expected month from the
+unit NAME first, then prose-parsed body copy, then the WO text ("ads may vary"
+/ "march into savings" can never create a month expectation); refs carrying
+only OTHER months are dropped. Guards: a month token on EVERY candidate is a
+client name ("Del Mar" → "mar") and is ignored (informativeness rule); filter
+is inert when no candidate matches the expected month; month-agnostic refs
+always survive; never filters to empty. Applied to both the confident path and
+the zero-token fallback (where it also runs BEFORE the cap decision, so a
+two-month pool can now fit under the fallback cap).
+Regression test: `lib/__tests__/month-match.test.ts`.
+
+## 19. OLD/archive folder lexicon too narrow ✅ fixed
+
+`isOldFolder` matched only exact "old"/"archive(d)" and the "xx" prefix —
+"OLD June", "June OLD", "Statics_OLD", "(old)", "zz ", "Archive 2025",
+"DO NOT USE", "Superseded" all slipped through and queued last cycle's
+creative. Rules moved to `lib/drive-folders.ts` (`isOldFolderName`), original
+rules preserved verbatim, additions word-anchored; ALL-CAPS "OLD" prefix is
+matched but title-case "Old Navy" is deliberately not.
+Regression test: `lib/__tests__/drive-folders.test.ts`.
+
+## 20. Drive shortcuts were dead ends ✅ fixed
+
+`application/vnd.google-apps.shortcut` items were treated as unreadable files,
+so creative behind a folder/image shortcut (common in shared drives) was
+silently never scanned. `files.list` now requests `shortcutDetails`;
+`resolveShortcut()` maps a shortcut onto its target id/mimeType — folder
+shortcuts recurse like real folders (the existing visitedIds cycle guard
+already made loops safe), media shortcuts queue their TARGET id so downloads
+fetch real bytes. Unresolvable shortcuts degrade to the existing "not
+readable" note.
+
+## 21. Channel-folder lexicon too narrow; only FIRST social folder entered ✅ fixed
+
+Channel detection knew only social/display/native, so "Meta / Google / Email"
+structures bypassed the gate and wrong-channel creative (display 300x250s)
+polluted the matcher pool. And the social pick used `.find` — a "Social
+Video/" sibling of "Social/" was silently skipped. `lib/drive-folders.ts` now
+carries social synonyms (Meta/Facebook/Instagram/FB/IG/Paid Social) plus
+unambiguous non-social channels, and ALL social-matching folders are entered.
+
+## 22. Approval gate didn't recognize "Approved"/"Sign-Off" ✅ fixed (shrinks Round 4 residual)
+
+The strict pass gated on the substring "approval" only. An "Approved/" or
+"Client Approved/" sibling wasn't recognized — the documented FIX #3 residual
+(one stray image in an old "For Approval/" suppresses the bypass rescan and
+the unrecognized sibling stays skipped). `isApprovalFolderName` now accepts
+"approval" (unchanged), whole-word "approved", and "sign-off"; negated forms
+("Not Approved", "Unapproved") are excluded. The residual now only bites when
+the real creative lives in a folder with NO approval-family name at all.
+
+## 23. Stale pool VIDEOS reached visual QA ✅ fixed
+
+`asset_feed_spec.videos` retains replaced videos exactly like `images[]`, but
+only IMAGES had the customization-rules live/stale filter (FIX #8 lineage) —
+every pool video's thumbnail was attached, so a prior promo's video surfaced
+as unexplained "old creative". `computeLiveVideoIds()` maps rule
+`video_label`s onto video `adlabels`; non-referenced videos are skipped and
+their dimensions no longer feed the format checks. Fetched via an ISOLATED
+request (`fetchVideoLiveness`, same pattern as the music check) so a forbidden
+field can never fail the main creative read; indeterminate → null → keep
+everything; never narrows to empty. Only called when the ad has 2+ feed videos.
+Regression test: `lib/__tests__/video-liveness.test.ts`.
+
+## 24. Wrong-reason degradation messages ✅ fixed (closes Round 3 known-minor)
+
+Two paths degraded conservatively but stated a false cause: (a) when every
+MATCHED Drive ref failed to download, the prompt claimed "none could be
+matched" (pointing debugging at the matcher instead of the downloads) — the
+batch now carries `matchedRefCount` and says the files were matched but not
+retrievable; (b) when Meta returned image URLs but every download failed, the
+prompt claimed "no live image returned by the Meta API" — it now says the
+URLs existed and the DOWNLOAD failed (CDN links expire), couldn't-verify. The
+pass→warning guard reasons distinguish all three cases (no Drive linked /
+none matched / matched but not downloadable).
+
+## 25. TODAY'S DATE was UTC ✅ fixed (closes Round 3 known-minor)
+
+Late-evening runs near a month boundary judged promo dates against the next
+day/month. The date line is now formatted in the agency timezone,
+env-overridable via `QA_TIMEZONE` (default `America/Phoenix`).
+
+## 26. creative.image_url ignored as a last resort ✅ fixed
+
+Older single-image ads that carry ONLY `creative.image_url` (no feed pool, no
+resolvable hash) produced zero live images and a "no live image returned"
+note. `image_url` is now used strictly when every other source yielded ZERO
+candidates. This does NOT reintroduce the removed effective-post anchor: it
+can never override the pool, only fill an empty set.
+
 ## Model config
 
 Model + thinking budget are env vars now: `QA_MODEL` (default
 `claude-sonnet-5`) and `QA_THINKING_BUDGET` (default 3000). No code change
-needed to switch or roll back.
+needed to switch or roll back. `QA_TIMEZONE` (default `America/Phoenix`)
+controls the TODAY'S DATE grounding line.

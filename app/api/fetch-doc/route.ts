@@ -3,6 +3,14 @@ import { google, docs_v1 } from "googleapis";
 import { getGoogleAuth } from "@/lib/google-auth";
 import { classifyFetchError } from "@/lib/error-classify";
 import { isAuthedRequest } from "@/lib/auth";
+import {
+  isOldFolderName,
+  isChannelFolderName,
+  isApprovalFolderName,
+  pickSocialFolders,
+  resolveShortcut,
+  type DriveItemLite,
+} from "@/lib/drive-folders";
 import mammoth from "mammoth";
 
 // Diagnostic logging is gated behind QA_DEBUG so production logs stay quiet.
@@ -194,7 +202,9 @@ async function readDriveFolder(
   // A third case is handled below after listing items: if the WO link points
   // directly into the approved assets (e.g. "Carousel/" or "Static/"), there
   // is no "approval"-named ancestor — auto-approve at that point.
-  const selfIsApproval = (selfName ?? "").toLowerCase().includes("approval");
+  // FIX #22: recognition broadened to "approved"/"sign-off" spellings (see
+  // lib/drive-folders.ts) — an "Approved/" root pasted directly now gates on.
+  const selfIsApproval = isApprovalFolderName(selfName ?? "");
   let effectiveInsideApproval = insideApprovalFolder || selfIsApproval || forceApprove;
   if (selfIsApproval && !insideApprovalFolder) {
     dbg(`[fetch-doc] Folder "${selfName}" is itself an approval folder — images inside will be queued.`);
@@ -205,7 +215,7 @@ async function readDriveFolder(
   // with many exports could lose the copy doc or approved creative with no
   // visible error. A page cap bounds runaway folders.
   const MAX_LIST_PAGES = 10; // 10 × 100 = up to 1000 items per folder
-  type DriveFile = { id?: string | null; name?: string | null; mimeType?: string | null };
+  type DriveFile = DriveItemLite;
   const allItems: DriveFile[] = [];
   let pageToken: string | undefined = undefined;
   for (let page = 0; page < MAX_LIST_PAGES; page++) {
@@ -213,14 +223,21 @@ async function readDriveFolder(
     // the response, which otherwise makes TS flag a circular type inference.
     const listRes: { data: { nextPageToken?: string | null; files?: DriveFile[] } } = await drive.files.list({
       q: `'${folderId}' in parents and trashed = false`,
-      fields: "nextPageToken, files(id, name, mimeType)",
+      // shortcutDetails: FIX #20 — resolve shortcuts to their targets instead
+      // of treating them as unreadable files (creative behind a folder/image
+      // shortcut was silently never scanned).
+      fields: "nextPageToken, files(id, name, mimeType, shortcutDetails)",
       pageSize: 100,
       pageToken,
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
       corpora: "allDrives",
     });
-    allItems.push(...(listRes.data.files ?? []));
+    // Map shortcuts onto their target id/mimeType up front: a folder shortcut
+    // then recurses like a real folder (the visitedIds cycle guard makes loops
+    // safe) and an image/video shortcut queues its TARGET id so the download
+    // fetches real bytes. Unresolvable shortcuts pass through unchanged.
+    allItems.push(...(listRes.data.files ?? []).map(resolveShortcut));
     pageToken = listRes.data.nextPageToken ?? undefined;
     if (!pageToken) break;
   }
@@ -243,7 +260,7 @@ async function readDriveFolder(
   // the direct subfolders carry "approval" in their name, treat this folder as
   // already inside the approval context.
   if (!effectiveInsideApproval && depth === 0) {
-    const hasApprovalSubfolder = subFolders.some(f => (f.name ?? "").toLowerCase().includes("approval"));
+    const hasApprovalSubfolder = subFolders.some(f => isApprovalFolderName(f.name ?? ""));
     if (!hasApprovalSubfolder) {
       effectiveInsideApproval = true;
       dbg(`[fetch-doc] Folder "${selfName ?? folderId}" has no approval subfolder — treating as already inside approval context.`);
@@ -359,43 +376,25 @@ async function readDriveFolder(
   // Tier 2 (creative-type / version / size folders with no channel names) falls
   // through naturally — all subfolders are processed and the QA route's TF-IDF
   // ranking picks the right assets per ad unit based on folder path prefixes.
-  const CHANNEL_FOLDER_KEYWORDS = ["social", "display", "native"];
-
-  const isChannelName = (name: string) => {
-    const n = name.toLowerCase().trim();
-    return CHANNEL_FOLDER_KEYWORDS.some(kw => n === kw || n.startsWith(kw + " ") || n.endsWith(" " + kw));
-  };
-  // Deprecated/old dumps: exactly "old"/"archive(d)", or the "xx"/"xxOLD"
-  // sink-to-bottom marker agencies use for superseded creative. A bare "old"
-  // substring is intentionally NOT matched, so real client names like "Old Navy"
-  // are never skipped.
-  const isOldFolder = (name: string) => {
-    const n = name.toLowerCase().trim();
-    return (
-      n === "old" ||
-      n === "archive" ||
-      n === "archived" ||
-      /^xx[\s_-]*old\b/.test(n) ||
-      /^xx($|[\s_-])/.test(n)
-    );
-  };
-
-  const hasChannelFolders = subFolders.some(f => isChannelName(f.name ?? ""));
+  // Channel + OLD + approval name rules live in lib/drive-folders.ts (FIX
+  // #19/#21/#22 — extracted for unit-testability, original rules preserved).
+  // FIX #21 broadened the channel lexicon ("Meta", "Facebook", "Paid Search",
+  // "Email", …) and enters ALL social-matching folders — the old `.find`
+  // picked only the first, so a "Social Video/" sibling of "Social/" was
+  // silently skipped.
+  const hasChannelFolders = subFolders.some(f => isChannelFolderName(f.name ?? ""));
   let foldersToProcess = subFolders;
 
   if (hasChannelFolders) {
-    const socialFolder = subFolders.find(f => {
-      const n = (f.name ?? "").toLowerCase().trim();
-      return n === "social" || n.startsWith("social ") || n.endsWith(" social");
-    });
-    if (socialFolder) {
-      const skipped = subFolders.filter(f => f !== socialFolder).map(f => f.name).join(", ");
-      dbg(`[fetch-doc] Channel folders detected — navigating into Social only (skipping: ${skipped})`);
-      foldersToProcess = [socialFolder];
+    const socialFolders = pickSocialFolders(subFolders);
+    if (socialFolders.length > 0) {
+      const skipped = subFolders.filter(f => !socialFolders.includes(f)).map(f => f.name).join(", ");
+      dbg(`[fetch-doc] Channel folders detected — navigating into ${socialFolders.map(f => f.name).join(" + ")} only (skipping: ${skipped})`);
+      foldersToProcess = socialFolders;
     } else {
       // Social folder not found by name — skip OLD folders, process the rest
-      foldersToProcess = subFolders.filter(f => !isOldFolder(f.name ?? ""));
-      const skipped = subFolders.filter(f => isOldFolder(f.name ?? "")).map(f => f.name).join(", ");
+      foldersToProcess = subFolders.filter(f => !isOldFolderName(f.name ?? ""));
+      const skipped = subFolders.filter(f => isOldFolderName(f.name ?? "")).map(f => f.name).join(", ");
       if (skipped) dbg(`[fetch-doc] Channel folders detected but no "Social" folder — skipping OLD: ${skipped}`);
     }
   }
@@ -404,10 +403,10 @@ async function readDriveFolder(
   // An "xxOLD" or "OLD" folder beside the current approved exports holds last
   // cycle's creative and must never be queued for matching.
   {
-    const oldOnes = foldersToProcess.filter((f) => isOldFolder(f.name ?? ""));
+    const oldOnes = foldersToProcess.filter((f) => isOldFolderName(f.name ?? ""));
     if (oldOnes.length) {
       dbg(`[fetch-doc] Skipping OLD/archive folder(s): ${oldOnes.map((f) => f.name).join(", ")}`);
-      foldersToProcess = foldersToProcess.filter((f) => !isOldFolder(f.name ?? ""));
+      foldersToProcess = foldersToProcess.filter((f) => !isOldFolderName(f.name ?? ""));
     }
   }
 
@@ -416,9 +415,10 @@ async function readDriveFolder(
     if (!folder.id || !folder.name) continue;
     const nameLC = folder.name.toLowerCase();
     // "Creative" folders hold PSDs/concepts — never pull images from them.
-    // "For Approval" (or "Approval") folders hold the signed-off exports — always pull images.
+    // "For Approval" / "Approved" / "Sign-Off" folders hold the signed-off
+    // exports — always pull images (FIX #22 broadened the recognized names).
     // Once inside an approval folder, all deeper subfolders inherit that flag.
-    const isApprovalFolder = nameLC.includes("approval");
+    const isApprovalFolder = isApprovalFolderName(folder.name);
     const isCreativeFolder = nameLC === "creative" || nameLC.startsWith("creative ");
     const passImages = isCreativeFolder ? undefined : images; // block images from creative folder
     const nextInsideApproval = effectiveInsideApproval || isApprovalFolder;
@@ -449,6 +449,19 @@ async function readDriveFolder(
     : header + "(No readable content found in this folder.)";
 }
 
+// Truncate content to a cap, but SAY SO when it bites. A silent slice() used to
+// cut long copy docs / folder listings with no signal, so the model could
+// report copy or assets as "absent from the doc" when they simply lived past
+// the cut — a false-mismatch source. The marker tells the model the truth:
+// don't assert absence of anything that may be in the unreviewed remainder.
+function truncateWithMarker(content: string, cap: number): string {
+  if (content.length <= cap) return content;
+  return (
+    content.slice(0, cap) +
+    `\n\n[NOTE: this document was TRUNCATED at ${cap.toLocaleString()} characters — ${(content.length - cap).toLocaleString()} characters were NOT included. Do NOT report copy, assets, or details as missing/absent from this document: they may exist in the truncated portion. Treat any "not found in doc" conclusion as couldn't-verify.]`
+  );
+}
+
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function POST(request: Request) {
@@ -471,7 +484,7 @@ export async function POST(request: Request) {
       if (!content) {
         return NextResponse.json({ error: "Doc appears to be empty." }, { status: 422 });
       }
-      return NextResponse.json({ content: content.slice(0, 12000), type: "doc" });
+      return NextResponse.json({ content: truncateWithMarker(content, 12000), type: "doc" });
     }
 
     // 2. Google Drive folder link
@@ -490,7 +503,7 @@ export async function POST(request: Request) {
         dbg(`[fetch-doc] Strict approval pass queued 0 images — retrying with approval gate bypassed.`);
         content = await readDriveFolder(folderId, auth, 0, undefined, images, "", false, { foldersVisited: 0, visitedIds: new Set() }, true);
       }
-      return NextResponse.json({ content: content.slice(0, 30000), type: "folder", images });
+      return NextResponse.json({ content: truncateWithMarker(content, 30000), type: "folder", images });
     }
 
     // 3. Google Drive file link (non-Doc)
@@ -506,7 +519,7 @@ export async function POST(request: Request) {
       if (!content) {
         return NextResponse.json({ error: "File appears to be empty." }, { status: 422 });
       }
-      return NextResponse.json({ content: content.slice(0, 12000), type: "file" });
+      return NextResponse.json({ content: truncateWithMarker(content, 12000), type: "file" });
     }
 
     return NextResponse.json(

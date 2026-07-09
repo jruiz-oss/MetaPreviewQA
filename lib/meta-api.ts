@@ -709,6 +709,61 @@ async function fetchMusicStatus(
   }
 }
 
+// ─── Live-video detection (FIX #23) ──────────────────────────────────────────
+// asset_feed_spec.videos retains replaced videos exactly like images[] retains
+// replaced images — but only IMAGES got the customization-rules live/stale
+// filter (FIX #8 lineage). Every pool video's thumbnail was attached, so a
+// prior promo's video surfaced in visual QA as an unexplained "old creative".
+//
+// Pure mapping (exported for regression tests): a video is LIVE when one of
+// its adlabels is referenced by a rule's video_label. Returns null whenever
+// the data can't discriminate — no video_label rules, no labeled videos, or
+// zero matches (never narrow to empty; same guard as the image rules filter).
+export function computeLiveVideoIds(
+  videos: Array<{ video_id?: string; adlabels?: Array<{ name?: string }> }> | undefined,
+  rules: Array<{ video_label?: { name?: string } }> | undefined
+): Set<string> | null {
+  const vids = videos ?? [];
+  const liveLabels = new Set(
+    (rules ?? []).map((r) => r.video_label?.name).filter(Boolean) as string[]
+  );
+  if (!liveLabels.size) return null; // rules don't reference videos → can't tell
+  const anyLabeled = vids.some((v) => (v.adlabels ?? []).some((l) => l.name));
+  if (!anyLabeled) return null; // videos carry no labels → can't map rules to them
+  const live = new Set<string>();
+  for (const v of vids) {
+    if (v.video_id && (v.adlabels ?? []).some((l) => l.name && liveLabels.has(l.name))) {
+      live.add(v.video_id);
+    }
+  }
+  return live.size > 0 ? live : null; // never filter the whole comparison away
+}
+
+// Isolated fetch for the liveness mapping. video adlabels / rule video_label
+// are NOT added to the main creative read on purpose: Graph fails an entire
+// request when any single field is forbidden (the asset_feed_spec.audios
+// lesson), so this degrades to null — current behavior — instead of ever
+// breaking the creative read. Only called when the ad has 2+ feed videos
+// (with 0–1 there is nothing to filter).
+async function fetchVideoLiveness(
+  adId: string,
+  accessToken: string
+): Promise<Set<string> | null> {
+  try {
+    const fields = encodeURIComponent(
+      "creative{asset_feed_spec{videos{video_id,adlabels{name}},asset_customization_rules{video_label{name}}}}"
+    );
+    const url = `${GRAPH_API}/${adId}?fields=${fields}&access_token=${accessToken}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000), cache: "no-store" });
+    const data = await res.json();
+    if (data.error) return null;
+    const afs = data.creative?.asset_feed_spec;
+    return computeLiveVideoIds(afs?.videos, afs?.asset_customization_rules);
+  } catch {
+    return null;
+  }
+}
+
 // ─── Placement/date-aware helpers ───────────────────────────────────────────
 
 // Asset labels are named like "placement_asset_<hex>_<unixMillis>". The trailing
@@ -871,7 +926,7 @@ export async function fetchAdContent(
   const singleVideoId = data.creative?.object_story_spec?.video_data?.video_id;
   const allVideoIds = Array.from(new Set([...feedVideoIds, ...(singleVideoId ? [singleVideoId] : [])]));
 
-  const [placements, dimMap, videoDims, musicStatus] = await Promise.all([
+  const [placements, dimMap, videoDims, musicStatus, liveVideoIds] = await Promise.all([
     adsetId ? fetchAdsetPlacements(adsetId, accessToken) : Promise.resolve(null),
     accountId && allHashes.length > 0
       ? fetchBatchImageDimensions(accountId, allHashes, accessToken)
@@ -880,7 +935,16 @@ export async function fetchAdContent(
       ? Promise.all(allVideoIds.map((id) => fetchVideoDimensions(id, accessToken)))
       : Promise.resolve([] as ((ImageDimensions & { thumbnailUrl?: string }) | null)[]),
     fetchMusicStatus(adId, accessToken),
+    // FIX #23: live-vs-stale mapping for feed VIDEOS (images already have the
+    // rules filter). Only worth a request when 2+ feed videos exist; null =
+    // indeterminate = keep everything (current behavior).
+    feedVideoIds.length > 1 ? fetchVideoLiveness(adId, accessToken) : Promise.resolve(null),
   ]);
+
+  // A video counts as live when the liveness map is indeterminate, when it IS
+  // the configured object_story_spec video, or when a rule references it.
+  const videoIsLive = (id: string | undefined | null): boolean =>
+    !liveVideoIds || !id || id === singleVideoId || liveVideoIds.has(id);
 
   // Music ("Add Music") is read in its own request because the asset_feed_spec.audios field
   // returns (#100) for ads using licensed music and would otherwise fail the whole creative
@@ -941,7 +1005,12 @@ export async function fetchAdContent(
   // Image-only snapshot BEFORE video dims are mixed in — consistency checks
   // must not compare image sizes against video renditions.
   const imageDimensions: ImageDimensions[] = [...creativeDimensions];
-  for (const d of videoDims) addDim(d);
+  // FIX #23 (mirrors FIX #8 for images): a stale, no-longer-served video's
+  // dimensions must not feed the format checks or satisfy a size expectation
+  // it no longer serves. Indeterminate liveness keeps everything.
+  videoDims.forEach((d, i) => {
+    if (videoIsLive(allVideoIds[i])) addDim(d);
+  });
 
   const adFormats = data.creative?.asset_feed_spec?.ad_formats ?? [];
 
@@ -1106,6 +1175,13 @@ export async function fetchAdContent(
   for (const c of chosenImageCandidates) addUrl(c.url);
   const videoThumbUrls = new Set<string>();
   for (const vid of data.creative?.asset_feed_spec?.videos ?? []) {
+    // FIX #23: skip thumbnails of pool videos the customization rules no
+    // longer reference — stale leftovers from an earlier edit, the video-side
+    // twin of the phantom "April" image reads. Indeterminate → keep all.
+    if (!videoIsLive(vid.video_id)) {
+      dbg(`[meta-api][img] ad=${adId} SKIP stale pool video ${vid.video_id} — not referenced by any customization rule.`);
+      continue;
+    }
     if (vid.thumbnail_url) videoThumbUrls.add(vid.thumbnail_url);
     addUrl(vid.thumbnail_url);
   }
@@ -1122,6 +1198,18 @@ export async function fetchAdContent(
       videoThumbUrls.add(thumb);
       addUrl(thumb);
     }
+  }
+
+  // FIX #26: last-resort live image. Some older single-image ads carry ONLY
+  // creative.image_url — no asset_feed_spec pool, no resolvable image_hash —
+  // so the model was told "no live image returned by the Meta API" even though
+  // Meta named the serving image right there. Used strictly when every other
+  // source produced ZERO candidates: this does NOT reintroduce the removed
+  // effective-post anchor (which could override the pool with a stale
+  // published post); it can never override anything, only fill an empty set.
+  if (creativeImageUrls.length === 0 && data.creative?.image_url) {
+    addUrl(data.creative.image_url);
+    dbg(`[meta-api][img] ad=${adId} using creative.image_url as last-resort live image (no pool/hash/video candidates).`);
   }
 
   // --- Per-image placement + date context ---------------------------------

@@ -52,6 +52,9 @@ npm run dev
 | `KV_REST_API_URL` | optional | Upstash Redis URL — when set, the Google token is shared across all serverless instances |
 | `KV_REST_API_TOKEN` | optional | Upstash Redis token |
 | `QA_DEBUG` | optional | Set to `1` for verbose server logs (folder/asset tracing, token usage, model reasoning); leave unset in production |
+| `QA_MODEL` | optional | Claude model for QA runs. Defaults to `claude-sonnet-5`. Set to `claude-sonnet-4-6` to roll back or `claude-opus-4-8` to escalate |
+| `QA_THINKING_BUDGET` | optional | Extended-thinking token budget per call (default `3000`, capped at 12000) |
+| `QA_TIMEZONE` | optional | IANA timezone for the TODAY'S DATE line used in promo-date checks (default `America/Phoenix`) |
 
 ---
 
@@ -82,4 +85,4 @@ Every push to `main` auto-deploys. Done.
 - **Preview link access:** Links must be publicly viewable without a Meta login. If a link requires login, Claude will flag it as unverifiable and mark that check as a warning.
 - **No database:** Stateless by design — nothing is saved. Each QA run is independent.
 - **Auth:** Single shared password stored as an env variable. The cookie lasts 30 days per device.
-- **Model:** Uses `claude-sonnet-4-6` by default (set in `app/api/qa/route.ts`).
+- **Model:** Uses `claude-sonnet-5` by default; override with the `QA_MODEL` env variable (no code change needed).
