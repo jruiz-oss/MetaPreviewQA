@@ -31,7 +31,7 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#f8f8f6]">
+    <div className="min-h-screen flex items-center justify-center bg-red-600">
       <div className="w-full max-w-sm">
         <div className="mb-8">
           <img src="/vera-wordmark-transparent.png" alt="Vera" className="h-[67px] mb-5 block ml-0" />
