@@ -16,20 +16,48 @@ export const maxDuration = 300;
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// Signature-based check for the one Anthropic error that means "the account
+// is out of API credits" — a 400 whose body carries the canonical billing
+// message. Deliberately narrow (like lib/error-classify.ts's approach): only
+// this exact, known signature gets relabeled "credits" so an unrelated 400
+// (bad request shape, etc.) is never misreported as a billing issue.
+function isOutOfCreditsError(err: unknown): boolean {
+  const status = (err as { status?: number })?.status;
+  if (status !== 400) return false;
+  const raw =
+    err instanceof Error
+      ? err.message
+      : (() => {
+          try {
+            return JSON.stringify(err);
+          } catch {
+            return "";
+          }
+        })();
+  const m = raw.toLowerCase();
+  return m.includes("credit balance is too low") || (m.includes("credit balance") && m.includes("billing"));
+}
+
 // QA model — env-overridable so switching models is a config change, not a
 // deploy. Default is Sonnet 5 (released June 2026): stronger vision/reasoning
 // than Sonnet 4.6 at equal-or-lower cost ($2/$10 intro until Aug 2026, then
 // $3/$15 — same as 4.6). Set QA_MODEL=claude-sonnet-4-6 to roll back, or
 // QA_MODEL=claude-opus-4-8 to escalate.
 const QA_MODEL = process.env.QA_MODEL || "claude-sonnet-5";
-// Extended-thinking budget. 1500 was tight for the multi-image work each call
-// does (extract all legible text from up to ~18 images, then diff). 3000
-// costs ~$0.02 more per unit and measurably reduces missed/hallucinated
-// findings. Env-overridable; must stay < max_tokens (16000).
-const QA_THINKING_BUDGET = Math.min(
-  Number(process.env.QA_THINKING_BUDGET) || 3000,
-  12000
-);
+// Thinking effort. Sonnet 5 (and newer models) replaced the old
+// `thinking.budget_tokens` knob with adaptive thinking + an effort level set via
+// `output_config.effort`. We default to "high" because the multi-image work each
+// call does (extract all legible text from up to ~18 images, then diff) measurably
+// benefits from more reasoning — the intentional "spend a little more for accuracy"
+// trade the old 3000-token budget encoded. Env-overridable via QA_EFFORT
+// (low | medium | high | xhigh | max); invalid/unset falls back to "high".
+const QA_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+type QaEffort = (typeof QA_EFFORT_LEVELS)[number];
+const QA_EFFORT: QaEffort = (QA_EFFORT_LEVELS as readonly string[]).includes(
+  process.env.QA_EFFORT ?? ""
+)
+  ? (process.env.QA_EFFORT as QaEffort)
+  : "high";
 
 // Diagnostic logging is gated behind QA_DEBUG so production logs stay quiet and
 // never echo work-order copy or the model's chain-of-thought. Set QA_DEBUG=1
@@ -1179,16 +1207,18 @@ export async function POST(request: Request) {
         message = await client.messages.create({
           model: QA_MODEL,
           max_tokens: 16000,
-          // Extended thinking: give the model a private scratchpad to do the
+          // Adaptive thinking: give the model a private scratchpad to do the
           // multi-step work this QA demands (extract all legible text from each
           // image, then diff the two; reason about dates/format) BEFORE it
           // commits to JSON. This materially cuts missed mismatches and
           // hallucinated findings. Thinking tokens bill as output — the
           // intentional "spend a little more for accuracy" trade.
+          // Sonnet 5+ rejects the old { type: "enabled", budget_tokens }; the
+          // amount of thinking is now driven by output_config.effort below.
           // NOTE: the API requires temperature=1 (the default) whenever
-          // thinking is enabled, so temperature is intentionally not set.
-          // budget_tokens must be < max_tokens.
-          thinking: { type: "enabled", budget_tokens: QA_THINKING_BUDGET },
+          // thinking is on, so temperature is intentionally not set.
+          thinking: { type: "adaptive" },
+          output_config: { effort: QA_EFFORT },
           // Structured output: the model returns its report by calling this tool,
           // so the result arrives as a validated object rather than free-text
           // JSON we have to parse (and that used to crash on unescaped quotes).
@@ -1703,9 +1733,15 @@ export async function POST(request: Request) {
       }
     }
     console.error("QA API error:", message, err instanceof Error ? err.stack : err);
+    const outOfCredits = isOutOfCreditsError(err);
     return NextResponse.json(
-      { error: `QA check failed: ${message}` },
-      { status: 500 }
+      {
+        error: outOfCredits
+          ? "Anthropic API credit balance is too low. Add credits in Plans & Billing, then retry."
+          : `QA check failed: ${message}`,
+        errorKind: outOfCredits ? "credits" : "unknown",
+      },
+      { status: outOfCredits ? 402 : 500 }
     );
   }
 }

@@ -338,7 +338,20 @@ can never override the pool, only fill an empty set.
 
 ## Model config
 
-Model + thinking budget are env vars now: `QA_MODEL` (default
-`claude-sonnet-5`) and `QA_THINKING_BUDGET` (default 3000). No code change
-needed to switch or roll back. `QA_TIMEZONE` (default `America/Phoenix`)
+Model + thinking effort are env vars: `QA_MODEL` (default `claude-sonnet-5`)
+and `QA_EFFORT` (default `high`; one of low|medium|high|xhigh|max). No code
+change needed to switch or roll back. `QA_TIMEZONE` (default `America/Phoenix`)
 controls the TODAY'S DATE grounding line.
+
+# Round 6 (2026-07-10) — shipped ✅
+
+## 27. `thinking.type: "enabled"` rejected by Sonnet 5 ✅ fixed
+
+Sonnet 5 (and newer models) dropped the old `thinking: { type: "enabled",
+budget_tokens }` knob — the API now returns 400 `"thinking.type.enabled" is
+not supported for this model. Use "thinking.type.adaptive" and
+"output_config.effort"`. Every QA batch failed. Switched the request to
+`thinking: { type: "adaptive" }` + `output_config: { effort: QA_EFFORT }`.
+The old `QA_THINKING_BUDGET` env var is replaced by `QA_EFFORT` (default
+`high` to preserve the accuracy-over-cost bias the old 3000-token budget
+encoded). No QA logic touched.
