@@ -56,7 +56,7 @@ export function classifyFetchError(err: unknown): ClassifiedError {
     return {
       kind: "config",
       message:
-        "Google isn't connected on the server yet. Click “Reconnect Google” to authorize access.",
+        "Google isn't connected on the server yet. Click “Reconnect Google” and sign in with your personal Commit email to authorize access.",
       raw,
     };
   }
@@ -76,7 +76,8 @@ export function classifyFetchError(err: unknown): ClassifiedError {
   if (authSignatures.some((s) => m.includes(s)) || status === 401) {
     return {
       kind: "auth",
-      message: "Google authorization expired. Click “Reconnect Google” to restore access.",
+      message:
+        "Google authorization expired. Click “Reconnect Google” and sign in with your personal Commit email (not a shared or client account) to restore access.",
       raw,
     };
   }

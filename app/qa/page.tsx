@@ -389,6 +389,44 @@ function CheckCard({ label, result }: { label: string; result: CheckResult }) {
   );
 }
 
+// Small "out of juice" robot shown when the Anthropic account has run out of
+// API credits — swapped in for the generic red error banner since the raw
+// SDK error text isn't useful to a non-engineer and "add credits" is the only
+// fix. Both arms swing on a CSS keyframe loop; keyframes are scoped to this
+// component's own <style> tag so they don't leak globally.
+function OutOfJuiceRobot() {
+  return (
+    <div className="flex flex-col items-center justify-center gap-1.5 py-4 text-center">
+      <style>{`
+        @keyframes qa-robot-arm-left { 0%, 100% { transform: rotate(-20deg); } 50% { transform: rotate(30deg); } }
+        @keyframes qa-robot-arm-right { 0%, 100% { transform: rotate(20deg); } 50% { transform: rotate(-30deg); } }
+      `}</style>
+      <svg width="56" height="56" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+        <rect x="26" y="8" width="12" height="9" rx="2" fill="#9CA3AF" />
+        <circle cx="32" cy="6" r="2" fill="#9CA3AF" />
+        <rect x="18" y="17" width="28" height="24" rx="5" fill="#B0B7C0" />
+        <circle cx="26" cy="27" r="2.5" fill="#374151" />
+        <circle cx="38" cy="27" r="2.5" fill="#374151" />
+        <rect x="25" y="34" width="14" height="2.5" rx="1.25" fill="#374151" />
+        <rect
+          x="8" y="19" width="6" height="16" rx="3" fill="#9CA3AF"
+          style={{ transformOrigin: "11px 20px", animation: "qa-robot-arm-left 1.1s ease-in-out infinite" }}
+        />
+        <rect
+          x="50" y="19" width="6" height="16" rx="3" fill="#9CA3AF"
+          style={{ transformOrigin: "53px 20px", animation: "qa-robot-arm-right 1.1s ease-in-out infinite" }}
+        />
+        <rect x="21" y="41" width="8" height="13" rx="2" fill="#6B7280" />
+        <rect x="35" y="41" width="8" height="13" rx="2" fill="#6B7280" />
+      </svg>
+      <p className="text-sm font-medium text-gray-700">Out of juice</p>
+      <p className="text-xs text-gray-500 max-w-xs">
+        Anthropic API credit balance is too low. Add credits, then re-run the QA check.
+      </p>
+    </div>
+  );
+}
+
 // Coerce an API `error` payload to a readable string. Some failure paths hand
 // back an error OBJECT (e.g. a platform-level JSON error body) instead of a
 // string; `new Error(obj)` then renders the useless "[object Object]" in the
@@ -415,6 +453,10 @@ export default function QAPage() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<QAResult | null>(null);
   const [error, setError] = useState("");
+  // Set when any /api/qa call comes back with errorKind: "credits" — the
+  // Anthropic account is out of API credits. Shown instead of the generic red
+  // error banner since "add credits and retry" is the only actionable step.
+  const [outOfCredits, setOutOfCredits] = useState(false);
   // Google reconnect banner — driven by ?google_connected / ?google_error
   // returned from the OAuth callback. Cleared from the URL after reading.
   const [googleNotice, setGoogleNotice] = useState<{ kind: "ok" | "error"; msg: string } | null>(null);
@@ -428,8 +470,8 @@ export default function QAPage() {
         kind: "error",
         msg:
           code === "no_refresh_token"
-            ? "Google didn't return a refresh token. Remove Vera under your Google account's third-party access, then reconnect."
-            : `Google reconnect failed (${code}). Try again.`,
+            ? "Google didn't return a refresh token. Remove Vera under your Google account's third-party access, then reconnect with your personal Commit email."
+            : `Google reconnect failed (${code}). Try again and sign in with your personal Commit email — not a shared or client account.`,
       });
     }
     if (params.has("google_connected") || params.has("google_error")) {
@@ -846,6 +888,7 @@ export default function QAPage() {
     setLoading(true);
     setResult({ overall_status: "pass", units: [], critical_issues: [], notes: "" });
     setError("");
+    setOutOfCredits(false);
     setProgress({ done: 0, total: groups.length });
 
     const labeledDocs = detectedDocs
@@ -894,6 +937,7 @@ export default function QAPage() {
           );
         }
         if (!res.ok) {
+          if ((data as { errorKind?: string }).errorKind === "credits") setOutOfCredits(true);
           throw new Error(asErrorMessage(data.error, `${group.label}: QA check failed (HTTP ${res.status})`));
         }
 
@@ -1101,10 +1145,15 @@ export default function QAPage() {
               ← New check
             </button>
           )}
+          {/* Visible reminder — people forget which Google account Vera uses and
+              re-auth with a client or shared account, which breaks Drive access. */}
+          <span className="hidden sm:inline text-xs text-gray-500">
+            Use your personal Commit email →
+          </span>
           <a
             href="/api/google/connect"
             className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
-            title="Re-authorize Google Drive access (fixes 'invalid_grant' errors)"
+            title="Re-authorize Google Drive access — sign in with your personal Commit email (fixes 'invalid_grant' errors)"
           >
             Reconnect Google
           </a>
@@ -1288,7 +1337,7 @@ export default function QAPage() {
                           <a
                             href="/api/google/connect"
                             className="shrink-0 px-3 py-1.5 rounded-lg bg-gray-900 text-white text-xs font-medium hover:bg-gray-800 transition-colors"
-                            title="Re-authorize Google access, then retry"
+                            title="Re-authorize Google access with your personal Commit email, then retry"
                           >
                             Reconnect Google
                           </a>
@@ -1482,10 +1531,16 @@ export default function QAPage() {
               )}
             </div>
 
-            {error && (
-              <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
-                {error}
+            {outOfCredits ? (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+                <OutOfJuiceRobot />
               </div>
+            ) : (
+              error && (
+                <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
+                  {error}
+                </div>
+              )
             )}
 
             {/* Ignore copy doc toggle */}
@@ -1543,10 +1598,16 @@ export default function QAPage() {
           /* Results */
           <div className="space-y-5">
             {/* Any per-campaign errors (some campaigns may fail while others succeed) */}
-            {error && (
-              <div className="bg-red-50 border border-red-200 rounded-2xl px-5 py-3 text-sm text-red-700">
-                {error}
+            {outOfCredits ? (
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl px-5 py-3">
+                <OutOfJuiceRobot />
               </div>
+            ) : (
+              error && (
+                <div className="bg-red-50 border border-red-200 rounded-2xl px-5 py-3 text-sm text-red-700">
+                  {error}
+                </div>
+              )
             )}
 
             {/* Top bar — download the whole results view as a PDF to share. */}
