@@ -446,6 +446,8 @@ const ENHANCEMENT_LABELS: Record<string, string> = {
   show_destination_blurbs: "Destination Blurbs",
   video_filtering: "Video Filtering",
   video_uncrop: "Expand Video",
+  // System-level / legacy fields — reported by the API, no Ads Manager toggle
+  ig_video_native_subtitle: "IG Video Native Subtitles",
 };
 
 // Confirmed user-controllable enhancement toggles. If one of these keys is
@@ -472,6 +474,30 @@ const CONFIRMED_ENHANCEMENT_KEYS = [
 const UNRELIABLE_API_KEYS = new Set([
   "translate_voiceover",
 ]);
+
+// FIX #28: keys Meta reports with enroll_status OPT_IN that have NO
+// user-controllable toggle in Ads Manager — either retired from the UI (legacy)
+// or system-level fields Meta sets itself. Flagging them produced findings a
+// reviewer physically cannot resolve ("ig video native subtitle, Adjust
+// Brightness & Contrast, Standard Enhancements (legacy) are ON" — Camelback,
+// 2026-08-12: reviewer confirmed the toggles were not on). They stay visible as
+// informational manual-review lines; they no longer create a finding.
+const NON_UI_ENHANCEMENT_KEYS = new Set<string>([
+  "standard_enhancements",     // retired from Ads Manager, still reported on older creatives
+  "ig_video_native_subtitle",  // IG-side system field, never a user toggle
+]);
+
+// Keys whose ON state IS a real, actionable finding. Deliberately an allowlist:
+// an unrecognised key means we don't know whether a reviewer can even turn it
+// off, and the codebase rule is never to assert a defect from input we can't
+// interpret. Unknown + non-UI keys degrade to informational instead.
+// "music" is not a degrees_of_freedom_spec field (it's fetched separately) but
+// is a genuine user-controllable toggle, so it's flaggable.
+export function isFlaggableEnhancementKey(key: string): boolean {
+  if (NON_UI_ENHANCEMENT_KEYS.has(key)) return false;
+  if (ALLOWED_ENHANCEMENT_KEYS.has(key)) return false;
+  return key === "music" || key in ENHANCEMENT_LABELS;
+}
 
 // Enhancements that are intentionally always left ON and should NOT be flagged by QA.
 // They still appear in the enhancements list (marked "allowed"), but being ON does not
@@ -1290,6 +1316,26 @@ export async function fetchAdContent(
         ),
       ];
     }
+  }
+
+  // FIX #28: enhancements Meta reports as opted-in but that have no Ads Manager
+  // toggle are surfaced here instead of as a finding, so the information isn't
+  // lost. Wording deliberately avoids the word "ON" — the results page treats
+  // /\bON\b/ in the enhancements note as a real finding.
+  const informational = (aiEnhancements ?? []).filter(
+    (e) =>
+      e.status === "on" &&
+      !isFlaggableEnhancementKey(e.key) &&
+      !ALLOWED_ENHANCEMENT_KEYS.has(e.key) // allowed-by-policy, already handled
+  );
+  if (informational.length) {
+    manualCheckItems = [
+      ...manualCheckItems,
+      ...informational.map(
+        (e) =>
+          `${e.label} — reported as opted-in by Meta's API but has no user-controllable Ads Manager toggle; informational only, no action needed`
+      ),
+    ];
   }
 
   return {

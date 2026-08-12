@@ -4,7 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { google } from "googleapis";
 import sharp from "sharp";
 import { getGoogleAuth } from "@/lib/google-auth";
-import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, MANUAL_CHECK_ITEMS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
+import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, isFlaggableEnhancementKey, MANUAL_CHECK_ITEMS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
 import { computeCompletenessLine } from "@/lib/completeness";
 import { computeUrlComparisonLine, computeUrlMatchStatus } from "@/lib/url-compare";
 import { tokenize, computeFormatSizeCheck, type ComputedCheck } from "@/lib/format-check";
@@ -240,7 +240,14 @@ function computeEnhancementsCheck(
       flaggedOn: false,
     };
   }
-  const onNotAllowed = enhancements.filter((e) => e.status === "on" && !ALLOWED_ENHANCEMENT_KEYS.has(e.key));
+  // FIX #28: only enhancements that map to a real, user-controllable Ads Manager
+  // toggle can produce a finding. Legacy/system-level keys (standard_enhancements,
+  // ig_video_native_subtitle, anything unrecognised) are reported as opted-in by
+  // the API but cannot be switched off by a reviewer — they now travel as
+  // informational manual-review lines (see isFlaggableEnhancementKey).
+  const onNotAllowed = enhancements.filter(
+    (e) => e.status === "on" && !ALLOWED_ENHANCEMENT_KEYS.has(e.key) && isFlaggableEnhancementKey(e.key)
+  );
   if (onNotAllowed.length) {
     const names = onNotAllowed.map((e) => e.label).join(", ");
     return {
@@ -254,7 +261,7 @@ function computeEnhancementsCheck(
   return {
     check: {
       status: "warning",
-      note: `All API-readable enhancements are off. The following must still be verified manually in Ads Manager: ${manualList}.`,
+      note: `All user-controllable enhancements the API reports are off. The following must still be verified manually in Ads Manager: ${manualList}.`,
     },
     flaggedOn: false,
   };
