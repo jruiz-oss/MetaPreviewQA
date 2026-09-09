@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Vera — Commit Agency",
+  title: "Vera - Meta QA",
   description: "Social ad QA tool",
   icons: {
     icon: "/icon.png",
