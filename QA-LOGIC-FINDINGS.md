@@ -355,3 +355,40 @@ not supported for this model. Use "thinking.type.adaptive" and
 The old `QA_THINKING_BUDGET` env var is replaced by `QA_EFFORT` (default
 `high` to preserve the accuracy-over-cost bias the old 3000-token budget
 encoded). No QA logic touched.
+
+# Round 7 (2026-09-09) — shipped, flag OFF by default
+
+## 29. Carousel pool leftovers after a creative swap  ⚙ env-gated
+
+Workflow context: the team duplicates a campaign, the copies land paused, then
+each copy's creative is swapped and the ad runs. `asset_feed_spec.images` is a
+pool that keeps the REPLACED card image; `object_story_spec.link_data.
+child_attachments` lists the cards actually configured. With no customization
+rules the FIX #8 filter is inactive, so `isCarousel` kept the whole pool and
+the old card reached the model next to the new one → stale-creative finding.
+
+`selectCarouselCandidates()` (lib/meta-api.ts) drops pool images that are NOT a
+configured card AND share an exact WxH with a card image. Unique-size assets,
+unknown-dimension assets and all cards are kept, so the size set (and every
+deterministic completeness/format check) is unchanged; only the visual-QA
+input narrows. Never narrows to empty; inert when FIX #8 is active or no card
+hash resolved.
+
+Gated behind `QA_PREFER_CARD_HASHES=1`. With the flag off the code logs (under
+`QA_DEBUG`) what it WOULD drop as `[meta-api][cards]`. Flip the flag on in
+Vercel after a couple of clean runs. Regression test:
+`lib/__tests__/carousel-card-pool.test.ts`. Asset-feed carousels (no
+child_attachments) are not affected — the per-image `staleNote` remains the
+mechanism there.
+
+## Also in this round (not QA logic)
+
+- Campaign import requests `status,source_ad_id` and ad-set flight dates; ads
+  duplicated and never edited since (`isUneditedCopy`, 10-minute window) are
+  hidden by default via a visible toggle; ad-set picker. Test:
+  `lib/__tests__/unedited-copy.test.ts`.
+- /api/qa isolates per-batch Claude failures into "couldn't verify" warning
+  units (`qaError`) instead of failing the chunk; UI offers a retry of just
+  those ads. SDK `maxRetries: 0`, 170s call timeout, download timeouts,
+  `maxDuration` on fetch-doc / campaign-ads.
+- Cancelable runs, beforeunload guard, tab-scoped sessionStorage of INPUTS only.

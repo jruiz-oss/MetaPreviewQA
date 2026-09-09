@@ -3,6 +3,14 @@ import { google, docs_v1 } from "googleapis";
 import { getGoogleAuth } from "@/lib/google-auth";
 import { classifyFetchError } from "@/lib/error-classify";
 import { isAuthedRequest } from "@/lib/auth";
+
+// The Drive folder walk is sequential (up to MAX_FOLDERS_SCANNED folders, each
+// with paged listings + per-file doc reads, and it runs twice on the FIX #3
+// approval-gate bypass). Only /api/qa declared a maxDuration; this route ran at
+// the platform default, so a deep shared-drive tree 504'd → classified as a
+// network error → the run proceeded with NO Drive creative at all, which is the
+// biggest single amplifier of "couldn't verify" results.
+export const maxDuration = 120;
 import {
   isOldFolderName,
   isChannelFolderName,

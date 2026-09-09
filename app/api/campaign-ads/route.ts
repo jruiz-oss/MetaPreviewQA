@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 import { fetchCampaignAdsList, fetchCampaignRules } from "@/lib/meta-api";
 import { isAuthedRequest } from "@/lib/auth";
 
+// Campaign ad listing pages through up to MAX_AD_PAGES × 200 ads plus the
+// automation-rules lookup; give it headroom beyond the platform default.
+export const maxDuration = 60;
+
 export async function POST(request: Request) {
   if (!isAuthedRequest(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

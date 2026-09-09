@@ -14,7 +14,18 @@ import { isAuthedRequest } from "@/lib/auth";
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
 export const maxDuration = 300;
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const client = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  // The SDK's built-in retries (default 2) used to stack UNDER the manual
+  // 5-attempt backoff loop in runBatch — up to 15 HTTP attempts per call, easily
+  // past the 300s function budget. The manual loop owns retries (it also
+  // handles connection errors), so the SDK does none.
+  maxRetries: 0,
+  // A single hung request must fail inside the function budget so the batch
+  // can degrade to "couldn't verify" instead of the whole request 504ing.
+  // The SDK default is 10 minutes.
+  timeout: 170_000,
+});
 
 // Signature-based check for the one Anthropic error that means "the account
 // is out of API credits" — a 400 whose body carries the canonical billing
@@ -416,13 +427,27 @@ function isSafeImageUrl(raw: string): boolean {
 // Download a URL-based image server-side, resize, and return as base64.
 // `context` (optional) is a human-readable placement/date note attached to this
 // specific live image so the QA prompt can label it; null when the flag is off.
+// Per-download ceilings. Meta CDN and Drive normally answer in well under a
+// second; these only bite on a hung connection. Drive gets a little longer
+// because `alt=media` on a large original can legitimately take a few seconds.
+const IMAGE_DOWNLOAD_TIMEOUT_MS = 15_000;
+const DRIVE_DOWNLOAD_TIMEOUT_MS = 20_000;
+
 async function downloadUrlImage(url: string, context?: string | null): Promise<FetchedImage[]> {
   try {
     if (!isSafeImageUrl(url)) {
       dbg(`[qa] SKIP live image — host not in allowlist or unsafe URL: ${url}`);
       return [];
     }
-    const res = await fetch(url, { cache: "no-store", redirect: "error" });
+    // Bounded: a stalled CDN response used to hold this worker until the 300s
+    // function budget ran out and the whole request 504'd. On timeout this
+    // degrades to the existing "could not be downloaded — couldn't verify"
+    // path, which is conservative (never a false fail).
+    const res = await fetch(url, {
+      cache: "no-store",
+      redirect: "error",
+      signal: AbortSignal.timeout(IMAGE_DOWNLOAD_TIMEOUT_MS),
+    });
     if (!res.ok) {
       dbg(`[qa] SKIP live Meta image — HTTP ${res.status} for ${url}`);
       return [];
@@ -474,11 +499,10 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
           // uploaded video and produces a JPEG preview frame, accessible via
           // thumbnailLink. We bump the size to 1568px to match the image QA
           // resolution so Claude can read overlay text and branding clearly.
-          const metaRes = await drive.files.get({
-            fileId: ref.id,
-            fields: "thumbnailLink",
-            supportsAllDrives: true,
-          });
+          const metaRes = await drive.files.get(
+            { fileId: ref.id, fields: "thumbnailLink", supportsAllDrives: true },
+            { timeout: DRIVE_DOWNLOAD_TIMEOUT_MS }
+          );
           const rawThumbUrl = metaRes.data.thumbnailLink;
           if (!rawThumbUrl) {
             dbg(`[qa] SKIP video "${ref.name}" — Drive has not generated a thumbnail yet (file may still be processing).`);
@@ -498,7 +522,7 @@ async function downloadDriveImages(refs: DriveImageRef[]): Promise<Map<string, F
 
         const res = await drive.files.get(
           { fileId: ref.id, alt: "media", supportsAllDrives: true },
-          { responseType: "arraybuffer" }
+          { responseType: "arraybuffer", timeout: DRIVE_DOWNLOAD_TIMEOUT_MS }
         );
         const rawBuf = Buffer.from(res.data as ArrayBuffer);
         const prepared = await prepareImageForClaude(rawBuf);
@@ -1250,19 +1274,28 @@ export async function POST(request: Request) {
         // even though a short backoff almost always recovers them.
         const isRateLimit =
           status === 429 || (err instanceof Error && err.message.includes("rate_limit"));
+        // Connection drops / SDK-side timeouts used to be retried by the SDK
+        // itself; with maxRetries: 0 on the client they're retried here instead.
+        const isConnection =
+          err instanceof Anthropic.APIConnectionError ||
+          err instanceof Anthropic.APIConnectionTimeoutError;
         const isTransient =
           isRateLimit ||
+          isConnection ||
           status === 529 ||
           (typeof status === "number" && status >= 500) ||
           (err instanceof Error && err.message.includes("overloaded"));
         if (isTransient && attempt < MAX_ATTEMPTS - 1) {
-          // Prefer the server's retry-after (seconds); else exponential backoff.
+          // Prefer the server's retry-after (seconds, capped so a huge value
+          // can't park the worker past the function budget); else exponential
+          // backoff. Connection errors retry fast — they're usually momentary.
           const headers = (err as { headers?: Record<string, string> })?.headers;
           const retryAfter = headers ? Number(headers["retry-after"]) : NaN;
-          const base =
-            Number.isFinite(retryAfter) && retryAfter > 0
-              ? retryAfter * 1000
-              : Math.min(60_000, 5_000 * 2 ** attempt);
+          const base = isConnection
+            ? Math.min(10_000, 2_000 * 2 ** attempt)
+            : Number.isFinite(retryAfter) && retryAfter > 0
+            ? Math.min(60_000, retryAfter * 1000)
+            : Math.min(60_000, 5_000 * 2 ** attempt);
           const jitter = Math.floor(Math.random() * 3_000);
           const wait = base + jitter;
           dbg(
@@ -1295,8 +1328,11 @@ export async function POST(request: Request) {
     }
 
     if (message.stop_reason === "max_tokens") {
+      // Batches are one unit each, so this is the model spending its whole
+      // output budget (thinking counts toward max_tokens), not an oversized
+      // batch. Re-running usually resolves it.
       throw new Error(
-        `Response was cut off (too many ad units in batch). Try reviewing fewer campaigns at once.`
+        `Model response was cut off before it finished the report (max_tokens). Re-run to retry this ad.`
       );
     }
 
@@ -1604,7 +1640,16 @@ export async function POST(request: Request) {
   const MAX_CONCURRENT_BATCHES = 4;
 
   try {
-    const batchResults: Awaited<ReturnType<typeof runBatch>>[] = new Array(batches.length);
+    // Per-batch failure isolation. A batch that throws (retries exhausted,
+    // max_tokens, no tool call, download stall) used to reject the shared
+    // Promise.all and take the whole request down — the other units' finished,
+    // already-paid-for results were discarded and the browser showed one error
+    // banner. Now a failed batch is recorded and rendered as a "couldn't verify"
+    // unit; the rest of the chunk still returns. The one exception is the
+    // out-of-credits error: nothing else in the request can succeed, and the UI
+    // has a dedicated 402 path for it, so it still bubbles.
+    type BatchResult = Awaited<ReturnType<typeof runBatch>> & { qaError?: string };
+    const batchResults: BatchResult[] = new Array(batches.length);
     let nextIndex = 0;
 
     const worker = async (): Promise<void> => {
@@ -1613,7 +1658,16 @@ export async function POST(request: Request) {
         if (i >= batches.length) return;
         const b = batches[i];
         dbg(`[qa] Batch ${i + 1}/${batches.length}: ${b.units.length} unit(s), ${b.driveImages.length} Drive image(s).`);
-        batchResults[i] = await runBatch(b.units, b.driveImages, b.crossFormat, b.confidentMatch, b.matchedRefCount);
+        try {
+          batchResults[i] = await runBatch(b.units, b.driveImages, b.crossFormat, b.confidentMatch, b.matchedRefCount);
+        } catch (err) {
+          if (isOutOfCreditsError(err)) throw err;
+          const msg = err instanceof Error ? err.message || err.name : String(err);
+          console.error(
+            `[qa] Batch ${i + 1}/${batches.length} failed for "${b.units.map((u) => u.name || "Unnamed").join(", ")}": ${msg}`
+          );
+          batchResults[i] = { units: [], critical_issues: [], notes: "", qaError: msg };
+        }
       }
     };
 
@@ -1640,8 +1694,27 @@ export async function POST(request: Request) {
       // card instead of taking the report down.
       const hasChecks =
         base.checks !== null && typeof base.checks === "object";
-      const safeChecks = (hasChecks
+      // A batch whose Claude call failed outright (see worker above) gets the
+      // same shape, but as "warning" rather than "unknown": rollupUnitStatus
+      // treats unknown as non-penalizing, and a unit that was never reviewed
+      // must not roll up green. The deterministic checks below are still
+      // computed from the Meta data — they never depended on the model.
+      const qaError = batchResults[k]?.qaError;
+      const failedNote = qaError
+        ? `QA call failed — couldn't verify (${qaError}). Re-run to retry this ad.`
+        : null;
+      const safeChecks = (hasChecks && !qaError
         ? base.checks
+        : qaError
+        ? {
+            copy_alignment: { status: "warning", note: failedNote },
+            creative_alignment: { status: "warning", note: failedNote },
+            promo_month_date: { status: "warning", note: failedNote },
+            url_cta: { status: "warning", note: failedNote },
+            grammar_typos: { status: "warning", note: failedNote },
+            ai_enhancements: { status: "unknown", note: "" },
+            format_size: { status: "unknown", note: "" },
+          }
         : {
             copy_alignment: { status: "unknown", note: "No result returned for this ad — re-run the QA." },
             creative_alignment: { status: "unknown", note: "No result returned." },
@@ -1702,12 +1775,17 @@ export async function POST(request: Request) {
         // Deterministic rollup — worst of the checks. The model's own status
         // field is ignored: it had no defined rollup rule and varied run to run.
         status: rollupUnitStatus(finalChecks, enhResult.flaggedOn),
-        summary: typeof base.summary === "string" ? base.summary : "",
+        summary: qaError
+          ? "This ad was not reviewed — the QA call failed. Re-run to retry it."
+          : typeof base.summary === "string" ? base.summary : "",
         name: unitContents[repIdx].name || "Unnamed",
         adId: unitContents[repIdx].adId ?? null,
         group,
         groupSize: group.length,
         sizeProfile,
+        // Surfaced so the UI can distinguish "reviewed, with warnings" from
+        // "never reviewed" (and, later, offer a retry of just these).
+        ...(qaError ? { qaError } : {}),
       };
     });
     const allCritical = batchResults.flatMap((r) => r.critical_issues);

@@ -20,6 +20,24 @@ type AdUnit = {
   adsetName?: string;
   // Ad set ID from the Meta API — shown alongside the ad set name in the UI.
   adsetId?: string;
+  // Ad-level configured status (ACTIVE/PAUSED) and the "duplicated but never
+  // edited since" flag from the import — shown as badges on the loaded list.
+  status?: string;
+  uneditedCopy?: boolean;
+};
+
+// One ad as returned by /api/campaign-ads. Kept on the campaign row so the
+// ad-set picker / hide toggles can re-derive the unit list without refetching.
+type LoadedAd = {
+  id: string;
+  name: string;
+  adsetId?: string;
+  adsetName?: string;
+  status?: string;
+  uneditedCopy?: boolean;
+  adsetStatus?: string;
+  adsetStartTime?: string;
+  adsetEndTime?: string;
 };
 
 type DriveImage = {
@@ -57,6 +75,10 @@ type UnitResult = {
   summary: string;
   group?: GroupMember[];
   groupSize?: number;
+  // Set by the server when this ad's Claude call failed outright — the card's
+  // checks are placeholder warnings, not a review. Drives the "not reviewed"
+  // strip + retry on the results page.
+  qaError?: string;
   // Image sizes + carousel flag from the server, for the cross-ad size
   // comparison run after all chunks finish (campaigns are QA'd in chunks, so
   // only the browser ever sees every ad of a campaign together).
@@ -480,6 +502,22 @@ export default function QAPage() {
   }, []);
   // Progress across per-campaign QA requests (done / total campaigns).
   const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
+  // Aborts the in-flight /api/qa fetches when the user cancels a run. Before
+  // this existed, "New check" / the wordmark were clickable mid-run and reset()
+  // cleared the form while late chunks kept merging into an empty result.
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Warn before closing/refreshing the tab while a run is in flight. A run is
+  // 2-5 minutes of API spend that can't be recovered after a refresh.
+  useEffect(() => {
+    if (!loading) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [loading]);
   // PDF export: ref wraps the results block we capture; flag drives button state.
   const resultsRef = useRef<HTMLDivElement>(null);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
@@ -500,6 +538,16 @@ export default function QAPage() {
     error: string;
     skipNote: string;    // post-load summary of what was filtered out
     activeRules: ActiveRule[]; // automation rules that are currently ENABLED
+    // Everything the import returned (after the date cutoff + keyword filter),
+    // so the selection controls below can re-derive units client-side.
+    ads: LoadedAd[];
+    // Selection controls. Duplicated-but-unedited copies are hidden by default:
+    // in this team's workflow those are the copies whose creative hasn't been
+    // swapped yet, i.e. they still carry the previous promo. Paused ads are
+    // shown by default (pre-launch campaigns are normally paused).
+    hideUnedited: boolean;
+    hidePaused: boolean;
+    excludedAdsets: string[]; // ad set IDs unchecked in the picker
   };
   // Default the updated-since cutoff to ~30 days ago. We never QA old ads through
   // Vera, so pre-filling this means one less field to think about — the user can
@@ -523,14 +571,70 @@ export default function QAPage() {
     error: "",
     skipNote: "",
     activeRules: [],
+    ads: [],
+    hideUnedited: true,
+    hidePaused: false,
+    excludedAdsets: [],
   });
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([newCampaignRow("c1")]);
+
+  // Derive the QA units for a loaded campaign row from its ads + selection
+  // controls. Pure, so toggling a control just re-runs it.
+  function unitsFromRow(row: CampaignRow): AdUnit[] {
+    const campaignId = row.campaignId.trim();
+    const excluded = new Set(row.excludedAdsets);
+    return row.ads
+      .filter((ad) => !(row.hideUnedited && ad.uneditedCopy))
+      .filter((ad) => !(row.hidePaused && (ad.status ?? "").toUpperCase() === "PAUSED"))
+      .filter((ad) => !(ad.adsetId && excluded.has(ad.adsetId)))
+      .map((ad) => ({
+        // Stable per ad so React keys / removals survive re-derivation.
+        id: `${campaignId}:${ad.id}`,
+        name: ad.name,
+        link: ad.id,
+        campaignId,
+        campaignName: row.campaignName || undefined,
+        adsetName: ad.adsetName || undefined,
+        adsetId: ad.adsetId || undefined,
+        status: ad.status || undefined,
+        uneditedCopy: ad.uneditedCopy || undefined,
+      }));
+  }
+
+  // Replace this campaign's units with a fresh derivation. Replacing (not
+  // appending) is what stops a re-load or a toggle from duplicating ads — the
+  // old append path made the server dedup report "×2 identical ads".
+  function replaceCampaignUnits(row: CampaignRow) {
+    const campaignId = row.campaignId.trim();
+    const derived = unitsFromRow(row);
+    setUnits((prev) => {
+      const others = prev.filter((u) => u.campaignId !== campaignId && (u.link.trim() || u.name.trim()));
+      return [...others, ...derived];
+    });
+  }
+
+  // Change a selection control on a loaded row WITHOUT resetting `loaded` (unlike
+  // patchCampaignRow), then re-derive that campaign's units.
+  function setRowSelection(
+    id: string,
+    patch: Partial<Pick<CampaignRow, "hideUnedited" | "hidePaused" | "excludedAdsets">>
+  ) {
+    const current = campaigns.find((c) => c.id === id);
+    if (!current) return;
+    const row = { ...current, ...patch };
+    setCampaigns((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+    if (row.loaded) replaceCampaignUnits(row);
+  }
 
   function addCampaignRow() {
     setCampaigns((prev) => [...prev, newCampaignRow(String(Date.now()))]);
   }
 
   function removeCampaignRow(id: string) {
+    // Drop the row's imported ads along with it — they used to linger.
+    const row = campaigns.find((c) => c.id === id);
+    const cid = row?.campaignId.trim();
+    if (cid) setUnits((prev) => prev.filter((u) => u.campaignId !== cid));
     if (campaigns.length <= 1) {
       setCampaigns([newCampaignRow("c1")]);
     } else {
@@ -539,6 +643,16 @@ export default function QAPage() {
   }
 
   function patchCampaignRow(id: string, patch: Partial<CampaignRow>) {
+    // Changing the campaign ID orphans the previous import: drop those ads and
+    // the cached ad list. Date/filter edits keep the ads on screen until the
+    // user re-loads (the button re-enables), and re-load replaces them.
+    if (typeof patch.campaignId === "string") {
+      const prevId = campaigns.find((c) => c.id === id)?.campaignId.trim();
+      if (prevId && prevId !== patch.campaignId.trim()) {
+        setUnits((prev) => prev.filter((u) => u.campaignId !== prevId));
+        patch = { ...patch, ads: [], excludedAdsets: [] };
+      }
+    }
     setCampaigns((prev) =>
       prev.map((c) =>
         c.id === id ? { ...c, ...patch, error: "", loaded: false, skipNote: "", campaignName: "" } : c
@@ -707,34 +821,44 @@ export default function QAPage() {
         );
       }
 
-      const importedCampaignId = row.campaignId.trim();
-      const imported: AdUnit[] = filtered.map((ad: { id: string; name: string; adsetName?: string; adsetId?: string }) => ({
-        id: String(Date.now()) + ad.id,
+      const ads: LoadedAd[] = (filtered as LoadedAd[]).map((ad) => ({
+        id: ad.id,
         name: ad.name,
-        link: ad.id,
-        campaignId: importedCampaignId,
-        campaignName: campaignName || undefined,
-        adsetName: ad.adsetName || undefined,
-        adsetId: ad.adsetId || undefined,
+        adsetId: ad.adsetId,
+        adsetName: ad.adsetName,
+        status: ad.status,
+        uneditedCopy: !!ad.uneditedCopy,
+        adsetStatus: ad.adsetStatus,
+        adsetStartTime: ad.adsetStartTime,
+        adsetEndTime: ad.adsetEndTime,
       }));
 
-      // Append to existing units (remove empty placeholder rows first)
-      setUnits((prev) => {
-        const nonEmpty = prev.filter((u) => u.link.trim() || u.name.trim());
-        return nonEmpty.length > 0 ? [...nonEmpty, ...imported] : imported;
-      });
-
       const skippedOld = data.skippedOld ?? 0;
+      const unedited = ads.filter((a) => a.uneditedCopy).length;
       const skipNote =
-        `Loaded ${imported.length} ad${imported.length === 1 ? "" : "s"}` +
+        `Loaded ${ads.length} ad${ads.length === 1 ? "" : "s"}` +
         (campaignName ? ` from "${campaignName}"` : "") +
-        (skippedOld > 0 ? ` · skipped ${skippedOld} not updated since cutoff` : "");
+        (skippedOld > 0 ? ` · skipped ${skippedOld} not updated since cutoff` : "") +
+        (unedited > 0 ? ` · ${unedited} look like unedited copies (see below)` : "");
 
       const activeRules: ActiveRule[] = data.activeRules ?? [];
 
-      setCampaigns((prev) =>
-        prev.map((c) => (c.id === rowId ? { ...c, loading: false, loaded: true, skipNote, campaignName, activeRules } : c))
-      );
+      // Fresh load resets the selection controls (a new ad set list makes old
+      // exclusions meaningless), then derives this campaign's units — replacing
+      // any earlier import of the same campaign.
+      const loadedRow: CampaignRow = {
+        ...row,
+        loading: false,
+        loaded: true,
+        error: "",
+        skipNote,
+        campaignName,
+        activeRules,
+        ads,
+        excludedAdsets: [],
+      };
+      setCampaigns((prev) => prev.map((c) => (c.id === rowId ? loadedRow : c)));
+      replaceCampaignUnits(loadedRow);
     } catch (err) {
       setCampaigns((prev) =>
         prev.map((c) =>
@@ -851,10 +975,93 @@ export default function QAPage() {
     return { ...result, units, overall_status: worst };
   }
 
-  async function runQA() {
+  // ── Input persistence (tab-scoped, never results) ─────────────────────────
+  // Vera saves nothing server-side by design. But the *inputs* (WO text,
+  // campaign rows, loaded ad list, reviewer instructions) used to vanish on a
+  // refresh or when "Reconnect Google" navigated away mid-setup — the OAuth
+  // callback lands on a clean /qa and the user retypes everything. sessionStorage
+  // is scoped to this tab and dies with it, so this keeps the "doesn't save
+  // anything" story intact. QA results / doc contents are deliberately NOT
+  // stored. Cleared by reset().
+  const INPUTS_KEY = "vera:inputs:v1";
+  type SavedInputs = {
+    wo: string;
+    instructions: string;
+    ignoreCopyDoc: boolean;
+    campaigns: Pick<
+      CampaignRow,
+      "id" | "campaignId" | "campaignName" | "filter" | "sinceDate" | "loaded" | "skipNote" | "ads" | "hideUnedited" | "hidePaused" | "excludedAdsets"
+    >[];
+    units: AdUnit[];
+  };
+  // `hydrated` flips true only after the restore pass, in the same batch as the
+  // restored values, so the persist effect below never sees the initial empty
+  // state and wipes the saved inputs.
+  const [hydrated, setHydrated] = useState(false);
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    setHydrated(true);
+    try {
+      const raw = window.sessionStorage.getItem(INPUTS_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Partial<SavedInputs>;
+      if (typeof saved.wo === "string" && saved.wo.trim()) handleWoChange(saved.wo);
+      if (typeof saved.instructions === "string") setInstructions(saved.instructions);
+      if (typeof saved.ignoreCopyDoc === "boolean") setIgnoreCopyDoc(saved.ignoreCopyDoc);
+      if (Array.isArray(saved.campaigns) && saved.campaigns.length) {
+        setCampaigns(saved.campaigns.map((c) => ({ ...newCampaignRow(c.id), ...c, loading: false, cooldown: false, error: "", activeRules: [] })));
+      }
+      if (Array.isArray(saved.units) && saved.units.length) setUnits(saved.units);
+    } catch {
+      /* storage unavailable or corrupt — start clean */
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      const hasContent = wo.trim() || instructions.trim() || units.some((u) => u.link.trim() || u.name.trim()) || campaigns.some((c) => c.campaignId.trim());
+      if (!hasContent) {
+        window.sessionStorage.removeItem(INPUTS_KEY);
+        return;
+      }
+      const payload: SavedInputs = {
+        wo,
+        instructions,
+        ignoreCopyDoc,
+        campaigns: campaigns.map(({ id, campaignId, campaignName, filter, sinceDate, loaded, skipNote, ads, hideUnedited, hidePaused, excludedAdsets }) => ({
+          id, campaignId, campaignName, filter, sinceDate, loaded, skipNote, ads, hideUnedited, hidePaused, excludedAdsets,
+        })),
+        units,
+      };
+      window.sessionStorage.setItem(INPUTS_KEY, JSON.stringify(payload));
+    } catch {
+      /* quota / private mode — ignore */
+    }
+  }, [hydrated, wo, instructions, ignoreCopyDoc, campaigns, units]);
+
+  // Stop an in-flight run. Aborts the chunk fetches, drops the partial result
+  // and keeps every input so the user can adjust and re-run. Server-side work
+  // already started by aborted requests still completes (and is still billed).
+  function cancelRun() {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setLoading(false);
+    setResult(null);
+    setError("");
+    setProgress({ done: 0, total: 0 });
+  }
+
+  // `onlyUnits` = retry mode: re-run just these ads and splice their fresh
+  // results into the existing report (used by "Retry not-reviewed ads"). Without
+  // it, this is a full run over every loaded unit.
+  async function runQA(onlyUnits?: AdUnit[]) {
     if (!wo.trim()) return;
-    const filledUnits = units.filter((u) => u.link.trim());
+    const filledUnits = (onlyUnits ?? units).filter((u) => u.link.trim());
     if (filledUnits.length === 0) return;
+    const retryAdIds = onlyUnits ? new Set(filledUnits.map((u) => u.link.trim())) : null;
 
     // Split units into small fixed-size chunks. A whole campaign (e.g. 17+ ad
     // units) in one /api/qa request makes the server run that many Claude calls
@@ -885,8 +1092,24 @@ export default function QAPage() {
       }
     }
 
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const { signal } = controller;
+
     setLoading(true);
-    setResult({ overall_status: "pass", units: [], critical_issues: [], notes: "" });
+    if (retryAdIds) {
+      // Keep the report; drop only the cards being retried (a card's `group`
+      // lists every ad ID it covers).
+      setResult((prev) => {
+        const base = prev ?? { overall_status: "pass" as QAResult["overall_status"], units: [], critical_issues: [], notes: "" };
+        const covers = (u: UnitResult) =>
+          (u.group?.length ? u.group.map((m) => m.adId) : [u.adId]).some((id) => id && retryAdIds.has(String(id)));
+        return { ...base, units: base.units.filter((u) => !covers(u)) };
+      });
+    } else {
+      setResult({ overall_status: "pass", units: [], critical_issues: [], notes: "" });
+    }
     setError("");
     setOutOfCredits(false);
     setProgress({ done: 0, total: groups.length });
@@ -910,6 +1133,7 @@ export default function QAPage() {
       try {
         const res = await fetch("/api/qa", {
           method: "POST",
+          signal,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             wo,
@@ -930,9 +1154,11 @@ export default function QAPage() {
         try {
           data = rawBody ? JSON.parse(rawBody) : {};
         } catch {
+          // Chunks are 3 units, so a 504 means a slow chunk (stalled image
+          // download or long model call), not an oversized request.
           throw new Error(
             res.status === 504
-              ? `${group.label}: timed out (504) — too many units in this campaign.`
+              ? `${group.label}: timed out (504) — this batch ran too long. Re-run to retry it.`
               : `${group.label}: unexpected response (HTTP ${res.status}).`
           );
         }
@@ -941,6 +1167,7 @@ export default function QAPage() {
           throw new Error(asErrorMessage(data.error, `${group.label}: QA check failed (HTTP ${res.status})`));
         }
 
+        if (signal.aborted) return;
         const partial = data as unknown as QAResult;
         // Tag each unit with its campaign (group.key is "<campaignId>#<chunk>")
         // so the post-run cross-ad size check only compares within a campaign.
@@ -959,9 +1186,11 @@ export default function QAPage() {
           return { overall_status: worst, units: mergedUnits, critical_issues: mergedCritical, notes: "" };
         });
       } catch (err) {
+        // A cancelled run aborts every fetch; that's not an error to report.
+        if (signal.aborted) return;
         errors.push(err instanceof Error ? err.message : `${group.label}: something went wrong`);
       } finally {
-        setProgress((p) => ({ done: p.done + 1, total: p.total }));
+        if (!signal.aborted) setProgress((p) => ({ done: p.done + 1, total: p.total }));
       }
     }
 
@@ -978,6 +1207,10 @@ export default function QAPage() {
     await Promise.all(
       Array.from({ length: Math.min(MAX_CONCURRENT, groups.length) }, () => worker())
     );
+
+    // Cancelled mid-run: cancelRun() already restored the idle state.
+    if (signal.aborted) return;
+    abortRef.current = null;
 
     // All chunks merged — run the cross-ad size comparison over the full set.
     setResult((prev) => (prev ? applyCrossAdSizeCheck(prev) : prev));
@@ -1086,6 +1319,14 @@ export default function QAPage() {
 
   function reset() {
     // Full clear of all input boxes — stays logged in (no auth touched)
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setLoading(false);
+    try {
+      window.sessionStorage.removeItem(INPUTS_KEY);
+    } catch {
+      /* ignore */
+    }
     setWo("");
     setDetectedDocs([]);
     setWoDestinationUrl(null);
@@ -1132,19 +1373,30 @@ export default function QAPage() {
           <img
             src="/vera-wordmark-transparent.png"
             alt="Vera"
-            className="h-[42px] cursor-pointer"
-            onClick={reset}
+            className={loading ? "h-[42px]" : "h-[42px] cursor-pointer"}
+            // Inert during a run — a stray click used to wipe the form while
+            // chunks were still in flight. Cancel is an explicit button instead.
+            onClick={loading ? undefined : reset}
           />
         </div>
         <div className="flex items-center gap-4">
-          {result && (
+          {loading ? (
+            <button
+              onClick={() => {
+                if (window.confirm("Cancel this QA run? Inputs are kept; results so far are discarded.")) cancelRun();
+              }}
+              className="text-sm text-red-600 hover:text-red-800 transition-colors"
+            >
+              Cancel run
+            </button>
+          ) : result ? (
             <button
               onClick={reset}
               className="text-sm text-gray-500 hover:text-gray-900 transition-colors"
             >
               ← New check
             </button>
-          )}
+          ) : null}
           {/* Visible reminder — people forget which Google account Vera uses and
               re-auth with a client or shared account, which breaks Drive access. */}
           <span className="hidden sm:inline text-xs text-gray-500">
@@ -1233,7 +1485,7 @@ export default function QAPage() {
               <p className="text-xs text-gray-400">This usually takes 2–5 minutes. Hang tight.</p>
               {progress.total > 0 && (
                 <p className="text-sm font-semibold text-gray-700">
-                  {progress.done} of {progress.total} campaigns done
+                  {progress.done} of {progress.total} {progress.total === 1 ? "batch" : "batches"} done
                 </p>
               )}
               <div style={{ height: 22, overflow: "hidden", position: "relative" }}>
@@ -1459,6 +1711,102 @@ export default function QAPage() {
                     {row.skipNote && !row.error && (
                       <p className="text-xs text-emerald-700 pl-1">{row.skipNote}</p>
                     )}
+                    {/* Selection controls — which of the loaded ads actually go
+                        to QA. Duplicated campaigns carry the old promo's ad sets
+                        and un-swapped copies right past the date cutoff, so the
+                        user gets an ad-set picker plus hide toggles with counts. */}
+                    {row.loaded && row.ads.length > 0 && (() => {
+                      const uneditedCount = row.ads.filter((a) => a.uneditedCopy).length;
+                      const pausedCount = row.ads.filter((a) => (a.status ?? "").toUpperCase() === "PAUSED").length;
+                      const adsetMap = new Map<string, { id: string; name: string; total: number; unedited: number; status: string; start: string; end: string }>();
+                      for (const a of row.ads) {
+                        const key = a.adsetId || "__none__";
+                        const e = adsetMap.get(key) ?? {
+                          id: a.adsetId || "",
+                          name: a.adsetName || "(no ad set)",
+                          total: 0,
+                          unedited: 0,
+                          status: a.adsetStatus || "",
+                          start: a.adsetStartTime || "",
+                          end: a.adsetEndTime || "",
+                        };
+                        e.total++;
+                        if (a.uneditedCopy) e.unedited++;
+                        adsetMap.set(key, e);
+                      }
+                      const adsets = Array.from(adsetMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+                      const fmtDate = (iso: string) => {
+                        const t = Date.parse(iso);
+                        return Number.isNaN(t) ? "" : new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+                      };
+                      const selectedCount = unitsFromRow(row).length;
+                      const excluded = new Set(row.excludedAdsets);
+                      return (
+                        <div className="mt-1.5 rounded-xl border border-gray-200 bg-white px-3 py-2.5 space-y-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-xs font-semibold text-gray-700">
+                              {selectedCount} of {row.ads.length} ads selected for QA
+                            </p>
+                            <div className="flex items-center gap-3">
+                              {uneditedCount > 0 && (
+                                <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 select-none cursor-pointer" title="Duplicated ads whose creative/copy hasn't been touched since the copy was made — usually still carrying the previous promo.">
+                                  <input
+                                    type="checkbox"
+                                    checked={row.hideUnedited}
+                                    onChange={(e) => setRowSelection(row.id, { hideUnedited: e.target.checked })}
+                                    className="rounded border-gray-300"
+                                  />
+                                  Hide {uneditedCount} unedited {uneditedCount === 1 ? "copy" : "copies"}
+                                </label>
+                              )}
+                              {pausedCount > 0 && (
+                                <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 select-none cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={row.hidePaused}
+                                    onChange={(e) => setRowSelection(row.id, { hidePaused: e.target.checked })}
+                                    className="rounded border-gray-300"
+                                  />
+                                  Hide {pausedCount} paused
+                                </label>
+                              )}
+                            </div>
+                          </div>
+                          {adsets.length > 1 && (
+                            <div className="space-y-1">
+                              <p className="text-[11px] font-medium text-gray-400 uppercase tracking-wide">Ad sets</p>
+                              {adsets.map((s) => {
+                                const checked = !s.id || !excluded.has(s.id);
+                                const flight = [fmtDate(s.start), fmtDate(s.end)].filter(Boolean).join(" → ");
+                                return (
+                                  <label key={s.id || s.name} className="flex items-center gap-2 text-xs text-gray-700 select-none cursor-pointer">
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      disabled={!s.id}
+                                      onChange={(e) => {
+                                        const next = new Set(row.excludedAdsets);
+                                        if (e.target.checked) next.delete(s.id);
+                                        else next.add(s.id);
+                                        setRowSelection(row.id, { excludedAdsets: Array.from(next) });
+                                      }}
+                                      className="rounded border-gray-300"
+                                    />
+                                    <span className={`truncate ${checked ? "" : "text-gray-400 line-through"}`}>{s.name}</span>
+                                    <span className="text-gray-400 whitespace-nowrap">
+                                      · {s.total} {s.total === 1 ? "ad" : "ads"}
+                                      {s.unedited > 0 ? ` · ${s.unedited} unedited` : ""}
+                                      {s.status ? ` · ${s.status.toLowerCase()}` : ""}
+                                      {flight ? ` · ${flight}` : ""}
+                                    </span>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {row.error && (
                       <p className="text-xs text-red-600 pl-1">{row.error}</p>
                     )}
@@ -1503,7 +1851,22 @@ export default function QAPage() {
                         className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50"
                       >
                         <div className="min-w-0">
-                          <p className="text-sm text-gray-900 truncate">{unit.name || "Unnamed ad"}</p>
+                          <p className="text-sm text-gray-900 truncate flex items-center gap-2">
+                            <span className="truncate">{unit.name || "Unnamed ad"}</span>
+                            {unit.uneditedCopy && (
+                              <span
+                                className="shrink-0 rounded-md bg-amber-100 text-amber-800 text-[10px] font-semibold px-1.5 py-0.5 uppercase tracking-wide"
+                                title="Duplicated and not edited since — likely still the previous promo's creative"
+                              >
+                                unedited copy
+                              </span>
+                            )}
+                            {(unit.status ?? "").toUpperCase() === "PAUSED" && (
+                              <span className="shrink-0 rounded-md bg-gray-200 text-gray-600 text-[10px] font-semibold px-1.5 py-0.5 uppercase tracking-wide">
+                                paused
+                              </span>
+                            )}
+                          </p>
                           <p className="text-xs font-mono text-gray-400 truncate">{unit.link}</p>
                           {(unit.adsetName || unit.adsetId) && (
                             <p className="text-xs text-gray-500 truncate">
@@ -1583,7 +1946,7 @@ export default function QAPage() {
             </details>
 
             <button
-              onClick={runQA}
+              onClick={() => runQA()}
               disabled={
                 loading ||
                 !wo.trim() ||
@@ -1638,6 +2001,43 @@ export default function QAPage() {
                 )}
               </button>
             </div>
+
+            {/* Ads whose QA call failed. Their cards below are placeholder
+                warnings, not a review — say so up front and offer a retry of
+                just those ads (kept out of the PDF wrapper on purpose). */}
+            {(() => {
+              const failed = result.units.filter((u) => u.qaError);
+              if (failed.length === 0) return null;
+              const failedAdIds = new Set(
+                failed.flatMap((u) => (u.group?.length ? u.group.map((m) => m.adId) : [u.adId])).filter(Boolean).map(String)
+              );
+              const retryUnits = units.filter((u) => failedAdIds.has(u.link.trim()));
+              const names = failed.flatMap((u) => (u.group?.length ? u.group.map((m) => m.name) : [u.name])).filter(Boolean);
+              return (
+                <div className="bg-amber-50 border border-amber-300 rounded-2xl px-5 py-4 flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-amber-900">
+                      {names.length} {names.length === 1 ? "ad was" : "ads were"} not reviewed
+                    </p>
+                    <p className="text-xs text-amber-800 mt-0.5">
+                      The QA call failed for: {names.join(", ")}. Their cards below are placeholders, not results.
+                    </p>
+                    <p className="text-xs text-amber-700 mt-1 truncate" title={failed[0].qaError}>
+                      Reason: {failed[0].qaError}
+                    </p>
+                  </div>
+                  {retryUnits.length > 0 && (
+                    <button
+                      onClick={() => runQA(retryUnits)}
+                      disabled={loading}
+                      className="shrink-0 px-4 py-2 rounded-xl bg-amber-600 text-white text-sm font-medium hover:bg-amber-700 transition-colors disabled:opacity-40"
+                    >
+                      Retry {retryUnits.length === 1 ? "this ad" : `these ${retryUnits.length} ads`}
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Everything inside this wrapper is captured into the PDF. */}
             <div ref={resultsRef} className="space-y-5">

@@ -54,6 +54,7 @@ npm run dev
 | `QA_DEBUG` | optional | Set to `1` for verbose server logs (folder/asset tracing, token usage, model reasoning); leave unset in production |
 | `QA_MODEL` | optional | Claude model for QA runs. Defaults to `claude-sonnet-5`. Set to `claude-sonnet-4-6` to roll back or `claude-opus-4-8` to escalate |
 | `QA_THINKING_BUDGET` | optional | Extended-thinking token budget per call (default `3000`, capped at 12000) |
+| `QA_PREFER_CARD_HASHES` | optional | Set to `1` to drop replaced (same-size, non-configured) carousel card images from visual QA on ads without placement customization rules (FIX #29). Off by default; with `QA_DEBUG=1` the log shows what it would drop |
 | `QA_TIMEZONE` | optional | IANA timezone for the TODAY'S DATE line used in promo-date checks (default `America/Phoenix`) |
 
 ---

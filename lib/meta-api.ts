@@ -97,7 +97,81 @@ export type CampaignAd = {
   adsetName: string;
   createdTime: string; // ISO timestamp the ad was created
   updatedTime: string; // ISO timestamp the ad was last edited
+  // Ad-level configured status (ACTIVE / PAUSED / ARCHIVED / DELETED). This is
+  // the toggle a person flips in Ads Manager — NOT effective_status, which
+  // reports CAMPAIGN_PAUSED for every ad of a paused campaign and is useless
+  // for pre-launch QA.
+  status: string;
+  // The ad this one was duplicated from, when Meta reports one. Null for ads
+  // created from scratch.
+  sourceAdId: string | null;
+  // True when the ad is a duplicate that has never been edited since it was
+  // copied (updated_time within minutes of created_time). The team's workflow
+  // is: duplicate the campaign → copies come in paused → swap each copy's
+  // creative → run. A copy that hasn't been swapped yet still carries the OLD
+  // promo's creative, and because duplication resets created/updated_time it
+  // sails past the "updated since" cutoff. This flag is what lets the UI hide
+  // those by default. Heuristic, so it's surfaced as a visible toggle with a
+  // count, never a silent drop.
+  uneditedCopy: boolean;
+  // Ad set flight window + status, for the ad-set picker. Empty when unknown.
+  adsetStatus: string;
+  adsetStartTime: string;
+  adsetEndTime: string;
 };
+
+// FIX #29 — carousel pool leftovers. object_story_spec.link_data.child_attachments
+// lists the cards actually configured on the ad; asset_feed_spec.images is a
+// pool that keeps every image ever attached, including the card image that was
+// REPLACED when the team swapped creative on a duplicated ad. With no
+// customization rules the rules filter (FIX #8) can't tell them apart, so the
+// old card reached the model alongside the new one and was reported as a
+// stale-creative finding.
+//
+// Rule: when the rules filter is inactive and ≥1 card hash resolved to a
+// candidate, drop pool images that are NOT a card AND share an exact WxH with a
+// card image. Everything else stays: unique-size pool assets (per-placement
+// variants the completeness check must still see), unknown-dimension assets,
+// and every card. Dropping only same-size images means the size set — and thus
+// every deterministic format/completeness check — is unchanged; only the
+// visual-QA input narrows. Never narrows to empty. Gated behind
+// QA_PREFER_CARD_HASHES=1 so it can be observed (dbg) before it is trusted.
+export type CarouselCandidate = { url: string; hash?: string; width?: number; height?: number; dateMs?: number | null };
+export function selectCarouselCandidates<T extends CarouselCandidate>(
+  candidates: T[],
+  cardHashes: string[],
+  opts: { rulesFilterActive: boolean; enabled: boolean }
+): { kept: T[]; wouldDrop: T[]; applied: boolean } {
+  const none = { kept: candidates, wouldDrop: [] as T[], applied: false };
+  if (opts.rulesFilterActive || cardHashes.length === 0) return none;
+  const cardSet = new Set(cardHashes);
+  const cards = candidates.filter((c) => c.hash && cardSet.has(c.hash));
+  if (cards.length === 0) return none;
+  const cardSizes = new Set(
+    cards.filter((c) => c.width && c.height).map((c) => `${c.width}x${c.height}`)
+  );
+  const wouldDrop = candidates.filter(
+    (c) => !(c.hash && cardSet.has(c.hash)) && !!c.width && !!c.height && cardSizes.has(`${c.width}x${c.height}`)
+  );
+  if (wouldDrop.length === 0) return none;
+  if (!opts.enabled) return { kept: candidates, wouldDrop, applied: false };
+  const dropSet = new Set(wouldDrop);
+  const kept = candidates.filter((c) => !dropSet.has(c));
+  return kept.length ? { kept, wouldDrop, applied: true } : none;
+}
+
+// A duplicated ad that was edited (creative swapped, copy changed, status
+// toggled) gets a fresh updated_time. Anything inside this window of its
+// creation is treated as "copied, not yet touched".
+const UNEDITED_COPY_WINDOW_MS = 10 * 60 * 1000;
+
+export function isUneditedCopy(sourceAdId: string | null, createdTime: string, updatedTime: string): boolean {
+  if (!sourceAdId) return false;
+  const c = Date.parse(createdTime);
+  const u = Date.parse(updatedTime);
+  if (Number.isNaN(c) || Number.isNaN(u)) return false;
+  return u - c < UNEDITED_COPY_WINDOW_MS;
+}
 
 export type FetchAdsOptions = {
   // Optional ISO date (YYYY-MM-DD). When set, ads not touched since this date
@@ -262,7 +336,7 @@ export async function fetchCampaignAdsList(
   const hasSince = !Number.isNaN(sinceMs);
 
   let url: string | null =
-    `${GRAPH_API}/${campaignId}/ads?fields=id,name,adset{id,name},created_time,updated_time&limit=200&access_token=${accessToken}`;
+    `${GRAPH_API}/${campaignId}/ads?fields=id,name,status,source_ad_id,adset{id,name,status,start_time,end_time},created_time,updated_time&limit=200&access_token=${accessToken}`;
   const ads: CampaignAd[] = [];
   let totalFetched = 0;
   let skippedOld = 0;
@@ -278,7 +352,9 @@ export async function fetchCampaignAdsList(
         data?: {
           id: string;
           name: string;
-          adset?: { id?: string; name?: string };
+          status?: string;
+          source_ad_id?: string;
+          adset?: { id?: string; name?: string; status?: string; start_time?: string; end_time?: string };
           created_time?: string;
           updated_time?: string;
         }[];
@@ -313,6 +389,7 @@ export async function fetchCampaignAdsList(
           }
         }
 
+        const sourceAdId = ad.source_ad_id ? String(ad.source_ad_id) : null;
         ads.push({
           id: ad.id,
           name: ad.name,
@@ -320,6 +397,12 @@ export async function fetchCampaignAdsList(
           adsetName: ad.adset?.name ?? "",
           createdTime,
           updatedTime,
+          status: ad.status ?? "",
+          sourceAdId,
+          uneditedCopy: isUneditedCopy(sourceAdId, createdTime, updatedTime),
+          adsetStatus: ad.adset?.status ?? "",
+          adsetStartTime: ad.adset?.start_time ?? "",
+          adsetEndTime: ad.adset?.end_time ?? "",
         });
       }
 
@@ -1106,7 +1189,24 @@ export async function fetchAdContent(
 
   let chosenImageCandidates: ImgCandidate[];
   if (isCarousel) {
-    chosenImageCandidates = feedImageCandidates; // keep every card
+    // Keep every card. When the rules filter is inactive (no customization
+    // rules / no labels — the common shape for a plain carousel), the pool can
+    // still hold the PREVIOUS card image for a card whose creative was swapped:
+    // same WxH, different hash, not referenced by child_attachments. Those
+    // leftovers are dropped here (FIX #29, env-gated — see
+    // selectCarouselCandidates). Unique-size pool assets are always kept.
+    const sel = selectCarouselCandidates(feedImageCandidates, cardHashes, {
+      rulesFilterActive,
+      enabled: process.env.QA_PREFER_CARD_HASHES === "1",
+    });
+    chosenImageCandidates = sel.kept;
+    if (sel.wouldDrop.length) {
+      dbg(
+        `[meta-api][cards] ad=${adId} ${sel.applied ? "DROPPED" : "would drop (QA_PREFER_CARD_HASHES off)"} ` +
+          `${sel.wouldDrop.length} same-size non-card pool image(s): ` +
+          sel.wouldDrop.map((c) => `${c.hash ?? "?"}@${c.width}x${c.height}`).join(", ")
+      );
+    }
   } else {
     // Dedupe by exact WxH. Within a size bucket prefer the published image, then
     // the NEWEST-dated asset — the fix for an old-promo static (e.g. an "April"
