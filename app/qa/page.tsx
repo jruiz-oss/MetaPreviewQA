@@ -189,6 +189,74 @@ function displayCheckResult(key: string, check: CheckResult): CheckResult {
   };
 }
 
+// Lightweight canvas confetti burst, no dependencies. Spawns a fixed
+// full-viewport canvas, animates falling/rotating pieces for a couple
+// seconds, then tears itself down. Fired once per finished run when the
+// result has no red (fail) status — see the effect below that calls it.
+function fireConfetti() {
+  if (typeof window === "undefined") return;
+  const canvas = document.createElement("canvas");
+  canvas.style.position = "fixed";
+  canvas.style.inset = "0";
+  canvas.style.width = "100vw";
+  canvas.style.height = "100vh";
+  canvas.style.pointerEvents = "none";
+  canvas.style.zIndex = "9999";
+  document.body.appendChild(canvas);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    canvas.remove();
+    return;
+  }
+
+  const dpr = window.devicePixelRatio || 1;
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const colors = ["#10b981", "#34d399", "#fbbf24", "#f59e0b", "#60a5fa", "#818cf8", "#f472b6"];
+  const pieces = Array.from({ length: 160 }, () => ({
+    x: Math.random() * width,
+    y: -20 - Math.random() * height * 0.4,
+    w: 6 + Math.random() * 6,
+    h: 8 + Math.random() * 8,
+    color: colors[Math.floor(Math.random() * colors.length)],
+    vx: (Math.random() - 0.5) * 3,
+    vy: 2 + Math.random() * 3,
+    rotation: Math.random() * Math.PI * 2,
+    vr: (Math.random() - 0.5) * 0.3,
+  }));
+
+  const start = performance.now();
+  const DURATION = 2600;
+
+  function frame(now: number) {
+    const elapsed = now - start;
+    ctx!.clearRect(0, 0, width, height);
+    for (const p of pieces) {
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.02;
+      p.rotation += p.vr;
+      ctx!.save();
+      ctx!.translate(p.x, p.y);
+      ctx!.rotate(p.rotation);
+      ctx!.fillStyle = p.color;
+      ctx!.globalAlpha = elapsed > DURATION - 400 ? Math.max(0, (DURATION - elapsed) / 400) : 1;
+      ctx!.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+      ctx!.restore();
+    }
+    if (elapsed < DURATION) {
+      requestAnimationFrame(frame);
+    } else {
+      canvas.remove();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
 function StatusBadge({ status }: { status: string }) {
   const styles: Record<string, string> = {
     pass: "bg-emerald-50 text-emerald-700 border border-emerald-200",
@@ -518,6 +586,20 @@ export default function QAPage() {
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [loading]);
+
+  // Celebrate a clean run. Fires once, right when a run finishes, only if
+  // nothing came back red: no "fail" unit/overall status and no ad the QA
+  // call itself failed on (those are "not reviewed", not a pass). Warnings
+  // (yellow) are fine — a warnings-only run still gets confetti.
+  const wasLoadingRef = useRef(false);
+  useEffect(() => {
+    if (wasLoadingRef.current && !loading && result && !error) {
+      const hasRed = result.overall_status === "fail" || result.units.some((u) => u.qaError);
+      if (!hasRed) fireConfetti();
+    }
+    wasLoadingRef.current = loading;
+  }, [loading, result, error]);
+
   // PDF export: ref wraps the results block we capture; flag drives button state.
   const resultsRef = useRef<HTMLDivElement>(null);
   const [downloadingPdf, setDownloadingPdf] = useState(false);

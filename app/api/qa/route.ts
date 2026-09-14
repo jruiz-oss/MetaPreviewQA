@@ -96,7 +96,7 @@ CRITICAL — IMAGE READING RULES (read before doing any visual check):
 - When you report that the image "says" or "shows" something, it must be something you can actually read in the pixels. If you are describing what should be there per the copy doc, say so explicitly rather than claiming the image shows it.
 - Do not fabricate differences. Only flag a mismatch between the image and a document when you can actually read the conflicting text in the image.
 - ANIMATED GIFS: a GIF creative is delivered as several extracted still frames, each labeled "(GIF frame i/N)". All frames with the same base filename are ONE creative whose content legitimately changes over time — do NOT flag differences BETWEEN frames of the same GIF as a defect. Instead, review the SET of frames together: every frame's text/imagery must be correct, and when comparing a live GIF against an approved Drive GIF, compare the whole frame set (e.g. the live GIF must contain both the "A" and "B" states the approved GIF shows).
-- VIDEO CREATIVES: a video is represented by a SINGLE still frame on each side — an approved Drive video appears as an image named "... (Drive thumbnail frame)" and a live Meta video as an image labeled "VIDEO THUMBNAIL". Drive and Meta auto-select DIFFERENT frames of the same video, so text or imagery present in one frame but absent from the other is NOT a finding — never flag it. Compare only visual theme, branding, and DIRECTLY CONFLICTING legible text (e.g. two different offer amounts or dates, both clearly legible). One frame cannot verify a video's full content: when either side of a comparison is a video frame, creative_alignment can be at best "warning" (note that only a single frame was reviewed) — never "pass" — and "fail" only on a direct legible contradiction.
+- VIDEO CREATIVES: a video is represented by a SINGLE still frame on each side — an approved Drive video appears as an image named "... (Drive thumbnail frame)" and a live Meta video as an image labeled "VIDEO THUMBNAIL". Drive and Meta auto-select DIFFERENT frames of the same video, so text or imagery present in one frame but absent from the other is NOT a finding — never flag it. Compare only visual theme, branding, and DIRECTLY CONFLICTING legible text (e.g. two different offer amounts or dates, both clearly legible). One frame cannot verify a video's full content, but a video frame alone is NOT grounds to downgrade a real match: if the visible frame's theme, branding, and any legible text match the approved creative with no direct legible contradiction, mark creative_alignment "pass". Use "warning" only when something else actually limits verification (illegible/no text to compare, no comparison image available) — not merely because the source is a video frame — and "fail" only on a direct legible contradiction (e.g. two different offer amounts or dates, both clearly legible).
 
 Review each ad unit on seven criteria:
 1. copy_alignment — Does the ad copy text (post body, headline, CTA button text) exactly match the approved copy doc? Evaluate only the text-based content here — not the visual creative. Flag any word, phrase, offer detail, or CTA that differs from the approved copy doc. If no copy doc is provided, compare against the WO summary.
@@ -1425,6 +1425,11 @@ export async function POST(request: Request) {
     //     text-extraction field — STEP 1 was skipped, so the pass is unverified.
     //     (Safe to enforce: the prompt reserves null for "no image provided";
     //     textless creatives must be reported as "no text visible".)
+    // NOTE: a video thumbnail frame is deliberately NOT its own downgrade
+    // reason (Jorge, 2026-09-14) — matching frames with no legible conflict
+    // and successful text extraction on both sides now stays "pass"; the
+    // extraction-null guards below still catch a frame with nothing legible
+    // to compare.
     // A unit-level "pass" is downgraded along with it so the card color
     // reflects the weakest check.
     parsedUnits.forEach((u, idx) => {
@@ -1433,12 +1438,6 @@ export async function POST(request: Request) {
           ?.creativeImages ?? [];
       const hasLive = liveImgsArr.length > 0;
       const hasDrive = batchDriveImages.length > 0;
-      // 5. Either side of the comparison was a video thumbnail — ONE auto-selected
-      //    frame can't verify the video's full content (offers/dates/disclaimers
-      //    often appear mid-video), so a "pass" overstates what was checked.
-      const videoFrameInvolved =
-        liveImgsArr.some((i) => (i.context ?? "").includes("VIDEO THUMBNAIL")) ||
-        batchDriveImages.some((d) => d.name.includes("(Drive thumbnail frame)"));
       const checks = u?.checks as Record<string, Record<string, unknown>> | undefined;
       const cca = checks?.creative_alignment;
       if (!cca || cca.status !== "pass") return;
@@ -1458,8 +1457,6 @@ export async function POST(request: Request) {
           : "No approved Drive creative was linked — could not fully verify.";
       } else if (hasDrive && !hasLive) {
         reason = "Live Meta image could not be retrieved — could not fully verify against the approved creative.";
-      } else if (videoFrameInvolved) {
-        reason = "Comparison included a single video thumbnail frame — full video content not verified.";
       } else if (!extracted(cca.text_in_approved)) {
         reason = "No text was extracted from the approved image — visual comparison not verifiable.";
       } else if (!extracted(cca.text_in_live)) {
