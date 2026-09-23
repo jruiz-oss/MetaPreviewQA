@@ -1399,24 +1399,16 @@ export async function fetchAdContent(
   );
 
   // Per-ad manual-check list. Confirmed enhancement toggles MISSING from
-  // degrees_of_freedom_spec were not reported by the API for this ad — since
-  // Meta defaults several of them to ON, "all API-readable enhancements are
-  // off" would overstate. List the unreported ones for manual verification.
-  // Only applies when the spec exists but is partial; a fully absent spec is
-  // already covered by the "enhancement data unavailable" note.
+  // degrees_of_freedom_spec were not reported by the API for this ad. Jorge
+  // asked (2026-09-23) to stop surfacing these "API didn't report X" lines
+  // entirely — they cluttered the manual-review box and, worse, their "Meta
+  // may default it ON" wording leaked the bare word "ON" into the
+  // ai_enhancements note, which is the exact trigger the results page (and
+  // consolidateCriticalIssues) use to detect a real enhancement finding —
+  // so an ad with everything actually off could still render as a WARNING /
+  // critical card. Absent items are simply not listed now; a fully-absent
+  // spec is still covered by the "enhancement data unavailable" note.
   let manualCheckItems = MANUAL_CHECK_ITEMS;
-  const featureSpec = data.creative?.degrees_of_freedom_spec?.creative_features_spec;
-  if (featureSpec) {
-    const absent = CONFIRMED_ENHANCEMENT_KEYS.filter((k) => !(k in featureSpec));
-    if (absent.length) {
-      manualCheckItems = [
-        ...MANUAL_CHECK_ITEMS,
-        ...absent.map(
-          (k) => `${ENHANCEMENT_LABELS[k] ?? k} (not reported by the API for this ad — Meta may default it ON)`
-        ),
-      ];
-    }
-  }
 
   // FIX #28: enhancements Meta reports as opted-in but that have no Ads Manager
   // toggle are surfaced here instead of as a finding, so the information isn't
