@@ -20,10 +20,8 @@ type AdUnit = {
   adsetName?: string;
   // Ad set ID from the Meta API — shown alongside the ad set name in the UI.
   adsetId?: string;
-  // Ad-level configured status (ACTIVE/PAUSED) and the "duplicated but never
-  // edited since" flag from the import — shown as badges on the loaded list.
+  // Ad-level configured status (ACTIVE/PAUSED) — shown as a badge on the loaded list.
   status?: string;
-  uneditedCopy?: boolean;
 };
 
 // One ad as returned by /api/campaign-ads. Kept on the campaign row so the
@@ -34,7 +32,6 @@ type LoadedAd = {
   adsetId?: string;
   adsetName?: string;
   status?: string;
-  uneditedCopy?: boolean;
   adsetStatus?: string;
   adsetStartTime?: string;
   adsetEndTime?: string;
@@ -623,11 +620,8 @@ export default function QAPage() {
     // Everything the import returned (after the date cutoff + keyword filter),
     // so the selection controls below can re-derive units client-side.
     ads: LoadedAd[];
-    // Selection controls. Duplicated-but-unedited copies are hidden by default:
-    // in this team's workflow those are the copies whose creative hasn't been
-    // swapped yet, i.e. they still carry the previous promo. Paused ads are
-    // shown by default (pre-launch campaigns are normally paused).
-    hideUnedited: boolean;
+    // Selection controls. Paused ads are shown by default (pre-launch
+    // campaigns are normally paused).
     hidePaused: boolean;
     excludedAdsets: string[]; // ad set IDs unchecked in the picker
   };
@@ -654,7 +648,6 @@ export default function QAPage() {
     skipNote: "",
     activeRules: [],
     ads: [],
-    hideUnedited: true,
     hidePaused: false,
     excludedAdsets: [],
   });
@@ -666,7 +659,6 @@ export default function QAPage() {
     const campaignId = row.campaignId.trim();
     const excluded = new Set(row.excludedAdsets);
     return row.ads
-      .filter((ad) => !(row.hideUnedited && ad.uneditedCopy))
       .filter((ad) => !(row.hidePaused && (ad.status ?? "").toUpperCase() === "PAUSED"))
       .filter((ad) => !(ad.adsetId && excluded.has(ad.adsetId)))
       .map((ad) => ({
@@ -679,7 +671,6 @@ export default function QAPage() {
         adsetName: ad.adsetName || undefined,
         adsetId: ad.adsetId || undefined,
         status: ad.status || undefined,
-        uneditedCopy: ad.uneditedCopy || undefined,
       }));
   }
 
@@ -699,7 +690,7 @@ export default function QAPage() {
   // patchCampaignRow), then re-derive that campaign's units.
   function setRowSelection(
     id: string,
-    patch: Partial<Pick<CampaignRow, "hideUnedited" | "hidePaused" | "excludedAdsets">>
+    patch: Partial<Pick<CampaignRow, "hidePaused" | "excludedAdsets">>
   ) {
     const current = campaigns.find((c) => c.id === id);
     if (!current) return;
@@ -909,19 +900,16 @@ export default function QAPage() {
         adsetId: ad.adsetId,
         adsetName: ad.adsetName,
         status: ad.status,
-        uneditedCopy: !!ad.uneditedCopy,
         adsetStatus: ad.adsetStatus,
         adsetStartTime: ad.adsetStartTime,
         adsetEndTime: ad.adsetEndTime,
       }));
 
       const skippedOld = data.skippedOld ?? 0;
-      const unedited = ads.filter((a) => a.uneditedCopy).length;
       const skipNote =
         `Loaded ${ads.length} ad${ads.length === 1 ? "" : "s"}` +
         (campaignName ? ` from "${campaignName}"` : "") +
-        (skippedOld > 0 ? ` · skipped ${skippedOld} not updated since cutoff` : "") +
-        (unedited > 0 ? ` · ${unedited} look like unedited copies (see below)` : "");
+        (skippedOld > 0 ? ` · skipped ${skippedOld} not updated since cutoff` : "");
 
       const activeRules: ActiveRule[] = data.activeRules ?? [];
 
@@ -1072,7 +1060,7 @@ export default function QAPage() {
     ignoreCopyDoc: boolean;
     campaigns: Pick<
       CampaignRow,
-      "id" | "campaignId" | "campaignName" | "filter" | "sinceDate" | "loaded" | "skipNote" | "ads" | "hideUnedited" | "hidePaused" | "excludedAdsets"
+      "id" | "campaignId" | "campaignName" | "filter" | "sinceDate" | "loaded" | "skipNote" | "ads" | "hidePaused" | "excludedAdsets"
     >[];
     units: AdUnit[];
   };
@@ -1113,8 +1101,8 @@ export default function QAPage() {
         wo,
         instructions,
         ignoreCopyDoc,
-        campaigns: campaigns.map(({ id, campaignId, campaignName, filter, sinceDate, loaded, skipNote, ads, hideUnedited, hidePaused, excludedAdsets }) => ({
-          id, campaignId, campaignName, filter, sinceDate, loaded, skipNote, ads, hideUnedited, hidePaused, excludedAdsets,
+        campaigns: campaigns.map(({ id, campaignId, campaignName, filter, sinceDate, loaded, skipNote, ads, hidePaused, excludedAdsets }) => ({
+          id, campaignId, campaignName, filter, sinceDate, loaded, skipNote, ads, hidePaused, excludedAdsets,
         })),
         units,
       };
@@ -1795,25 +1783,22 @@ export default function QAPage() {
                     )}
                     {/* Selection controls — which of the loaded ads actually go
                         to QA. Duplicated campaigns carry the old promo's ad sets
-                        and un-swapped copies right past the date cutoff, so the
-                        user gets an ad-set picker plus hide toggles with counts. */}
+                        and copies right past the date cutoff, so the
+                        user gets an ad-set picker plus a hide-paused toggle. */}
                     {row.loaded && row.ads.length > 0 && (() => {
-                      const uneditedCount = row.ads.filter((a) => a.uneditedCopy).length;
-                      const pausedCount = row.ads.filter((a) => (a.status ?? "").toUpperCase() === "PAUSED").length;
-                      const adsetMap = new Map<string, { id: string; name: string; total: number; unedited: number; status: string; start: string; end: string }>();
+                                      const pausedCount = row.ads.filter((a) => (a.status ?? "").toUpperCase() === "PAUSED").length;
+                      const adsetMap = new Map<string, { id: string; name: string; total: number; status: string; start: string; end: string }>();
                       for (const a of row.ads) {
                         const key = a.adsetId || "__none__";
                         const e = adsetMap.get(key) ?? {
                           id: a.adsetId || "",
                           name: a.adsetName || "(no ad set)",
                           total: 0,
-                          unedited: 0,
                           status: a.adsetStatus || "",
                           start: a.adsetStartTime || "",
                           end: a.adsetEndTime || "",
                         };
                         e.total++;
-                        if (a.uneditedCopy) e.unedited++;
                         adsetMap.set(key, e);
                       }
                       const adsets = Array.from(adsetMap.values()).sort((a, b) => a.name.localeCompare(b.name));
@@ -1830,17 +1815,6 @@ export default function QAPage() {
                               {selectedCount} of {row.ads.length} ads selected for QA
                             </p>
                             <div className="flex items-center gap-3">
-                              {uneditedCount > 0 && (
-                                <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 select-none cursor-pointer" title="Duplicated ads whose creative/copy hasn't been touched since the copy was made — usually still carrying the previous promo.">
-                                  <input
-                                    type="checkbox"
-                                    checked={row.hideUnedited}
-                                    onChange={(e) => setRowSelection(row.id, { hideUnedited: e.target.checked })}
-                                    className="rounded border-gray-300"
-                                  />
-                                  Hide {uneditedCount} unedited {uneditedCount === 1 ? "copy" : "copies"}
-                                </label>
-                              )}
                               {pausedCount > 0 && (
                                 <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 select-none cursor-pointer">
                                   <input
@@ -1877,7 +1851,6 @@ export default function QAPage() {
                                     <span className={`truncate ${checked ? "" : "text-gray-400 line-through"}`}>{s.name}</span>
                                     <span className="text-gray-400 whitespace-nowrap">
                                       · {s.total} {s.total === 1 ? "ad" : "ads"}
-                                      {s.unedited > 0 ? ` · ${s.unedited} unedited` : ""}
                                       {s.status ? ` · ${s.status.toLowerCase()}` : ""}
                                       {flight ? ` · ${flight}` : ""}
                                     </span>
@@ -1935,14 +1908,6 @@ export default function QAPage() {
                         <div className="min-w-0">
                           <p className="text-sm text-gray-900 truncate flex items-center gap-2">
                             <span className="truncate">{unit.name || "Unnamed ad"}</span>
-                            {unit.uneditedCopy && (
-                              <span
-                                className="shrink-0 rounded-md bg-amber-100 text-amber-800 text-[10px] font-semibold px-1.5 py-0.5 uppercase tracking-wide"
-                                title="Duplicated and not edited since — likely still the previous promo's creative"
-                              >
-                                unedited copy
-                              </span>
-                            )}
                             {(unit.status ?? "").toUpperCase() === "PAUSED" && (
                               <span className="shrink-0 rounded-md bg-gray-200 text-gray-600 text-[10px] font-semibold px-1.5 py-0.5 uppercase tracking-wide">
                                 paused

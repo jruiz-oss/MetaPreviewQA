@@ -105,15 +105,6 @@ export type CampaignAd = {
   // The ad this one was duplicated from, when Meta reports one. Null for ads
   // created from scratch.
   sourceAdId: string | null;
-  // True when the ad is a duplicate that has never been edited since it was
-  // copied (updated_time within minutes of created_time). The team's workflow
-  // is: duplicate the campaign → copies come in paused → swap each copy's
-  // creative → run. A copy that hasn't been swapped yet still carries the OLD
-  // promo's creative, and because duplication resets created/updated_time it
-  // sails past the "updated since" cutoff. This flag is what lets the UI hide
-  // those by default. Heuristic, so it's surfaced as a visible toggle with a
-  // count, never a silent drop.
-  uneditedCopy: boolean;
   // Ad set flight window + status, for the ad-set picker. Empty when unknown.
   adsetStatus: string;
   adsetStartTime: string;
@@ -158,19 +149,6 @@ export function selectCarouselCandidates<T extends CarouselCandidate>(
   const dropSet = new Set(wouldDrop);
   const kept = candidates.filter((c) => !dropSet.has(c));
   return kept.length ? { kept, wouldDrop, applied: true } : none;
-}
-
-// A duplicated ad that was edited (creative swapped, copy changed, status
-// toggled) gets a fresh updated_time. Anything inside this window of its
-// creation is treated as "copied, not yet touched".
-const UNEDITED_COPY_WINDOW_MS = 10 * 60 * 1000;
-
-export function isUneditedCopy(sourceAdId: string | null, createdTime: string, updatedTime: string): boolean {
-  if (!sourceAdId) return false;
-  const c = Date.parse(createdTime);
-  const u = Date.parse(updatedTime);
-  if (Number.isNaN(c) || Number.isNaN(u)) return false;
-  return u - c < UNEDITED_COPY_WINDOW_MS;
 }
 
 export type FetchAdsOptions = {
@@ -399,7 +377,6 @@ export async function fetchCampaignAdsList(
           updatedTime,
           status: ad.status ?? "",
           sourceAdId,
-          uneditedCopy: isUneditedCopy(sourceAdId, createdTime, updatedTime),
           adsetStatus: ad.adset?.status ?? "",
           adsetStartTime: ad.adset?.start_time ?? "",
           adsetEndTime: ad.adset?.end_time ?? "",

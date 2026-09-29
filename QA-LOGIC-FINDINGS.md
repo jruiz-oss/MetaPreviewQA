@@ -383,10 +383,9 @@ mechanism there.
 
 ## Also in this round (not QA logic)
 
-- Campaign import requests `status,source_ad_id` and ad-set flight dates; ads
-  duplicated and never edited since (`isUneditedCopy`, 10-minute window) are
-  hidden by default via a visible toggle; ad-set picker. Test:
-  `lib/__tests__/unedited-copy.test.ts`.
+- Campaign import requests `status,source_ad_id` and ad-set flight dates; ad-set
+  picker + hide-paused toggle. (The "unedited copy" heuristic/badge/toggle was
+  removed 2026-09-29 at Jorge's request.)
 - /api/qa isolates per-batch Claude failures into "couldn't verify" warning
   units (`qaError`) instead of failing the chunk; UI offers a retry of just
   those ads. SDK `maxRetries: 0`, 170s call timeout, download timeouts,
