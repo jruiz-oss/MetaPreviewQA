@@ -616,7 +616,7 @@ export default function QAPage() {
     sinceDate: string;   // optional YYYY-MM-DD updated-since cutoff
     loading: boolean;
     loaded: boolean;
-    cooldown: boolean;   // true for 60s after an error to prevent rapid retries
+    cooldown: boolean;   // true for 3s after an error to prevent rapid retries
     error: string;
     skipNote: string;    // post-load summary of what was filtered out
     activeRules: ActiveRule[]; // automation rules that are currently ENABLED
@@ -949,12 +949,12 @@ export default function QAPage() {
             : c
         )
       );
-      // Re-enable after 60s so the user can retry without hammering the Meta API
+      // Re-enable after 3s so the user can retry without hammering the Meta API
       setTimeout(() => {
         setCampaigns((prev) =>
           prev.map((c) => (c.id === rowId ? { ...c, cooldown: false } : c))
         );
-      }, 60_000);
+      }, 3_000);
     }
   }
 
@@ -1750,7 +1750,7 @@ export default function QAPage() {
                             Loaded
                           </>
                         ) : row.cooldown ? (
-                          "Wait 60s..."
+                          "Wait 3s..."
                         ) : (
                           "Load ads"
                         )}
