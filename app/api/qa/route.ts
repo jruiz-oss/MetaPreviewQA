@@ -233,6 +233,8 @@ const QA_TOOL: Anthropic.Tool = {
   },
 };
 
+const stripSic = (t: string) => t.replace(/\s*\[sic\]/gi, "").replace(/\s{2,}/g, " ").trim();
+
 type AdUnit = {
   name: string;
   link: string;
@@ -2020,6 +2022,14 @@ export async function POST(request: Request) {
         imageSizes: (repFi?.imageDimensions ?? []).map((d) => `${d.width}×${d.height}`),
       };
 
+      // Round 8c: "[sic]" is an extraction instruction (it forces the model to
+      // copy a misspelling exactly instead of auto-correcting it, which is how
+      // "CREDT" gets caught). Reviewers don't need it in notes, so strip it
+      // there; the "Image text extracted" fields keep it to mark the word.
+      for (const c of Object.values(finalChecks as Record<string, { note?: unknown }>)) {
+        if (c && typeof c.note === "string") c.note = stripSic(c.note);
+      }
+
       return {
         ...base,
         checks: finalChecks,
@@ -2028,7 +2038,7 @@ export async function POST(request: Request) {
         status: rollupUnitStatus(finalChecks, enhResult.flaggedOn),
         summary: qaError
           ? "This ad was not reviewed — the QA call failed. Re-run to retry it."
-          : typeof base.summary === "string" ? base.summary : "",
+          : typeof base.summary === "string" ? stripSic(base.summary) : "",
         name: unitContents[repIdx].name || "Unnamed",
         adId: unitContents[repIdx].adId ?? null,
         group,
@@ -2040,10 +2050,10 @@ export async function POST(request: Request) {
         ...(swapCritical ? { swapCritical } : {}),
       };
     });
-    const allCritical = [
+    const allCritical = ([
       ...(allUnits as { swapCritical?: string }[]).map((u) => u.swapCritical).filter((c): c is string => !!c),
       ...batchResults.flatMap((r) => r.critical_issues),
-    ];
+    ] as string[]).map(stripSic);
     const allNotes = "";
 
     const statusPriority = (s: string) => (s === "fail" ? 2 : s === "warning" ? 1 : 0);
