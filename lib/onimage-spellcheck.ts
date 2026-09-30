@@ -12,6 +12,7 @@
 // missing/unreadable input. A failed call or an unreadable image yields NO
 // finding (logged), never a fabricated one.
 import type Anthropic from "@anthropic-ai/sdk";
+import { callSingleTool } from "@/lib/tool-call";
 import { createHash } from "node:crypto";
 
 export type SpellImage = {
@@ -111,7 +112,9 @@ const MAX_NOTE_FINDINGS = 4;
 export function formatSpellNote(findings: SpellFinding[]): string {
   const shown = findings.slice(0, MAX_NOTE_FINDINGS).map((f) => {
     const fix = f.expected ? ` (should be "${f.expected}")` : "";
-    return `"${f.written}"${fix} in live image ${f.image}`;
+    // Round 8b: the read label is "3/8 (<name>)"; show just the name.
+    const where = f.image.match(/^\d+\/\d+ \(([\s\S]*)\)$/)?.[1] ?? f.image;
+    return `"${f.written}"${fix} on ${where}`;
   });
   const more = findings.length > MAX_NOTE_FINDINGS ? `; +${findings.length - MAX_NOTE_FINDINGS} more` : "";
   return `Misspelled on-image text: ${shown.join("; ")}${more}`;
@@ -123,12 +126,17 @@ export function applySpellFindings(
   findings: SpellFinding[]
 ): Record<string, unknown> | undefined {
   if (findings.length === 0) return check;
-  const note = formatSpellNote(findings);
   const prev = check && typeof check.note === "string" ? check.note.trim() : "";
   const prevStatus = check?.status;
   // A prior "pass"/"unknown" note ("No errors") would contradict the finding, so
   // it is replaced; an existing fail/warning note is kept and appended to.
   const keepPrev = prev && (prevStatus === "fail" || prevStatus === "warning");
+  // Round 8b: don't repeat a misspelling the model's own note already names.
+  const fresh = keepPrev
+    ? findings.filter((f) => !prev.toLowerCase().includes(f.written.toLowerCase()))
+    : findings;
+  if (fresh.length === 0) return { ...(check ?? {}), status: "fail" };
+  const note = formatSpellNote(fresh);
   return { ...(check ?? {}), status: "fail", note: keepPrev ? `${prev}; ${note}` : note };
 }
 
@@ -142,30 +150,17 @@ async function readOneImage(
   img: SpellImage
 ): Promise<{ ok: boolean; words: unknown[] }> {
   try {
-    const msg = await client.messages.create({
+    const got = await callSingleTool(client, {
       model,
-      // Round 8: Opus 5.5 can't turn thinking off, so an omitted `thinking`
-      // means adaptive thinking at default effort, and thinking tokens count
-      // toward max_tokens. At 3000 the call could run out before the forced
-      // tool call and silently skip the spell pass. Pin effort + give room.
-      max_tokens: 8000,
-      thinking: { type: "adaptive" },
-      output_config: { effort: "medium" },
+      maxTokens: 8000,
       system: SPELLCHECK_SYSTEM,
-      tools: [SPELLCHECK_TOOL],
-      tool_choice: { type: "tool", name: SPELLCHECK_TOOL.name },
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } },
-            { type: "text", text: "Spell out every word of text in this image letter by letter, then judge each one." },
-          ],
-        },
+      tool: SPELLCHECK_TOOL,
+      content: [
+        { type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } },
+        { type: "text", text: "Spell out every word of text in this image letter by letter, then judge each one." },
       ],
     });
-    const tool = msg.content.find((b) => b.type === "tool_use");
-    const words = tool && tool.type === "tool_use" ? (tool.input as { words?: unknown })?.words : undefined;
+    const words = (got?.input as { words?: unknown } | undefined)?.words;
     if (!Array.isArray(words)) return { ok: false, words: [] };
     return { ok: true, words };
   } catch {

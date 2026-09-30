@@ -1629,22 +1629,53 @@ export type SwapAdInfo = {
 
 const SWAP_CYCLE_GAP_DAYS = 20;
 
-// true = the source belongs to a previous promo cycle, false = same cycle,
-// null = can't tell. Ad-set months first (the level the team always renames),
-// then ad-name months, then a created-time gap.
+// Did the source belong to a previous promo cycle?
+//   prior: true / false (same cycle) / null (can't tell)
+//   byName: the split came from NAMES (certain), not just a date gap.
+// Team setup (Jorge, 2026-09-30): Interest / Lookalike / Retargeting exist
+// from the original build; each new cycle duplicates EACH ad set from its own
+// previous version and differentiates the copy by a month, a promo name, or
+// just "2". Order:
+//   1. ad-set months on both sides → differ = prior
+//   2. ad set RENAMED from its source ("Lookalike" → "Lookalike 2" /
+//      "September Lookalike" / "Promo B Lookalike"): the names share a word
+//      but aren't the same → prior. Names that share no word ("Interest 2" vs
+//      "Lookalike 2") are not a rename and fall through.
+//   3. ad-name months on both sides → differ = prior
+//   4. created-time gap ≥ SWAP_CYCLE_GAP_DAYS → prior, but only byName=false
+function normAdsetTokens(name: string): string[] {
+  return name
+    .toLowerCase()
+    .replace(/\bcopy\b( \d+)?/g, " ") // Meta's " - Copy" / " - Copy 2" suffix
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+export function classifyCycle(
+  cur: Pick<SwapAdInfo, "name" | "adsetName" | "createdTime">,
+  src: Pick<SwapAdInfo, "name" | "adsetName" | "createdTime">,
+  monthsOf: (s: string) => Set<number>
+): { prior: boolean | null; byName: boolean } {
+  const overlap = (a: Set<number>, b: Set<number>) => Array.from(a).some((m) => b.has(m));
+  const ca = monthsOf(cur.adsetName), sa = monthsOf(src.adsetName);
+  if (ca.size && sa.size) return { prior: !overlap(ca, sa), byName: true };
+  const ct = normAdsetTokens(cur.adsetName), st = normAdsetTokens(src.adsetName);
+  if (ct.length && st.length) {
+    const same = ct.join(" ") === st.join(" ");
+    const sharesWord = ct.some((t) => !/^\d+$/.test(t) && st.includes(t));
+    if (!same && sharesWord) return { prior: true, byName: true };
+  }
+  const cn = monthsOf(cur.name), sn = monthsOf(src.name);
+  if (cn.size && sn.size) return { prior: !overlap(cn, sn), byName: true };
+  const c = Date.parse(cur.createdTime), p = Date.parse(src.createdTime);
+  if (Number.isNaN(c) || Number.isNaN(p)) return { prior: null, byName: false };
+  return { prior: c - p >= SWAP_CYCLE_GAP_DAYS * 24 * 60 * 60 * 1000, byName: false };
+}
 export function isPriorCycle(
   cur: Pick<SwapAdInfo, "name" | "adsetName" | "createdTime">,
   src: Pick<SwapAdInfo, "name" | "adsetName" | "createdTime">,
   monthsOf: (s: string) => Set<number>
 ): boolean | null {
-  const overlap = (a: Set<number>, b: Set<number>) => Array.from(a).some((m) => b.has(m));
-  const ca = monthsOf(cur.adsetName), sa = monthsOf(src.adsetName);
-  if (ca.size && sa.size) return !overlap(ca, sa);
-  const cn = monthsOf(cur.name), sn = monthsOf(src.name);
-  if (cn.size && sn.size) return !overlap(cn, sn);
-  const c = Date.parse(cur.createdTime), p = Date.parse(src.createdTime);
-  if (Number.isNaN(c) || Number.isNaN(p)) return null;
-  return c - p >= SWAP_CYCLE_GAP_DAYS * 24 * 60 * 60 * 1000;
+  return classifyCycle(cur, src, monthsOf).prior;
 }
 
 // Pure decision over the current ad + its prior-cycle ancestor.
@@ -1687,10 +1718,10 @@ async function fetchSwapAdInfo(adId: string, accessToken: string): Promise<SwapA
   }
 }
 
-// byMonth: the cycle split came from month names (ad set / ad). When it came
-// only from a created-time gap (no months anywhere) the reuse MAY be an
-// intentional evergreen creative, so the route reports it as a warning.
-export type SwapCheck = { unswapped: boolean; sourceAdId: string; sourceName: string; sourceAdsetName: string; byMonth: boolean };
+// byName: the cycle split came from names (ad set month / ad set rename / ad
+// month). When it came only from a created-time gap the reuse MAY be an
+// intentional rerun, so the route reports it as a warning.
+export type SwapCheck = { unswapped: boolean; sourceAdId: string; sourceName: string; sourceAdsetName: string; byName: boolean };
 
 export async function checkCreativeSwap(
   adId: string,
@@ -1707,7 +1738,7 @@ export async function checkCreativeSwap(
     seen.add(nextId);
     const src = await fetchSwapAdInfo(nextId, accessToken);
     if (!src) return null;
-    const prior = isPriorCycle(cur, src, monthsOf);
+    const { prior, byName } = classifyCycle(cur, src, monthsOf);
     if (prior === null) return null;
     if (prior) {
       return {
@@ -1715,9 +1746,7 @@ export async function checkCreativeSwap(
         sourceAdId: nextId,
         sourceName: src.name,
         sourceAdsetName: src.adsetName,
-        byMonth:
-          (monthsOf(cur.adsetName).size > 0 && monthsOf(src.adsetName).size > 0) ||
-          (monthsOf(cur.name).size > 0 && monthsOf(src.name).size > 0),
+        byName,
       };
     }
     nextId = src.sourceAdId;

@@ -12,6 +12,7 @@
 // read or the compare call fails, nothing is changed and the guard still
 // downgrades the pass to "couldn't verify".
 import type Anthropic from "@anthropic-ai/sdk";
+import { callSingleTool } from "@/lib/tool-call";
 import type { ImageRead } from "./onimage-spellcheck";
 
 export type TextCompare = { status: "pass" | "warning" | "fail"; note: string; mismatches: string[] };
@@ -83,25 +84,18 @@ export async function compareTranscripts(
     ? "\nNOTE: the approved files are a different format than the live ad (carousel vs static/story). Compare offer details, dates, and text only; card count differences are not defects."
     : "";
   try {
-    const msg = await client.messages.create({
-      model,
-      // Round 8: see onimage-spellcheck.ts (thinking can't be disabled on
-      // Opus 5.5; thinking tokens count toward max_tokens).
-      max_tokens: 6000,
-      thinking: { type: "adaptive" },
-      output_config: { effort: "medium" },
-      system: COMPARE_SYSTEM,
-      tools: [COMPARE_TOOL],
-      tool_choice: { type: "tool", name: COMPARE_TOOL.name },
-      messages: [
-        {
-          role: "user",
-          content: `APPROVED CREATIVE TEXT:\n${approved}\n\nLIVE AD TEXT:\n${live}${cross}`,
-        },
-      ],
-    });
-    const tool = msg.content.find((b) => b.type === "tool_use");
-    const input = (tool && tool.type === "tool_use" ? tool.input : null) as Partial<TextCompare> | null;
+    const got = await callSingleTool(
+      client,
+      {
+        model,
+        maxTokens: 6000,
+        system: COMPARE_SYSTEM,
+        tool: COMPARE_TOOL,
+        content: `APPROVED CREATIVE TEXT:\n${approved}\n\nLIVE AD TEXT:\n${live}${cross}`,
+      },
+      log
+    );
+    const input = (got?.input ?? null) as Partial<TextCompare> | null;
     if (!input || !["pass", "warning", "fail"].includes(String(input.status))) return null;
     return {
       status: input.status as TextCompare["status"],

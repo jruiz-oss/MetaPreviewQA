@@ -54,6 +54,14 @@ export function aspectKey(a: number): string {
   return `r${a.toFixed(2)}`;
 }
 
+const GROUP_LABEL: Record<string, string> = {
+  "1:1": "Square (1:1)",
+  "4:5": "Vertical (4:5)",
+  "9:16": "Story (9:16)",
+  "1.91:1": "Landscape (1.91:1)",
+  "16:9": "Landscape (16:9)",
+};
+
 export type CoverageResult = { severity: "fail" | "warning" | null; notes: string[]; debug: string[] };
 
 export function analyzeCardCoverage(live: FP[], approved: FP[]): CoverageResult {
@@ -99,21 +107,27 @@ export function analyzeCardCoverage(live: FP[], approved: FP[]): CoverageResult 
         `unmatchedApproved=${unmatched.length}`
     );
 
+    // Round 8b: plain-language notes (Jorge, 2026-09-30). No file names or
+    // image IDs; say what's wrong in reviewer terms. The duplicate + shortfall
+    // + missing card read as ONE finding per aspect set.
     const shortfall = distinct < A.length;
-    for (const members of Array.from(clusters.values())) {
-      if (members.length < 2) continue;
-      notes.push(
-        `${g} set: live images ${members.map((m) => `"${m.label}"`).join(" and ")} are near-identical` +
-          (shortfall ? ` — approved has ${A.length} different cards but live shows only ${distinct}` : "")
+    const dupClusters = Array.from(clusters.values()).filter((m) => m.length >= 2);
+    const G = GROUP_LABEL[g] ?? g;
+    const parts: string[] = [];
+    if (dupClusters.length) {
+      const twice = dupClusters.length === 1 ? "one card appears twice" : "some cards appear twice";
+      parts.push(
+        shortfall
+          ? `the approved folder has ${A.length} different cards but the ad shows only ${distinct} (${twice})`
+          : `${twice}`
       );
       bump(shortfall ? "fail" : "warning");
     }
     if (unmatched.length) {
-      notes.push(
-        `${g} set: no live image resembles approved ${unmatched.map((u) => `"${u.label}"`).join(", ")} (card changed or missing)`
-      );
+      parts.push(`missing approved ${unmatched.map((u) => u.label).join(", ")}`);
       bump(shortfall ? "fail" : "warning");
     }
+    if (parts.length) notes.push(`${G} carousel: ${parts.join("; ")}`);
   }
   return { severity, notes, debug };
 }
@@ -130,4 +144,56 @@ export function applyCoverage(
   const keepPrev = prev && (prevStatus === "fail" || prevStatus === "warning");
   const status = prevStatus === "fail" || res.severity === "fail" ? "fail" : "warning";
   return { ...(check ?? {}), status, note: keepPrev ? `${prev}; ${note}` : note };
+}
+
+// ─── Human names for live images (Round 8b, Jorge 2026-09-30) ───────────────
+// Live Meta images only have CDN file names ("825268710_1613…_n.png"), which
+// mean nothing to a reviewer. Name each live image after the approved Drive
+// file it visually matches (same fingerprint + radius rules as the coverage
+// check above), plus its live size: 'Carousel 1080x1080 - 2 (live 1254×1254)'.
+// No confident match → just the size ('live 1779×400 image'). This is a
+// NAMING aid only; it never decides a pass/fail.
+export function driveDisplayName(name: string): string {
+  const base = (name.split("/").pop() ?? name).replace(/\s*\(Drive thumbnail frame\)\s*$/i, "");
+  return base.replace(/\.[a-z0-9]{2,4}$/i, "").trim();
+}
+
+export async function nameLiveImages(
+  live: { data: string }[],
+  approved: { data: string; name: string }[]
+): Promise<string[]> {
+  const sizeOf = async (b64: string) => {
+    try {
+      const m = await sharp(Buffer.from(b64, "base64")).metadata();
+      return m.width && m.height ? `${m.width}×${m.height}` : null;
+    } catch {
+      return null;
+    }
+  };
+  const [liveFps, apprFps, sizes] = await Promise.all([
+    Promise.all(live.map((l, i) => fingerprint(l.data, String(i)))),
+    Promise.all(approved.map((a) => fingerprint(a.data, driveDisplayName(a.name)))),
+    Promise.all(live.map((l) => sizeOf(l.data))),
+  ]);
+  const A = apprFps.filter((f): f is FP => !!f);
+  return live.map((_, i) => {
+    const size = sizes[i];
+    const f = liveFps[i];
+    const sized = size ? `live ${size}` : "live image";
+    if (!f) return size ? `live ${size} image` : "live image";
+    const group = A.filter((a) => aspectKey(a.aspect) === aspectKey(f.aspect));
+    if (!group.length) return size ? `live ${size} image` : "live image";
+    let minPair = Infinity;
+    for (let x = 0; x < group.length; x++)
+      for (let y = x + 1; y < group.length; y++) minPair = Math.min(minPair, hamming(group[x].bits, group[y].bits));
+    const R = group.length > 1 ? Math.min(ABS_MAX_RADIUS, Math.floor(minPair / 2)) : ABS_MAX_RADIUS;
+    if (R < MIN_RADIUS) return size ? `live ${size} image` : "live image";
+    let best: FP | null = null;
+    let bestD = Infinity;
+    for (const a of group) {
+      const d = hamming(a.bits, f.bits);
+      if (d < bestD) { bestD = d; best = a; }
+    }
+    return best && bestD <= R ? `"${best.label}" (${sized})` : size ? `live ${size} image, no matching approved file` : "live image";
+  });
 }

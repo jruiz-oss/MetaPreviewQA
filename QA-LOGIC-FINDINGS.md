@@ -437,8 +437,12 @@ rename stays visible. Non-month keywords unchanged. Same test file.
 `checkCreativeSwap` walks `source_ad_id` (max 3 hops, skipping same-cycle
 siblings like Lookalike-from-Interest) to the previous-cycle ancestor. If every
 image hash / video id on the ad already existed there, creative_alignment is
-forced to FAIL (month-based cycle split) or WARNING (created-gap split only,
-could be intentional evergreen). Isolated requests; anything unreadable → no
+forced to FAIL when the cycle split comes from NAMES (ad set months differ, or
+the ad set was renamed from its source: "Lookalike" -> "Lookalike 2" /
+"September Lookalike" / "Promo B Lookalike", or ad-name months differ) or
+WARNING when only a 20+ day created gap separates them (could be an
+intentional rerun). Team setup: Interest/Lookalike/Retargeting exist from the
+original build and each is duplicated from its own previous version. Isolated requests; anything unreadable → no
 finding. Test: `lib/__tests__/creative-swap.test.ts`.
 
 ## Model
@@ -448,3 +452,29 @@ disable thinking, so the spell-check and card-compare helper calls now pin
 adaptive thinking at effort medium with larger max_tokens (thinking counts
 toward it; the old 3000/1500 could silently skip those passes). The per-call
 `[qa] TOKENS` cost line is now always on and priced per model.
+
+## Round 8b (2026-09-30) — first Opus 5.5 production run
+Same 3 Altura ads run on Sonnet 5 (00:57 UTC) and Opus 5.5 (01:14 UTC).
+Main review: Opus caught the 1254x1254 Forbes card with "CREDT" on its own
+(Sonnet's main pass missed it; only the spell pass caught it). Cost of main
+calls ~$0.42 vs ~$0.32 (+30%). BUT every on-image spelling read returned
+"couldn't verify" on Opus 5.5 (all 13 images), with the error swallowed.
+`lib/tool-call.ts` (`callSingleTool`) now wraps the spell-read and card-compare
+calls: forced tool call first, on error/no tool call one retry with
+tool_choice auto + adaptive thinking (the shape the main call already runs on
+Opus), and the first failure reason is logged as `[qa][toolcall]`.
+`[qa][swap]` dbg line added per ad for the creative-swap verdict.
+Readability (Jorge, 2026-09-30): card-uniqueness notes rewritten in plain
+language, one note per aspect set, no file names/image IDs ("Square (1:1)
+carousel: the approved folder has 4 different cards but the ad shows only 3
+(one card appears twice); missing approved card 1"). Prompt: notes state only
+the problem, no "what matches", no cause speculation, no file names; typos
+live in grammar_typos. Same-shape size warning reworded (format-check.ts).
+Live image names (Jorge, 2026-09-30): live Meta images carried only CDN file
+names. `nameLiveImages()` (lib/image-similarity.ts) names each live image after
+the approved Drive file it visually matches (same fingerprint/radius rules as
+the coverage check) plus its live size, e.g. '"Carousel 1080x1080 - 2" (live
+1254×1254)'; no match → 'live 1779×400 image, no matching approved file'.
+Used in the prompt label, the spell-pass findings, and the model is told to
+use it. Naming only, never a verdict. Spell findings no longer repeat a word
+the model's own note already names.

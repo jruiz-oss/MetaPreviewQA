@@ -12,7 +12,7 @@ import { monthsInProse, monthsInStructuredName, expectedMonthsForUnit, filterRef
 import { isAuthedRequest } from "@/lib/auth";
 import { spellCheckImages, applySpellFindings, readImagesWords } from "@/lib/onimage-spellcheck";
 import { buildTranscript, compareTranscripts, applyTextRecovery } from "@/lib/card-text-compare";
-import { fingerprint, analyzeCardCoverage, applyCoverage } from "@/lib/image-similarity";
+import { fingerprint, analyzeCardCoverage, applyCoverage, nameLiveImages } from "@/lib/image-similarity";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
 export const maxDuration = 300;
@@ -147,7 +147,7 @@ For each check, assign one of:
 - "warning" — possible issue or couldn't fully verify
 - "unknown" — data not available (only valid for ai_enhancements and format_size)
 
-BE CONCISE BUT COMPLETE. Keep notes tight — roughly one short sentence per issue. If a check has more than one genuine problem, report ALL of them in that check's note (separate with "; "), most important first. Never drop a real issue for the sake of brevity — missing a defect is worse than a slightly longer note. Keep "summary" to one sentence. Do not use numbered lists inside note fields.
+BE CONCISE BUT COMPLETE. Keep notes tight — roughly one short sentence per issue. Each note states ONLY the problem: what is wrong and where (which card/size). Do not describe what matches (a passing part needs no mention), do not guess why it happened (e.g. "looks altered or regenerated"), and never include file names or image IDs. Refer to a live image by the "name:" given in its label (e.g. "Carousel 1080x1080 - 2 (live 1254×1254)"); that name is only a naming hint from visual similarity, so still compare every detail. A misspelling is reported in grammar_typos; in creative_alignment just name the differing word in a few words. If a check has more than one genuine problem, report ALL of them in that check's note (separate with "; "), most important first. Never drop a real issue for the sake of brevity — missing a defect is worse than a slightly longer note. Keep "summary" to one sentence. Do not use numbered lists inside note fields.
 
 IMPORTANT: Submit your review by calling the \`submit_qa_report\` tool. Put everything in the tool call — do not write any prose in the text response. The tool expects exactly this structure:
 
@@ -339,7 +339,9 @@ type DriveImageRef = {
   mediaType: string;
 };
 
-type FetchedImage = { name: string; mediaType: ImageMediaType; data: string; context?: string | null };
+// displayName (Round 8b): reviewer-facing name for a live image, e.g.
+// '"Carousel 1080x1080 - 2" (live 1254×1254)'. Set per batch in runBatch.
+type FetchedImage = { name: string; mediaType: ImageMediaType; data: string; context?: string | null; displayName?: string };
 
 // Anthropic allows up to 5MB per image; cap a touch below that.
 const MAX_IMAGE_BYTES = 4_500_000;
@@ -636,6 +638,12 @@ export async function POST(request: Request) {
     } catch {
       swapCheck = null;
     }
+    dbg(
+      `[qa][swap] ad=${adId} "${unit.name}" ` +
+        (swapCheck
+          ? `source=${swapCheck.sourceAdId} "${swapCheck.sourceName}" (ad set "${swapCheck.sourceAdsetName}") unswapped=${swapCheck.unswapped} byName=${swapCheck.byName}`
+          : "no verdict (built from scratch, no previous-cycle source found, or unreadable)")
+    );
 
     // Build a per-URL context note (placement + asset date + stale flag) so each
     // downloaded image can be labeled in the prompt. Empty when the flag is off.
@@ -1176,8 +1184,11 @@ export async function POST(request: Request) {
       // When placement/date context is present, label the image just before it
       // so the model can attribute placement and flag a stale-dated asset as a
       // real finding (rather than surfacing old creative as a phantom).
-      if (img.context) {
-        blocks.push({ type: "text", text: `\nLive Meta image — ${img.context}:` });
+      // Round 8b: the image's reviewer-facing NAME goes first so notes can
+      // say "Carousel 1080x1080 - 2" instead of a CDN file number.
+      const bits = [img.displayName ? `name: ${img.displayName}` : null, img.context ?? null].filter(Boolean);
+      if (bits.length) {
+        blocks.push({ type: "text", text: `\nLive Meta image — ${bits.join(" — ")}:` });
       }
       blocks.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
     }
@@ -1246,6 +1257,19 @@ export async function POST(request: Request) {
         type: "text",
         text: `\n\nAPPROVED CREATIVE FROM DRIVE: the work order's Drive folder contains ${allDriveRefs.length} creative file(s), but none could be automatically matched to this ad unit, so no approved images are attached. Do NOT report that approved creative is missing or doesn't exist in Drive — it exists but was not auto-matched. Mark creative_alignment as "warning" (couldn't verify against approved creative) unless the live creative itself shows a defect.`,
       });
+    }
+
+    // Round 8b: give every live image a reviewer-facing name (the approved
+    // Drive file it visually matches + its live size). Naming only.
+    for (const unit of batchUnits) {
+      const imgs = (unit as { creativeImages?: FetchedImage[] }).creativeImages ?? [];
+      if (!imgs.length) continue;
+      try {
+        const names = await nameLiveImages(imgs, batchDriveImages);
+        imgs.forEach((im, i) => { im.displayName = names[i]; });
+      } catch {
+        // naming is cosmetic; leave undefined
+      }
     }
 
     messageContent.push({ type: "text", text: `\n\nAD UNITS TO REVIEW:` });
@@ -1605,7 +1629,10 @@ export async function POST(request: Request) {
           ((batchUnits[idx] ?? batchUnits[0]) as { creativeImages?: FetchedImage[] } | undefined)
             ?.creativeImages ?? [];
         if (liveImgs.length === 0) continue;
-        const findings = await spellCheckImages(client, spellModel, liveImgs, dbg, { cache: imageReadCache });
+        // Round 8b: findings name the image by its reviewer-facing name, not
+        // the CDN file name / placement string.
+        const namedImgs = liveImgs.map((im) => (im.displayName ? { ...im, context: im.displayName } : im));
+        const findings = await spellCheckImages(client, spellModel, namedImgs, dbg, { cache: imageReadCache });
         if (findings.length === 0) continue;
         const checks = (u?.checks ?? {}) as Record<string, Record<string, unknown>>;
         checks.grammar_typos = applySpellFindings(checks.grammar_typos, findings) as Record<string, unknown>;
@@ -1642,7 +1669,12 @@ export async function POST(request: Request) {
         const short = (n: string) => (n.length > 48 ? `…${n.slice(-46)}` : n);
         const [liveFps, driveFps] = await Promise.all([
           Promise.all(liveImgs.map((im, i) => fingerprint(im.data, `#${i + 1} ${short(im.name)}`))),
-          Promise.all(driveImgs.map((im) => fingerprint(im.data, short(im.name.split("/").pop() ?? im.name)))),
+          // Human label for notes: "…Carousel 1080x1080 - 1.jpg" → "card 1".
+          Promise.all(driveImgs.map((im) => {
+            const base = (im.name.split("/").pop() ?? im.name).replace(/\.[a-z0-9]+$/i, "").trim();
+            const n = base.match(/[-_ ]\s*(\d{1,2})$/)?.[1];
+            return fingerprint(im.data, n ? `card ${n}` : `"${short(base)}"`);
+          })),
         ]);
         const res = analyzeCardCoverage(
           liveFps.filter((f): f is NonNullable<typeof f> => !!f),
@@ -1748,7 +1780,7 @@ export async function POST(request: Request) {
       driveConfident: refsPerUnit[i].confidentMatch,
       nameSig: nameSignature(u.name ?? ""),
       // FIX #35: an unswapped verdict changes the result, so it must split groups.
-      swap: (() => { const sc = (u as { swapCheck?: SwapCheck | null }).swapCheck; return sc ? `${sc.unswapped}:${sc.byMonth}` : null; })(),
+      swap: (() => { const sc = (u as { swapCheck?: SwapCheck | null }).swapCheck; return sc ? `${sc.unswapped}:${sc.byName}` : null; })(),
     };
   }
   function fingerprintForUnit(i: number): string {
@@ -1939,15 +1971,15 @@ export async function POST(request: Request) {
       if (swap?.unswapped) {
         const cca = (finalChecks as Record<string, { status?: string; note?: string }>).creative_alignment ?? {};
         const src = `"${swap.sourceName || swap.sourceAdId}"${swap.sourceAdsetName ? ` (ad set "${swap.sourceAdsetName}")` : ""}`;
-        const tag = swap.byMonth
+        const tag = swap.byName
           ? `Creative was never swapped: every image/video on this ad is identical to the previous-cycle ad it was duplicated from, ${src} (computed).`
           : `Creative is identical to the older ad it was duplicated from, ${src}. Verify the WO wants the same creative again (computed).`;
         (finalChecks as Record<string, { status?: string; note?: string }>).creative_alignment = {
           ...cca,
-          status: swap.byMonth ? "fail" : cca.status === "fail" ? "fail" : "warning",
+          status: swap.byName ? "fail" : cca.status === "fail" ? "fail" : "warning",
           note: cca.note ? `${tag} ${cca.note}` : tag,
         };
-        if (swap.byMonth) swapCritical = `${unitContents[repIdx].name || "Unnamed"}: creative not swapped, still identical to ${swap.sourceName || "the previous-cycle ad"}`;
+        if (swap.byName) swapCritical = `${unitContents[repIdx].name || "Unnamed"}: creative not swapped, still identical to ${swap.sourceName || "the previous-cycle ad"}`;
       }
 
       // Make URL matching authoritative: escalate url_cta to the code-computed

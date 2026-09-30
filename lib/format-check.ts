@@ -76,9 +76,9 @@ export function checkDimensionConsistency(fi: FormatInfo | null | undefined): { 
   }
   const mixed = Array.from(byRatio.values()).filter((sizes) => sizes.length > 1);
   if (mixed.length) {
-    warnNote = `multiple sizes share the same aspect ratio within this ad (${mixed
-      .map((s) => s.join(" vs "))
-      .join("; ")}) — same-format assets should be one size; verify this is intentional`;
+    warnNote = `two sizes of the same shape in this ad (${mixed
+      .map((s) => s.join(" and "))
+      .join("; ")}); same-format images should be one size, so one may be an extra or wrong file`;
   }
   return { failNote, warnNote };
 }

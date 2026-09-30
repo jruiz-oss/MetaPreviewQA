@@ -1,7 +1,7 @@
 // Run: npx tsx lib/__tests__/image-similarity.test.ts
 import assert from "node:assert/strict";
 import sharp from "sharp";
-import { fingerprint, hamming, aspectKey, analyzeCardCoverage, applyCoverage, type FP } from "../image-similarity";
+import { fingerprint, hamming, aspectKey, analyzeCardCoverage, applyCoverage, nameLiveImages, driveDisplayName, type FP } from "../image-similarity";
 
 // Deterministic "design": coarse colored blocks so each seed is a clearly different card.
 async function card(seed: number, size = 1080): Promise<Buffer> {
@@ -42,7 +42,7 @@ const fp = async (b: Buffer, label: string): Promise<FP> => (await fingerprint(b
     const live = [await fp(await card(1, 1080), "live 1"), await fp(await card(2, 1080), "live 2"), c2edit, await fp(await card(3, 1080), "live 3")];
     const r = analyzeCardCoverage(live, approved);
     assert.equal(r.severity, "fail");
-    assert.ok(r.notes.some((n) => /near-identical/.test(n) && /only 3/.test(n)), r.notes.join(" | "));
+    assert.ok(r.notes.some((n) => /appears twice/.test(n) && /only 3/.test(n) && !/\.(jpg|png)/.test(n)), r.notes.join(" | "));
     assert.ok(r.notes.some((n) => /Card 4/.test(n)), "missing approved card 4 is named");
     const merged = applyCoverage({ status: "pass", note: "Matches." }, r)!;
     assert.equal(merged.status, "fail");
@@ -71,5 +71,18 @@ const fp = async (b: Buffer, label: string): Promise<FP> => (await fingerprint(b
   // Different aspect sets are never compared with each other; unreadable input is ignored.
   assert.equal(analyzeCardCoverage([], approved).severity, null);
   assert.equal(await fingerprint("bm90IGFuIGltYWdl", "junk"), null);
+  // Round 8b: live images get the approved Drive name, not the CDN file name.
+  {
+    assert.equal(driveDisplayName("Carousel/1080x1080/Altura-00023 - Meta - 2026 - Carousel 1080x1080 - 2.jpg"), "Altura-00023 - Meta - 2026 - Carousel 1080x1080 - 2");
+    assert.equal(driveDisplayName("Video/Promo Video 1080x1920.mp4 (Drive thumbnail frame)"), "Promo Video 1080x1920");
+    const b64 = async (b: Promise<Buffer>) => (await b).toString("base64");
+    const appr = await Promise.all([1, 2, 3, 4].map(async (i) => ({ name: `Carousel/1080x1080/Carousel 1080x1080 - ${i}.jpg`, data: await b64(card(i)) })));
+    const live = [{ data: await b64(edited(2)) }, { data: await b64(card(3, 1080)) }, { data: await b64(card(99, 1080)) }];
+    const names = await nameLiveImages(live, appr);
+    assert.equal(names[0], '"Carousel 1080x1080 - 2" (live 1254×1254)');
+    assert.equal(names[1], '"Carousel 1080x1080 - 3" (live 1080×1080)');
+    assert.equal(names[2], "live 1080×1080 image, no matching approved file");
+    assert.ok(!names.some((n) => /\.(jpg|png)/.test(n)));
+  }
   console.log("image-similarity: ok");
 })();

@@ -29,6 +29,11 @@ function stub(ads: Record<string, Ad>) {
   assert(isPriorCycle({ name: "August Static V1", adsetName: "September Retargeting", createdTime: "" }, { name: "August Static V1", adsetName: "August Retargeting", createdTime: "" }, m) === true, "ad set month decides even when the ad name wasn't renamed");
   assert(isPriorCycle({ name: "S V1", adsetName: "September Lookalike", createdTime: "" }, { name: "S V1", adsetName: "September Interest", createdTime: "" }, m) === false, "same-month sibling is same cycle");
   assert(isPriorCycle({ name: "Static V1", adsetName: "Retargeting", createdTime: "2026-09-20T00:00:00Z" }, { name: "Static V1", adsetName: "Retargeting", createdTime: "2026-06-01T00:00:00Z" }, m) === true, "no months: 3-month created gap = prior cycle");
+  assert(isPriorCycle({ name: "Static V1", adsetName: "Lookalike 2", createdTime: "" }, { name: "Static V1", adsetName: "Lookalike", createdTime: "" }, m) === true, "ad set renamed with a number = new cycle");
+  assert(isPriorCycle({ name: "Static V1", adsetName: "Promo B Retargeting", createdTime: "" }, { name: "Static V1", adsetName: "Promo A Retargeting", createdTime: "" }, m) === true, "ad set renamed with a promo name = new cycle");
+  assert(isPriorCycle({ name: "Static V1", adsetName: "September Lookalike", createdTime: "" }, { name: "Static V1", adsetName: "Lookalike", createdTime: "" }, m) === true, "month added to a month-less ad set = new cycle");
+  assert(isPriorCycle({ name: "Static V1", adsetName: "Lookalike - Copy", createdTime: "2026-09-29T00:00:00Z" }, { name: "Static V1", adsetName: "Lookalike", createdTime: "2026-09-28T00:00:00Z" }, m) === false, "un-renamed '- Copy' made yesterday = same cycle");
+  assert(isPriorCycle({ name: "Static V1", adsetName: "Interest 2", createdTime: "2026-09-29T00:00:00Z" }, { name: "Static V1", adsetName: "Lookalike 2", createdTime: "2026-09-28T00:00:00Z" }, m) === false, "different audiences sharing only a number are not a rename");
   assert(creativeUnswapped(["a", "b"], ["a", "b", "c"]) === true, "subset of source = unswapped");
   assert(creativeUnswapped(["a", "new"], ["a", "b"]) === false, "one new asset = swapped");
 
@@ -45,6 +50,7 @@ function stub(ads: Record<string, Ad>) {
   const ret = await checkCreativeSwap("sepRet", ["old1", "old2"], "t", m);
   assert(ret?.unswapped === true && ret.sourceName === "August Static V1", "duplicate still carrying August hashes: flagged");
   assert((await checkCreativeSwap("fresh", ["x"], "t", m)) === null, "ad built from scratch: no verdict");
+  assert(ret?.byName === true, "month-based split is a certain (fail-level) verdict");
   stub({ sepRet: { name: "S", adset: "September Retargeting", created: "", source: "missing", hashes: ["old1"] } });
   assert((await checkCreativeSwap("sepRet", ["old1"], "t", m)) === null, "unreadable source: couldn't verify, no finding");
 
