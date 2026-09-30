@@ -483,3 +483,37 @@ Confirmed 2026-09-30 01:33 UTC: Opus 5.5 rejects forced tool_choice ("type
 read all 13 images and caught CREDT. tool-call.ts now remembers the model and
 skips the forced attempt. Live image names use the ORIGINAL size (captured
 before the 1568px resize), not the resized one.
+
+## Audit fixes (2026-09-30), correctness only
+Review of d79b136..fd4190e for bugs/dead code (Jorge asked: no optimizing).
+- Swap check: `classifyCycle` rule 2 treated any shared word as "ad set
+  renamed = previous cycle", so "Promo B Lookalike" copied from "Promo B
+  Interest" (or "Lookalike Audience" from "Interest Audience") was a hard
+  FAIL "creative never swapped" on a legit same-cycle sibling. Now a
+  different audience word on each side (AUDIENCE_WORDS) skips the rename rule.
+  Tests added in creative-swap.test.ts.
+- Month keyword filter: when every match was skipped for carrying another
+  month, Load ads said "No ads matched" and dropped the list. It now names
+  the skipped ads and says to rename them or clear the filter.
+- Time budget: the extraction re-run, card-by-card read and spelling pass all
+  run inside the one 300s request. Each now checks the remaining budget and is
+  skipped (console-logged, never a finding) when it can't fit: re-run needs
+  last-call time + 45s, card-by-card read 90s, spelling pass 60s.
+- Recovery reads now use the live images' reviewer-facing names (same as the
+  spell pass), so transcripts/notes no longer show CDN file names.
+- Same-shape size warning said "two sizes" for any count; now "more than one".
+- Removed the dead critical_issues pipeline: the results page builds its
+  Critical box from failing checks and never read critical_issues. Dropped the
+  model's critical_issues field (prompt + tool schema), the code-owned
+  critical filter, the push calls in the recovery/spell/card passes, and
+  swapCritical. Response still returns `critical_issues: []` for shape compat.
+- Decisions (Jorge, 2026-09-30): the month keyword filter KEEPS skipping ads
+  named for another month even inside this cycle's ad set (campaigns really
+  do keep last cycle's ads there, just turned off). The card-by-card compare
+  flagging an approved card missing from the live ad is wanted. Prompt now
+  tells the model to ALWAYS name the image a note flags (live image by its
+  "name:" label, approved file by Drive name without path/extension) instead
+  of "never include file names"; CDN numbers, IDs, hashes and URLs stay out.
+- README rewritten for the Campaign ID workflow; env table drops the dead
+  QA_THINKING_BUDGET and documents QA_EFFORT, QA_SPELL_MODEL, QA_SPELLCHECK,
+  QA_EXTRACT_RETRY, QA_PERCARD_READ, QA_CARD_UNIQUENESS.

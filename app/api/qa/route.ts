@@ -147,7 +147,7 @@ For each check, assign one of:
 - "warning" — possible issue or couldn't fully verify
 - "unknown" — data not available (only valid for ai_enhancements and format_size)
 
-BE CONCISE BUT COMPLETE. Keep notes tight — roughly one short sentence per issue. Each note states ONLY the problem: what is wrong and where (which card/size). Do not describe what matches (a passing part needs no mention), do not guess why it happened (e.g. "looks altered or regenerated"), and never include file names or image IDs. Refer to a live image by the "name:" given in its label (e.g. "Carousel 1080x1080 - 2 (live 1254×1254)"); that name is only a naming hint from visual similarity, so still compare every detail. A misspelling is reported in grammar_typos; in creative_alignment just name the differing word in a few words. If a check has more than one genuine problem, report ALL of them in that check's note (separate with "; "), most important first. Never drop a real issue for the sake of brevity — missing a defect is worse than a slightly longer note. Keep "summary" to one sentence. Do not use numbered lists inside note fields.
+BE CONCISE BUT COMPLETE. Keep notes tight — roughly one short sentence per issue. Each note states ONLY the problem: what is wrong and where (which card/size). Do not describe what matches (a passing part needs no mention), and do not guess why it happened (e.g. "looks altered or regenerated"). Whenever a note flags a specific image, ALWAYS name it so the reviewer knows exactly which one is wrong: a live image by the "name:" given in its label (e.g. "Carousel 1080x1080 - 2 (live 1254×1254)"), an approved Drive file by its file name without the folder path or extension (e.g. "Carousel 1080x1080 - 2"). Never include CDN file numbers, image IDs, hashes, or URLs. The live image name is only a naming hint from visual similarity, so still compare every detail. A misspelling is reported in grammar_typos; in creative_alignment just name the differing word in a few words. If a check has more than one genuine problem, report ALL of them in that check's note (separate with "; "), most important first. Never drop a real issue for the sake of brevity — missing a defect is worse than a slightly longer note. Keep "summary" to one sentence. Do not use numbered lists inside note fields.
 
 IMPORTANT: Submit your review by calling the \`submit_qa_report\` tool. Put everything in the tool call — do not write any prose in the text response. The tool expects exactly this structure:
 
@@ -169,7 +169,6 @@ IMPORTANT: Submit your review by calling the \`submit_qa_report\` tool. Put ever
       "summary": "≤25 words"
     }
   ],
-  "critical_issues": ["one issue per item, ≤20 words each — only the most urgent, max 5 total"],
   "notes": ""
 }`;
 
@@ -226,7 +225,6 @@ const QA_TOOL: Anthropic.Tool = {
           required: ["name", "status", "checks", "summary"],
         },
       },
-      critical_issues: { type: "array", items: { type: "string" } },
       notes: { type: "string" },
     },
     required: ["overall_status", "units"],
@@ -590,6 +588,13 @@ export async function POST(request: Request) {
   if (!isAuthedRequest(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Audit 2026-09-30: the extra passes (extraction re-run, card-by-card read,
+  // spelling pass) all run inside this one 300s request. Without a budget a
+  // slow Opus carousel could push the whole chunk past maxDuration and every
+  // ad in it came back "not reviewed". Each pass checks msLeft() first and is
+  // skipped (logged, no finding) when it can't fit.
+  const requestStart = Date.now();
+  const msLeft = () => maxDuration * 1000 - (Date.now() - requestStart);
   const { wo, units, labeledDocs, destinationUrl, driveImages, ignoreCopyDoc, instructions } = (await request.json()) as {
     wo: string;
     units: AdUnit[];
@@ -1222,7 +1227,7 @@ export async function POST(request: Request) {
     // Set on the one automatic re-run triggered when the model skipped text
     // extraction (see "Text-extraction recovery" below). Never retried twice.
     extractionRetry = false
-  ): Promise<{ units: unknown[]; critical_issues: string[]; notes: string }> {
+  ): Promise<{ units: unknown[]; notes: string }> {
     const messageContent: ContentBlock[] = [];
 
     // The work-order section is identical across every batch — cache it too so
@@ -1316,6 +1321,7 @@ export async function POST(request: Request) {
     //    collide again (the old fixed 15s/30s caused exactly that thundering herd).
     const MAX_ATTEMPTS = 5;
     let message: Anthropic.Message | undefined;
+    const mainCallStart = Date.now();
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
         message = await client.messages.create({
@@ -1391,6 +1397,7 @@ export async function POST(request: Request) {
       }
     }
     if (!message) throw new Error("Failed to get response from Claude after retries.");
+    const mainCallMs = Date.now() - mainCallStart;
 
     // Token-usage log — added to monitor cost/latency after raising image
     // resolution to 1568px (bigger images = more input tokens per run).
@@ -1432,7 +1439,6 @@ export async function POST(request: Request) {
     // from a text block only if the model answered without the tool.
     type ParsedQa = {
       units?: Record<string, unknown>[];
-      critical_issues?: string[];
       notes?: string;
     };
     let parsed: ParsedQa;
@@ -1453,26 +1459,13 @@ export async function POST(request: Request) {
       }
     }
 
-    // Be defensive: a tool/JSON response can occasionally hand back `units` or
-    // `critical_issues` as something other than an array. `?? []` only guards
+    // Be defensive: a tool/JSON response can occasionally hand back `units` as
+    // something other than an array. `?? []` only guards
     // null/undefined, so a non-array value slipped through and threw
     // "(parsed.units ?? []).map is not a function", failing the whole batch.
     const parsedUnits: Record<string, unknown>[] = Array.isArray(parsed.units) ? parsed.units : [];
-    const rawCritical: string[] = Array.isArray(parsed.critical_issues) ? parsed.critical_issues : [];
-
-    // Drop model-authored criticals about checks the code owns and overwrites
-    // (ai_enhancements, format_size, URL matching). The model is told to leave
-    // those as placeholders, but it can still surface a critical that
-    // contradicts the deterministic result — a false flag in the issues card.
-    const CODE_OWNED_CRITICAL_RE =
-      /(enhancement|advantage\+|aspect ratio|\bdimensions?\b|image size|asset size|\b9:16\b|\b4:5\b|\b1:1\b|letterbox|tracking param|utm_)/i;
-    const parsedCritical = rawCritical.filter((c) => {
-      if (CODE_OWNED_CRITICAL_RE.test(c)) {
-        dbg(`[qa][guard] dropped model critical about a code-owned check: "${c}"`);
-        return false;
-      }
-      return true;
-    });
+    // (critical_issues removed 2026-09-30: the results page builds its Critical
+    // issues box from each unit's failing checks and never read this field.)
 
     // --- DEBUG: text the model claims it read from each image ---------------
     // The two-step prompt records every legible string the model saw in the
@@ -1506,6 +1499,10 @@ export async function POST(request: Request) {
     const hasText = (v: unknown) => typeof v === "string" && v.trim().length > 0;
     const liveImgsFor = (idx: number) =>
       ((batchUnits[idx] ?? batchUnits[0]) as { creativeImages?: FetchedImage[] } | undefined)?.creativeImages ?? [];
+    // Live images labeled with their reviewer-facing name (Round 8b) so the
+    // recovery transcripts and the spelling notes never show CDN file names.
+    const namedLiveImgsFor = (idx: number) =>
+      liveImgsFor(idx).map((im) => (im.displayName ? { ...im, context: im.displayName } : im));
     const skippedExtraction = (idx: number) => {
       const cca = (parsedUnits[idx]?.checks as Record<string, Record<string, unknown>> | undefined)?.creative_alignment;
       if (!cca || cca.status !== "pass") return false;
@@ -1515,7 +1512,13 @@ export async function POST(request: Request) {
       );
     };
     const needsRecovery = parsedUnits.map((_, i) => i).filter(skippedExtraction);
-    if (needsRecovery.length > 0 && !extractionRetry && process.env.QA_EXTRACT_RETRY !== "off") {
+    // A re-run takes about as long as the call that just finished; only try it
+    // when that plus room for the spelling pass still fits the request budget.
+    const rerunFits = msLeft() > mainCallMs + 45_000;
+    if (needsRecovery.length > 0 && !extractionRetry && process.env.QA_EXTRACT_RETRY !== "off" && !rerunFits) {
+      console.log(`[qa][recover] skipping batch re-run: ${Math.round(msLeft() / 1000)}s left, last call took ${Math.round(mainCallMs / 1000)}s — going to card-by-card read`);
+    }
+    if (needsRecovery.length > 0 && !extractionRetry && process.env.QA_EXTRACT_RETRY !== "off" && rerunFits) {
       dbg(
         `[qa][recover] "${needsRecovery.map((i) => String(parsedUnits[i]?.name)).join(", ")}" returned no extracted text — re-running batch once`
       );
@@ -1528,12 +1531,17 @@ export async function POST(request: Request) {
     // Shared by the recovery read and the spelling pass below so a live image is
     // only read once per run.
     const imageReadCache = new Map<string, Promise<{ ok: boolean; words: unknown[] }>>();
+    // QA_SPELL_MODEL (default QA_MODEL) drives both per-image read passes.
     const readModel = process.env.QA_SPELL_MODEL || QA_MODEL;
     if (needsRecovery.length > 0 && process.env.QA_PERCARD_READ !== "off") {
       for (const idx of needsRecovery) {
         if (!skippedExtraction(idx)) continue; // the re-run path already handled it
+        if (msLeft() < 90_000) {
+          console.log(`[qa][recover] "${String(parsedUnits[idx]?.name)}" card-by-card read skipped: only ${Math.round(msLeft() / 1000)}s left — leaving for guard`);
+          continue;
+        }
         const u = parsedUnits[idx];
-        const liveImgs = liveImgsFor(idx);
+        const liveImgs = namedLiveImgsFor(idx);
         const [aReads, lReads] = await Promise.all([
           batchDriveImages.length
             ? readImagesWords(client, readModel, batchDriveImages, dbg, { maxImages: 16, cache: imageReadCache, tag: "read:approved" })
@@ -1555,9 +1563,6 @@ export async function POST(request: Request) {
         checks.creative_alignment = applyTextRecovery(checks.creative_alignment, aText, lText, cmp);
         if (cmp.status === "fail") {
           u.status = "fail";
-          parsedCritical.push(
-            `On-image text differs from approved creative${cmp.mismatches[0] ? `: ${cmp.mismatches[0]}` : ""}`.slice(0, 220)
-          );
         } else if (cmp.status === "warning" && u.status === "pass") {
           u.status = "warning";
         }
@@ -1634,26 +1639,22 @@ export async function POST(request: Request) {
     // Failures in this pass are logged and skipped — never a fabricated defect.
     // Set QA_SPELLCHECK=off to disable. Uses QA_SPELL_MODEL (default QA_MODEL).
     if (process.env.QA_SPELLCHECK !== "off") {
-      const spellModel = process.env.QA_SPELL_MODEL || QA_MODEL;
       for (let idx = 0; idx < parsedUnits.length; idx++) {
         const u = parsedUnits[idx];
-        const liveImgs =
-          ((batchUnits[idx] ?? batchUnits[0]) as { creativeImages?: FetchedImage[] } | undefined)
-            ?.creativeImages ?? [];
+        const liveImgs = liveImgsFor(idx);
         if (liveImgs.length === 0) continue;
+        if (msLeft() < 60_000) {
+          console.log(`[qa][spell] "${String(u?.name)}" spelling pass skipped: only ${Math.round(msLeft() / 1000)}s left (main review's grammar check still applies)`);
+          continue;
+        }
         // Round 8b: findings name the image by its reviewer-facing name, not
         // the CDN file name / placement string.
-        const namedImgs = liveImgs.map((im) => (im.displayName ? { ...im, context: im.displayName } : im));
-        const findings = await spellCheckImages(client, spellModel, namedImgs, dbg, { cache: imageReadCache });
+        const findings = await spellCheckImages(client, readModel, namedLiveImgsFor(idx), dbg, { cache: imageReadCache });
         if (findings.length === 0) continue;
         const checks = (u?.checks ?? {}) as Record<string, Record<string, unknown>>;
         checks.grammar_typos = applySpellFindings(checks.grammar_typos, findings) as Record<string, unknown>;
         u.checks = checks;
         u.status = "fail";
-        const w = findings[0];
-        parsedCritical.push(
-          `Misspelled word in live image: "${w.written}"${w.expected ? ` (should be "${w.expected}")` : ""}${findings.length > 1 ? ` +${findings.length - 1} more` : ""}`
-        );
         dbg(`[qa][guard] "${String(u.name)}" grammar_typos → fail from on-image spelling pass (${findings.length} finding(s))`);
       }
     }
@@ -1699,7 +1700,6 @@ export async function POST(request: Request) {
         u.checks = checks;
         if (res.severity === "fail") {
           u.status = "fail";
-          parsedCritical.push(`Carousel cards not unique: ${res.notes[0]}`.slice(0, 220));
         } else if (u.status === "pass") {
           u.status = "warning";
         }
@@ -1720,7 +1720,6 @@ export async function POST(request: Request) {
 
     return {
       units: resultUnits,
-      critical_issues: parsedCritical,
       notes: typeof parsed.notes === "string" ? parsed.notes : "",
     };
   }
@@ -1900,7 +1899,7 @@ export async function POST(request: Request) {
           console.error(
             `[qa] Batch ${i + 1}/${batches.length} failed for "${b.units.map((u) => u.name || "Unnamed").join(", ")}": ${msg}`
           );
-          batchResults[i] = { units: [], critical_issues: [], notes: "", qaError: msg };
+          batchResults[i] = { units: [], notes: "", qaError: msg };
         }
       }
     };
@@ -1979,7 +1978,6 @@ export async function POST(request: Request) {
       // already existed on the previous-cycle ad it was duplicated from).
       // Hash equality is certain, so this is a FAIL that overrides the model.
       const swap = (rep as { swapCheck?: SwapCheck | null }).swapCheck;
-      let swapCritical: string | null = null;
       if (swap?.unswapped) {
         const cca = (finalChecks as Record<string, { status?: string; note?: string }>).creative_alignment ?? {};
         const src = `"${swap.sourceName || swap.sourceAdId}"${swap.sourceAdsetName ? ` (ad set "${swap.sourceAdsetName}")` : ""}`;
@@ -1991,7 +1989,6 @@ export async function POST(request: Request) {
           status: swap.byName ? "fail" : cca.status === "fail" ? "fail" : "warning",
           note: cca.note ? `${tag} ${cca.note}` : tag,
         };
-        if (swap.byName) swapCritical = `${unitContents[repIdx].name || "Unnamed"}: creative not swapped, still identical to ${swap.sourceName || "the previous-cycle ad"}`;
       }
 
       // Make URL matching authoritative: escalate url_cta to the code-computed
@@ -2047,13 +2044,8 @@ export async function POST(request: Request) {
         // Surfaced so the UI can distinguish "reviewed, with warnings" from
         // "never reviewed" (and, later, offer a retry of just these).
         ...(qaError ? { qaError } : {}),
-        ...(swapCritical ? { swapCritical } : {}),
       };
     });
-    const allCritical = ([
-      ...(allUnits as { swapCritical?: string }[]).map((u) => u.swapCritical).filter((c): c is string => !!c),
-      ...batchResults.flatMap((r) => r.critical_issues),
-    ] as string[]).map(stripSic);
     const allNotes = "";
 
     const statusPriority = (s: string) => (s === "fail" ? 2 : s === "warning" ? 1 : 0);
@@ -2065,7 +2057,8 @@ export async function POST(request: Request) {
     return NextResponse.json({
       overall_status: worstStatus,
       units: allUnits,
-      critical_issues: allCritical,
+      // Kept empty for response-shape compatibility with the results page.
+      critical_issues: [],
       notes: allNotes,
     });
   } catch (err) {

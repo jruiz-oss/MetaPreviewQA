@@ -1,17 +1,22 @@
-# Social Ad QA Tool
+# Vera (Social Ad QA)
 
-Internal QA tool for reviewing social ad previews against work orders. Built with Next.js + Claude AI.
+Internal QA dashboard that checks live Meta ads against the work order, the copy doc and the approved creative in Drive. Built with Next.js + Claude. Nothing is saved; each run is independent. Team-facing how-to lives at `/help` in the app.
 
 ## What it does
 
-1. Paste the work order description
-2. Add ad unit names + preview links (one per format — static, carousel, etc.)
-3. Claude fetches each preview link, reads the copy, and checks against the WO for:
-   - Copy/creative alignment
-   - Correct promo month & dates
-   - URL/CTA destination
-   - Grammar & typos
-4. Returns a pass/fail checklist per ad unit + a summary of critical issues
+1. Paste the work order. Google Docs / Drive folders / destination URLs in it are picked up automatically.
+2. Paste a Meta Campaign ID and hit Load ads. Ads are pulled straight from the Meta API (optional keyword filter, "updated since" date, ad set picker, hide paused).
+3. For each ad, Vera reads the live copy, creative images, placements and Advantage+ settings from Meta, matches the approved Drive files, and checks:
+   - Copy alignment (vs copy doc, or WO only)
+   - Creative alignment (live images vs approved Drive files, including on-image text, plus a code check for duplicate/missing carousel cards and for creative that was never swapped from the previous cycle)
+   - Promo month & dates
+   - URL & CTA destination (URL match computed in code)
+   - Grammar & typos (ad copy plus a dedicated per-image spelling pass)
+   - Advantage+ AI enhancements (computed from the API)
+   - Format & size (computed from dimensions and placements)
+4. Returns pass / warning / fail per check and per ad, with a consolidated Critical issues box built from the failing checks.
+
+QA logic history and every intentional false-positive guard: `QA-LOGIC-FINDINGS.md`. Regression tests: `lib/__tests__/*.test.ts`, run with `npx tsx <file>`.
 
 ---
 
@@ -51,9 +56,14 @@ npm run dev
 | `NEXT_PUBLIC_BASE_URL` | prod | Public origin used to build OAuth redirects (defaults to `http://localhost:3000`) |
 | `KV_REST_API_URL` | optional | Upstash Redis URL — when set, the Google token is shared across all serverless instances |
 | `KV_REST_API_TOKEN` | optional | Upstash Redis token |
-| `QA_DEBUG` | optional | Set to `1` for verbose server logs (folder/asset tracing, token usage, model reasoning); leave unset in production |
+| `QA_DEBUG` | optional | Set to `1` for verbose server logs (folder/asset tracing, extracted text, per-pass details); leave unset in production. The per-call `[qa] TOKENS` cost line is always logged |
 | `QA_MODEL` | optional | Claude model for QA runs. Defaults to `claude-opus-5-5`. Set to `claude-sonnet-5` to roll back or `claude-fable-5-1` to escalate |
-| `QA_THINKING_BUDGET` | optional | Extended-thinking token budget per call (default `3000`, capped at 12000) |
+| `QA_EFFORT` | optional | How hard the model thinks on the main review: `low`, `medium`, `high`, `xhigh`, `max` (default `high`). Try `medium` first if runs cost too much |
+| `QA_SPELL_MODEL` | optional | Model for the per-image read passes (spelling pass and card-by-card text read). Defaults to `QA_MODEL` |
+| `QA_SPELLCHECK` | optional | Set to `off` to disable the per-image spelling pass on live images (on by default) |
+| `QA_EXTRACT_RETRY` | optional | Set to `off` to disable the one automatic re-run when the model skips on-image text extraction (on by default) |
+| `QA_PERCARD_READ` | optional | Set to `off` to disable the card-by-card text read + compare fallback when extraction is still skipped (on by default) |
+| `QA_CARD_UNIQUENESS` | optional | Set to `off` to disable the code check for duplicate / missing carousel cards (on by default) |
 | `QA_PREFER_CARD_HASHES` | optional | Set to `1` to drop replaced (same-size, non-configured) carousel card images from visual QA on ads without placement customization rules (FIX #29). Off by default; with `QA_DEBUG=1` the log shows what it would drop |
 | `QA_TIMEZONE` | optional | IANA timezone for the TODAY'S DATE line used in promo-date checks (default `America/Phoenix`) |
 
@@ -83,7 +93,9 @@ Every push to `main` auto-deploys. Done.
 
 ## Notes
 
-- **Preview link access:** Links must be publicly viewable without a Meta login. If a link requires login, Claude will flag it as unverifiable and mark that check as a warning.
+- **Meta access:** Ads are read with `META_ACCESS_TOKEN` via the Graph API, no preview links or Meta login needed. An expired token shows up as a "code 190" error on Load ads.
+- **Couldn't verify vs defect:** Missing or unreadable input (no Drive match, image won't download, text not legible, a pass that ran out of time) is reported as a warning, never as a defect.
+- **Time limit:** Each `/api/qa` request has a 300s budget (3 ads per request). The extra passes (extraction re-run, card-by-card read, spelling pass) skip themselves when they won't fit, and log why.
 - **No database:** Stateless by design — nothing is saved. Each QA run is independent.
 - **Auth:** Single shared password stored as an env variable. The cookie lasts 30 days per device.
 - **Model:** Uses `claude-opus-5-5` by default; override with the `QA_MODEL` env variable (no code change needed).

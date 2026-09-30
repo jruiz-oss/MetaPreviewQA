@@ -34,6 +34,9 @@ function stub(ads: Record<string, Ad>) {
   assert(isPriorCycle({ name: "Static V1", adsetName: "September Lookalike", createdTime: "" }, { name: "Static V1", adsetName: "Lookalike", createdTime: "" }, m) === true, "month added to a month-less ad set = new cycle");
   assert(isPriorCycle({ name: "Static V1", adsetName: "Lookalike - Copy", createdTime: "2026-09-29T00:00:00Z" }, { name: "Static V1", adsetName: "Lookalike", createdTime: "2026-09-28T00:00:00Z" }, m) === false, "un-renamed '- Copy' made yesterday = same cycle");
   assert(isPriorCycle({ name: "Static V1", adsetName: "Interest 2", createdTime: "2026-09-29T00:00:00Z" }, { name: "Static V1", adsetName: "Lookalike 2", createdTime: "2026-09-28T00:00:00Z" }, m) === false, "different audiences sharing only a number are not a rename");
+  assert(isPriorCycle({ name: "Static V1", adsetName: "Promo B Lookalike", createdTime: "2026-09-29T00:00:00Z" }, { name: "Static V1", adsetName: "Promo B Interest", createdTime: "2026-09-28T00:00:00Z" }, m) === false, "audit 9/30: same promo, different audience = same-cycle sibling, not a rename");
+  assert(isPriorCycle({ name: "Static V1", adsetName: "Lookalike Audience", createdTime: "2026-09-29T00:00:00Z" }, { name: "Static V1", adsetName: "Interest Audience", createdTime: "2026-09-28T00:00:00Z" }, m) === false, "audit 9/30: shared generic word across audiences is not a rename");
+  assert(isPriorCycle({ name: "Static V1", adsetName: "Promo B Lookalike", createdTime: "" }, { name: "Static V1", adsetName: "Promo A Lookalike", createdTime: "" }, m) === true, "audit 9/30: same audience, promo renamed = still a new cycle");
   assert(creativeUnswapped(["a", "b"], ["a", "b", "c"]) === true, "subset of source = unswapped");
   assert(creativeUnswapped(["a", "new"], ["a", "b"]) === false, "one new asset = swapped");
 

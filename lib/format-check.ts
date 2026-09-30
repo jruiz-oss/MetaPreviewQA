@@ -76,7 +76,7 @@ export function checkDimensionConsistency(fi: FormatInfo | null | undefined): { 
   }
   const mixed = Array.from(byRatio.values()).filter((sizes) => sizes.length > 1);
   if (mixed.length) {
-    warnNote = `two sizes of the same shape in this ad (${mixed
+    warnNote = `more than one size of the same shape in this ad (${mixed
       .map((s) => s.join(" and "))
       .join("; ")}); same-format images should be one size, so one may be an extra or wrong file`;
   }

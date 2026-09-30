@@ -1643,6 +1643,12 @@ const SWAP_CYCLE_GAP_DAYS = 20;
 //      "Lookalike 2") are not a rename and fall through.
 //   3. ad-name months on both sides → differ = prior
 //   4. created-time gap ≥ SWAP_CYCLE_GAP_DAYS → prior, but only byName=false
+// Audience words the team puts in ad set names. Different audience word on
+// each side = different ad set, never a rename of the same one.
+const AUDIENCE_WORDS = new Set([
+  "interest", "interests", "lookalike", "lookalikes", "lal", "retargeting", "retarget", "rt",
+  "remarketing", "prospecting", "broad",
+]);
 function normAdsetTokens(name: string): string[] {
   return name
     .toLowerCase()
@@ -1659,7 +1665,13 @@ export function classifyCycle(
   const ca = monthsOf(cur.adsetName), sa = monthsOf(src.adsetName);
   if (ca.size && sa.size) return { prior: !overlap(ca, sa), byName: true };
   const ct = normAdsetTokens(cur.adsetName), st = normAdsetTokens(src.adsetName);
-  if (ct.length && st.length) {
+  // Audit 2026-09-30: two ad sets for DIFFERENT audiences ("Promo B Lookalike"
+  // from "Promo B Interest", "Lookalike Audience" from "Interest Audience") are
+  // a same-cycle sibling hop, not a rename, even though they share words. Only
+  // treat shared words as a rename when the audience word didn't change.
+  const audCur = ct.filter((t) => AUDIENCE_WORDS.has(t)), audSrc = st.filter((t) => AUDIENCE_WORDS.has(t));
+  const differentAudience = audCur.length > 0 && audSrc.length > 0 && !audCur.some((t) => audSrc.includes(t));
+  if (ct.length && st.length && !differentAudience) {
     const same = ct.join(" ") === st.join(" ");
     const sharesWord = ct.some((t) => !/^\d+$/.test(t) && st.includes(t));
     if (!same && sharesWord) return { prior: true, byName: true };

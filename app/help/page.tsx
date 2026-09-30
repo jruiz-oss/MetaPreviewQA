@@ -179,6 +179,12 @@ const sections: Section[] = [
             written on the image.
           </p>
           <p>Curly vs straight quotes, dash types and line breaks are not treated as differences.</p>
+          <p>
+            Two extra creative checks run on their own, outside the AI review: whether the creative was actually swapped
+            from last cycle&apos;s ad, and whether a carousel has the same card twice. See Troubleshooting for what those
+            flags mean. When a note flags an image, it names which one (for example &quot;Carousel 1080x1080 - 2 (live
+            1254×1254)&quot;) so you know exactly which card or size to fix.
+          </p>
         </Q>
         <Q q="Promo month & dates">
           <p>Looks for stale or wrong months, dates and time-limited wording, judged against today&apos;s date.</p>
@@ -284,6 +290,33 @@ const sections: Section[] = [
             reads approved creative, so files sitting in a folder it does not treat as approved, or archived in an OLD
             folder, are skipped. If a size or card is called &quot;missing&quot;, compare against the ad in Ads Manager
             before changing anything.
+          </p>
+        </Q>
+        <Q q="Red flag: Creative was never swapped">
+          <p>
+            Vera traced this ad back to the ad it was duplicated from in the previous cycle (for example the August ad
+            set). Every image and video on it is the exact same file as that old ad, so the new creative was never
+            uploaded. This is certain, not a guess.
+          </p>
+          <p>
+            Fix: swap in the new approved creative in Ads Manager and rerun. The note names the old ad and ad set it
+            was copied from.
+          </p>
+          <p>
+            If it shows as yellow instead (&quot;Verify the WO wants the same creative again&quot;), Vera could only tell
+            the old ad apart by date, not by name. If the WO says to rerun the same creative, you can ignore it.
+          </p>
+        </Q>
+        <Q q="Red or yellow flag: a carousel card appears twice">
+          <p>
+            The live carousel shows the same card more than once, and fewer different cards than the approved folder
+            has. Usually a card was swapped but the old one stayed in, or one card got uploaded twice. The note names
+            which approved card is missing from the ad.
+          </p>
+          <p>
+            Fix: open the carousel in Ads Manager, compare the cards to the approved folder, and replace the duplicate
+            with the missing card. Red means the ad is short a card. Yellow means the card count adds up but something
+            still looks off (a repeated card, or an approved card with no clear match), so take a look.
           </p>
         </Q>
         <Q q="A flag looks wrong (false positive)">

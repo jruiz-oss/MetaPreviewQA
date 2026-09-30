@@ -888,6 +888,18 @@ export default function QAPage() {
       );
 
       if (filtered.length === 0) {
+        // Audit 2026-09-30: when every match was skipped for carrying another
+        // month, say so and name them. Saying "no ads matched" hid ads that DID
+        // match (e.g. new copies that just weren't renamed yet).
+        if (keyword && skippedOtherMonth.length > 0) {
+          throw new Error(
+            `${skippedOtherMonth.length} ad${skippedOtherMonth.length === 1 ? "" : "s"} matched "${row.filter.trim()}" but ` +
+              `${skippedOtherMonth.length === 1 ? "is" : "are all"} named for another month: ` +
+              skippedOtherMonth.slice(0, 6).map((a) => a.name).join(", ") +
+              (skippedOtherMonth.length > 6 ? `, +${skippedOtherMonth.length - 6} more` : "") +
+              ". If these are this cycle's ads that weren't renamed yet, rename them or clear the filter."
+          );
+        }
         throw new Error(
           keyword
             ? `No ads matched "${row.filter.trim()}" in ad or ad set name — try a different keyword.`
@@ -1803,7 +1815,7 @@ export default function QAPage() {
                         and copies right past the date cutoff, so the
                         user gets an ad-set picker plus a hide-paused toggle. */}
                     {row.loaded && row.ads.length > 0 && (() => {
-                                      const pausedCount = row.ads.filter((a) => (a.status ?? "").toUpperCase() === "PAUSED").length;
+                      const pausedCount = row.ads.filter((a) => (a.status ?? "").toUpperCase() === "PAUSED").length;
                       const adsetMap = new Map<string, { id: string; name: string; total: number; status: string; start: string; end: string }>();
                       for (const a of row.ads) {
                         const key = a.adsetId || "__none__";
