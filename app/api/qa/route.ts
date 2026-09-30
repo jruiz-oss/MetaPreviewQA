@@ -341,7 +341,7 @@ type DriveImageRef = {
 
 // displayName (Round 8b): reviewer-facing name for a live image, e.g.
 // '"Carousel 1080x1080 - 2" (live 1254×1254)'. Set per batch in runBatch.
-type FetchedImage = { name: string; mediaType: ImageMediaType; data: string; context?: string | null; displayName?: string };
+type FetchedImage = { name: string; mediaType: ImageMediaType; data: string; context?: string | null; displayName?: string; origSize?: string };
 
 // Anthropic allows up to 5MB per image; cap a touch below that.
 const MAX_IMAGE_BYTES = 4_500_000;
@@ -485,11 +485,21 @@ async function downloadUrlImage(url: string, context?: string | null): Promise<F
       return [];
     }
     const baseName = url.split("/").pop()?.split("?")[0] ?? "meta-creative.jpg";
+    // Round 8b: remember the ORIGINAL size before the 1568px resize, so the
+    // reviewer-facing name says "live 1080×1920", not the resized 882×1568.
+    let origSize: string | undefined;
+    try {
+      const m = await sharp(rawBuf).metadata();
+      if (m.width && m.height) origSize = `${m.width}×${m.height}`;
+    } catch {
+      origSize = undefined;
+    }
     dbg(`[qa] DOWNLOADED live Meta image "${baseName}" (${(rawBuf.length / 1024).toFixed(0)} KB → ${prepared.length} image(s)).`);
     return prepared.map((p) => ({
       name: p.frame ? `${baseName} (GIF frame ${p.frame.index}/${p.frame.total})` : baseName,
       mediaType: p.mediaType,
       data: p.buf.toString("base64"),
+      origSize,
       context: p.frame
         ? `${context ? `${context} — ` : ""}animated GIF, extracted frame ${p.frame.index} of ${p.frame.total}`
         : context ?? null,

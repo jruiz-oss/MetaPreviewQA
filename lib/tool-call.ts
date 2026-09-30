@@ -15,6 +15,10 @@
 import type Anthropic from "@anthropic-ai/sdk";
 
 let loggedForcedFailure = false;
+// Confirmed in prod 2026-09-30: Opus 5.5 returns 400 "tool_choice: type
+// \"tool\" and \"any\" are not supported for this model." Once a model says
+// that, skip the forced attempt for it (saves a wasted request per image).
+const noForcedToolModels = new Set<string>();
 
 export async function callSingleTool(
   client: Anthropic,
@@ -31,7 +35,7 @@ export async function callSingleTool(
     const t = msg.content.find((b) => b.type === "tool_use");
     return t && t.type === "tool_use" ? { input: t.input, stopReason: msg.stop_reason } : null;
   };
-  try {
+  if (!noForcedToolModels.has(params.model)) try {
     const msg = await client.messages.create({
       model: params.model,
       max_tokens: params.maxTokens,
@@ -47,6 +51,7 @@ export async function callSingleTool(
       console.log(`[qa][toolcall] forced ${params.tool.name} returned no tool call (stop_reason=${msg.stop_reason}); retrying with auto`);
     }
   } catch (err) {
+    if (err instanceof Error && /tool_choice[\s\S]*not supported/i.test(err.message)) noForcedToolModels.add(params.model);
     if (!loggedForcedFailure) {
       loggedForcedFailure = true;
       console.log(`[qa][toolcall] forced ${params.tool.name} failed on ${params.model}: ${err instanceof Error ? err.message : String(err)} — retrying with auto`);

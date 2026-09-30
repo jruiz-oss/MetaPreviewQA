@@ -478,3 +478,8 @@ the coverage check) plus its live size, e.g. '"Carousel 1080x1080 - 2" (live
 Used in the prompt label, the spell-pass findings, and the model is told to
 use it. Naming only, never a verdict. Spell findings no longer repeat a word
 the model's own note already names.
+Confirmed 2026-09-30 01:33 UTC: Opus 5.5 rejects forced tool_choice ("type
+\"tool\" and \"any\" are not supported for this model"). The auto fallback
+read all 13 images and caught CREDT. tool-call.ts now remembers the model and
+skips the forced attempt. Live image names use the ORIGINAL size (captured
+before the 1568px resize), not the resized one.

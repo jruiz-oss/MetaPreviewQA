@@ -159,7 +159,7 @@ export function driveDisplayName(name: string): string {
 }
 
 export async function nameLiveImages(
-  live: { data: string }[],
+  live: { data: string; origSize?: string }[],
   approved: { data: string; name: string }[]
 ): Promise<string[]> {
   const sizeOf = async (b64: string) => {
@@ -173,7 +173,7 @@ export async function nameLiveImages(
   const [liveFps, apprFps, sizes] = await Promise.all([
     Promise.all(live.map((l, i) => fingerprint(l.data, String(i)))),
     Promise.all(approved.map((a) => fingerprint(a.data, driveDisplayName(a.name)))),
-    Promise.all(live.map((l) => sizeOf(l.data))),
+    Promise.all(live.map((l) => (l.origSize ? Promise.resolve(l.origSize) : sizeOf(l.data)))),
   ]);
   const A = apprFps.filter((f): f is FP => !!f);
   return live.map((_, i) => {
