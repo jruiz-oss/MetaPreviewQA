@@ -391,3 +391,60 @@ mechanism there.
   those ads. SDK `maxRetries: 0`, 170s call timeout, download timeouts,
   `maxDuration` on fetch-doc / campaign-ads.
 - Cancelable runs, beforeunload guard, tab-scoped sessionStorage of INPUTS only.
+
+# Round 8 (2026-09-30) — shipped ✅
+
+Audit of the duplicate-and-swap workflow: an old campaign is re-run by
+duplicating its ad sets ("August Retargeting" -> "September Retargeting"),
+swapping images/copy on the copies, and usually leaving last cycle's ads in
+place, turned off. New ads are often off too pre-launch, so on/off status is
+not a signal. **Intentional patches — do not remove.**
+
+## 30. Stale pool images re-added; carousel video cards invisible ✅ fixed
+`lib/meta-api.ts`: the "hash-based single-image" loop walked `allHashes`
+(every pool hash), re-adding images the FIX #8 rules filter had just skipped,
+so stale assets reached visual QA and the completeness inventory. It now walks
+configured hashes only (cards + published image). `child_attachments` never
+requested `video_id`, so FIX #4's video-card exclusion never fired: now
+requested; video-card cover frames are excluded from image-only dims and
+tagged VIDEO THUMBNAIL; an unresolvable card falls back to its `picture` URL.
+Test: `lib/__tests__/meta-pool-and-cards.test.ts`.
+
+## 31. AdImages lookup not paginated ✅ fixed
+`fetchBatchImageDimensions` read page 1 only; big carousels lost dims + URLs
+past it. Now `limit=100` + cursor (max 5 pages). Same test file.
+
+## 32. Field-label words polluted Drive matching ✅ fixed
+Unit tokens included "Post copy:" / "Body copy:" / URL words and Meta's
+" - Copy" suffix. "copy" is rare across Drive names (only "Copy of" files), so
+IDF boosted those. `UNIT_LABEL_TOKENS` drops label/URL words from the UNIT side
+only; format words are kept.
+
+## 33. Stale ad-name month beat the ad set month ✅ fixed
+`expectedMonthsForUnit` takes the ad set name: when the ad name's month and the
+ad set's month both exist and don't overlap, the ad set wins (it's the level
+that always gets renamed). Month-less ad names fall back to the ad set month
+before copy/WO. Test: `lib/__tests__/campaign-filter.test.ts`.
+
+## 34. Month keyword filter pulled last cycle's leftovers ✅ fixed
+The import filter matched ad name OR ad set name, so "September" pulled a
+leftover "August Static V1" sitting in the September ad set. `lib/
+campaign-filter.ts`: a month keyword skips ads whose OWN name carries only
+other months; skipped ads are listed by name in the load note so a missed
+rename stays visible. Non-month keywords unchanged. Same test file.
+
+## 35. Creative-not-swapped check ✅ new
+`checkCreativeSwap` walks `source_ad_id` (max 3 hops, skipping same-cycle
+siblings like Lookalike-from-Interest) to the previous-cycle ancestor. If every
+image hash / video id on the ad already existed there, creative_alignment is
+forced to FAIL (month-based cycle split) or WARNING (created-gap split only,
+could be intentional evergreen). Isolated requests; anything unreadable → no
+finding. Test: `lib/__tests__/creative-swap.test.ts`.
+
+## Model
+Default `QA_MODEL` is now `claude-opus-5-5` (accuracy first). Roll back with
+`QA_MODEL=claude-sonnet-5`; cut cost with `QA_EFFORT=medium`. Opus 5.5 cannot
+disable thinking, so the spell-check and card-compare helper calls now pin
+adaptive thinking at effort medium with larger max_tokens (thinking counts
+toward it; the old 3000/1500 could silently skip those passes). The per-call
+`[qa] TOKENS` cost line is now always on and priced per model.

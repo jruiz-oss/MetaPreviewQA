@@ -144,7 +144,13 @@ async function readOneImage(
   try {
     const msg = await client.messages.create({
       model,
-      max_tokens: 3000,
+      // Round 8: Opus 5.5 can't turn thinking off, so an omitted `thinking`
+      // means adaptive thinking at default effort, and thinking tokens count
+      // toward max_tokens. At 3000 the call could run out before the forced
+      // tool call and silently skip the spell pass. Pin effort + give room.
+      max_tokens: 8000,
+      thinking: { type: "adaptive" },
+      output_config: { effort: "medium" },
       system: SPELLCHECK_SYSTEM,
       tools: [SPELLCHECK_TOOL],
       tool_choice: { type: "tool", name: SPELLCHECK_TOOL.name },

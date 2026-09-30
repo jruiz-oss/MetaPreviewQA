@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { filterAdsByKeyword } from "@/lib/campaign-filter";
 
 
 type AdUnit = {
@@ -878,13 +879,13 @@ export default function QAPage() {
 
       const campaignName: string = data.campaignName ?? "";
       const keyword = row.filter.trim().toLowerCase();
-      const filtered = keyword
-        ? data.ads.filter((ad: { id: string; name: string; adsetName?: string }) => {
-            const adMatch = ad.name.toLowerCase().includes(keyword);
-            const adsetMatch = (ad.adsetName ?? "").toLowerCase().includes(keyword);
-            return adMatch || adsetMatch;
-          })
-        : data.ads;
+      // FIX #34: a month keyword also skips ads whose OWN name carries a
+      // different month (last cycle's leftovers sitting in this cycle's ad
+      // set). Skipped ads are listed by name in the load note below.
+      const { kept: filtered, skippedOtherMonth } = filterAdsByKeyword(
+        data.ads as { id: string; name: string; adsetName?: string }[],
+        row.filter
+      );
 
       if (filtered.length === 0) {
         throw new Error(
@@ -909,7 +910,13 @@ export default function QAPage() {
       const skipNote =
         `Loaded ${ads.length} ad${ads.length === 1 ? "" : "s"}` +
         (campaignName ? ` from "${campaignName}"` : "") +
-        (skippedOld > 0 ? ` · skipped ${skippedOld} not updated since cutoff` : "");
+        (skippedOld > 0 ? ` · skipped ${skippedOld} not updated since cutoff` : "") +
+        (skippedOtherMonth.length > 0
+          ? ` · skipped ${skippedOtherMonth.length} named for another month: ` +
+            skippedOtherMonth.slice(0, 6).map((a) => a.name).join(", ") +
+            (skippedOtherMonth.length > 6 ? `, +${skippedOtherMonth.length - 6} more` : "") +
+            " (if one of these is a new ad that just wasn't renamed, rename it or clear the filter)"
+          : "");
 
       const activeRules: ActiveRule[] = data.activeRules ?? [];
 

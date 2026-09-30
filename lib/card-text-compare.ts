@@ -85,7 +85,11 @@ export async function compareTranscripts(
   try {
     const msg = await client.messages.create({
       model,
-      max_tokens: 1500,
+      // Round 8: see onimage-spellcheck.ts (thinking can't be disabled on
+      // Opus 5.5; thinking tokens count toward max_tokens).
+      max_tokens: 6000,
+      thinking: { type: "adaptive" },
+      output_config: { effort: "medium" },
       system: COMPARE_SYSTEM,
       tools: [COMPARE_TOOL],
       tool_choice: { type: "tool", name: COMPARE_TOOL.name },

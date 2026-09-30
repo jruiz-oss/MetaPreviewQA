@@ -69,13 +69,25 @@ export function monthsInProse(text: string): Set<number> {
 // The unit's expected month(s): its NAME is the strongest signal; the ad's
 // body copy (prose-parsed, so "may vary" can't poison it) is next; the WO text
 // is the fallback. Empty set = no expectation = filter is inert.
+//
+// FIX #33 (Round 8): the team re-runs an old campaign by duplicating ad sets
+// ("August Retargeting" -> "September Retargeting") and renaming the ads, but
+// a missed ad rename leaves "August Static V1" inside the September ad set.
+// When the ad NAME's month conflicts with the AD SET's month (both present,
+// no overlap), the ad set wins: it was renamed for this cycle, the ad wasn't.
 export function expectedMonthsForUnit(
   unitName: string,
   unitContent: string | null | undefined,
-  woMonths: Set<number>
+  woMonths: Set<number>,
+  adsetName?: string | null
 ): Set<number> {
   const fromName = monthsInStructuredName(unitName);
+  const fromAdset = monthsInStructuredName(adsetName ?? "");
+  if (fromName.size && fromAdset.size && !Array.from(fromName).some((m) => fromAdset.has(m))) {
+    return fromAdset;
+  }
   if (fromName.size) return fromName;
+  if (fromAdset.size) return fromAdset;
   const fromContent = monthsInProse(unitContent ?? "");
   if (fromContent.size) return fromContent;
   return woMonths;

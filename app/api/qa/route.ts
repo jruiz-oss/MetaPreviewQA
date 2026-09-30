@@ -4,11 +4,11 @@ import Anthropic from "@anthropic-ai/sdk";
 import { google } from "googleapis";
 import sharp from "sharp";
 import { getGoogleAuth } from "@/lib/google-auth";
-import { resolveAdId, fetchAdContent, ALLOWED_ENHANCEMENT_KEYS, isFlaggableEnhancementKey, MANUAL_CHECK_ITEMS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
+import { resolveAdId, fetchAdContent, checkCreativeSwap, type SwapCheck, ALLOWED_ENHANCEMENT_KEYS, isFlaggableEnhancementKey, MANUAL_CHECK_ITEMS, type AiEnhancement, type FormatInfo, type CreativeImageContext } from "@/lib/meta-api";
 import { computeCompletenessLine } from "@/lib/completeness";
 import { computeUrlComparisonLine, computeUrlMatchStatus } from "@/lib/url-compare";
 import { tokenize, computeFormatSizeCheck, type ComputedCheck } from "@/lib/format-check";
-import { monthsInProse, expectedMonthsForUnit, filterRefsByExpectedMonths } from "@/lib/month-match";
+import { monthsInProse, monthsInStructuredName, expectedMonthsForUnit, filterRefsByExpectedMonths } from "@/lib/month-match";
 import { isAuthedRequest } from "@/lib/auth";
 import { spellCheckImages, applySpellFindings, readImagesWords } from "@/lib/onimage-spellcheck";
 import { buildTranscript, compareTranscripts, applyTextRecovery } from "@/lib/card-text-compare";
@@ -53,11 +53,32 @@ function isOutOfCreditsError(err: unknown): boolean {
 }
 
 // QA model — env-overridable so switching models is a config change, not a
-// deploy. Default is Sonnet 5 (released June 2026): stronger vision/reasoning
-// than Sonnet 4.6 at equal-or-lower cost ($2/$10 intro until Aug 2026, then
-// $3/$15 — same as 4.6). Set QA_MODEL=claude-sonnet-4-6 to roll back, or
-// QA_MODEL=claude-opus-4-8 to escalate.
-const QA_MODEL = process.env.QA_MODEL || "claude-sonnet-5";
+// deploy. Default is Opus 5.5 (Round 8, 2026-09-30, Jorge's call: accuracy
+// first): stronger at exact on-image transcription and subtle mismatches than
+// Sonnet 5, at $4/$20 per MTok. Roll back with QA_MODEL=claude-sonnet-5;
+// escalate with QA_MODEL=claude-fable-5-1 ($10/$50). If runs cost too much,
+// try QA_EFFORT=medium before switching models.
+const QA_MODEL = process.env.QA_MODEL || "claude-opus-5-5";
+
+// $/MTok [input, output] for the cost log. Cache write = 1.25x input, cache
+// read = 0.1x input. Unknown models fall back to Opus 5.5 pricing.
+const MODEL_PRICING: Record<string, [number, number]> = {
+  "claude-opus-5-5": [4, 20],
+  "claude-sonnet-5-5": [2, 10],
+  "claude-sonnet-5": [3, 15],
+  "claude-fable-5-1": [10, 50],
+  "claude-haiku-4-5-20251001": [1, 5],
+};
+function estimateCostUsd(model: string, u: { input_tokens?: number | null; output_tokens?: number | null; cache_creation_input_tokens?: number | null; cache_read_input_tokens?: number | null }): number {
+  const [pin, pout] = MODEL_PRICING[model] ?? MODEL_PRICING["claude-opus-5-5"];
+  return (
+    ((u.input_tokens ?? 0) * pin +
+      (u.output_tokens ?? 0) * pout +
+      (u.cache_creation_input_tokens ?? 0) * pin * 1.25 +
+      (u.cache_read_input_tokens ?? 0) * pin * 0.1) /
+    1_000_000
+  );
+}
 // Thinking effort. Sonnet 5 (and newer models) replaced the old
 // `thinking.budget_tokens` knob with adaptive thinking + an effort level set via
 // `output_config.effort`. We default to "high" because the multi-image work each
@@ -605,7 +626,16 @@ export async function POST(request: Request) {
       };
     }
 
-    const { content, error, aiEnhancements, formatInfo, creativeImageUrls, creativeImageContext, manualCheckItems } = await fetchAdContent(adId, metaToken);
+    const { content, error, aiEnhancements, formatInfo, creativeImageUrls, creativeImageContext, manualCheckItems, assetIds } = await fetchAdContent(adId, metaToken);
+
+    // FIX #35: was the creative actually swapped vs the previous-cycle ad this
+    // one was duplicated from? Isolated + best-effort: null = couldn't tell.
+    let swapCheck: SwapCheck | null = null;
+    try {
+      swapCheck = await checkCreativeSwap(adId, assetIds ?? [], metaToken, monthsInStructuredName);
+    } catch {
+      swapCheck = null;
+    }
 
     // Build a per-URL context note (placement + asset date + stale flag) so each
     // downloaded image can be labeled in the prompt. Empty when the flag is off.
@@ -638,6 +668,7 @@ export async function POST(request: Request) {
       creativeImageUrls,
       creativeImages,
       manualCheckItems,
+      swapCheck,
       note: content ? null : (error ?? "Meta API returned no content."),
     };
   }
@@ -814,6 +845,11 @@ export async function POST(request: Request) {
   // concept/format, so downstream completeness must not assert a GENUINE GAP
   // from their filename sizes.
   type RankedRefs = { refs: DriveImageRef[]; crossFormat: boolean; confidentMatch: boolean };
+  const UNIT_LABEL_TOKENS = new Set([
+    "copy", "post", "body", "bodies", "headline", "headlines", "description", "descriptions",
+    "desc", "title", "titles", "caption", "link", "links", "url", "urls", "cta", "type", "types",
+    "landing", "destination", "name", "ad", "ads", "creative", "https", "http", "www", "com",
+  ]);
   function rankRefsForUnit(unit: { name?: string | null; content?: string | null; adsetName?: string }): RankedRefs {
     const unitName = unit.name ?? "";
     if (!allDriveRefs.length) return { refs: [], crossFormat: false, confidentMatch: false };
@@ -827,10 +863,15 @@ export async function POST(request: Request) {
     // campaign's creative gets picked (alphabetically first wins). With content
     // tokens, the concept-name terms break the tie and route each unit to its
     // own campaign's Drive folder.
-    const unitTokens = new Set([
-      ...tokenize(unitName),
-      ...tokenize(unit.content ?? ""),
-    ]);
+    // FIX #32 (Round 8): drop the field-label / URL words formatCreative adds
+    // to every unit's content ("Post copy:", "Body copy:", "Link URL:",
+    // "https", "www"...) plus Meta's " - Copy" duplicate suffix. They carry no
+    // concept signal, and "copy" in particular is RARE across Drive filenames
+    // (only "Copy of ..." files have it), so IDF gave those duplicates a big
+    // unearned boost. Format words (static/carousel/story/video/v1) are kept.
+    const unitTokens = new Set(
+      [...tokenize(unitName), ...tokenize(unit.content ?? "")].filter((t) => !UNIT_LABEL_TOKENS.has(t))
+    );
     if (!unitTokens.size) return { refs: [], crossFormat: false, confidentMatch: false };
 
     // FORMAT-TYPE GATE — the fix for static units being QA'd against carousel
@@ -898,7 +939,7 @@ export async function POST(request: Request) {
     // creative. The filter mirrors the version-token rule: it only fires when
     // at least one candidate carries an expected month, month-agnostic files
     // always survive, and it never empties the set.
-    const expectedMonths = expectedMonthsForUnit(unitName, unit.content, woMonths);
+    const expectedMonths = expectedMonthsForUnit(unitName, unit.content, woMonths, unit.adsetName);
 
     if (!scored.length) {
       // FIX #2: no filename token overlapped the unit name/copy. This is the #1
@@ -1317,19 +1358,14 @@ export async function POST(request: Request) {
 
     // Token-usage log — added to monitor cost/latency after raising image
     // resolution to 1568px (bigger images = more input tokens per run).
-    // Estimate uses Sonnet-tier pricing per million tokens ($3 in, $15 out,
-    // $3.75 cache write, $0.30 cache read). If QA_MODEL is set to Opus/other,
-    // the real cost differs — treat this as a relative gauge, not a bill.
+    // Priced per model (MODEL_PRICING). Always on (counts only, no copy or
+    // model text) so the Opus 5.5 switch can be costed from Vercel logs.
+    // Covers the main review call; the spell-check/recovery calls add a bit.
     {
       const u = message.usage;
-      const inTok = u.input_tokens ?? 0;
-      const outTok = u.output_tokens ?? 0;
-      const cacheWrite = u.cache_creation_input_tokens ?? 0;
-      const cacheRead = u.cache_read_input_tokens ?? 0;
-      const estCost =
-        (inTok * 3 + outTok * 15 + cacheWrite * 3.75 + cacheRead * 0.3) / 1_000_000;
-      dbg(
-        `[qa] TOKENS input=${inTok} output=${outTok} cache_write=${cacheWrite} cache_read=${cacheRead} | ~$${estCost.toFixed(4)} (est)`
+      const estCost = estimateCostUsd(QA_MODEL, u);
+      console.log(
+        `[qa] TOKENS model=${QA_MODEL} effort=${QA_EFFORT} input=${u.input_tokens ?? 0} output=${u.output_tokens ?? 0} cache_write=${u.cache_creation_input_tokens ?? 0} cache_read=${u.cache_read_input_tokens ?? 0} | ~$${estCost.toFixed(4)} (est)`
       );
     }
 
@@ -1711,6 +1747,8 @@ export async function POST(request: Request) {
       // so two otherwise-identical units must not merge across it.
       driveConfident: refsPerUnit[i].confidentMatch,
       nameSig: nameSignature(u.name ?? ""),
+      // FIX #35: an unswapped verdict changes the result, so it must split groups.
+      swap: (() => { const sc = (u as { swapCheck?: SwapCheck | null }).swapCheck; return sc ? `${sc.unswapped}:${sc.byMonth}` : null; })(),
     };
   }
   function fingerprintForUnit(i: number): string {
@@ -1893,6 +1931,25 @@ export async function POST(request: Request) {
         ),
       };
 
+      // FIX #35: creative provably not swapped (every asset hash/video id
+      // already existed on the previous-cycle ad it was duplicated from).
+      // Hash equality is certain, so this is a FAIL that overrides the model.
+      const swap = (rep as { swapCheck?: SwapCheck | null }).swapCheck;
+      let swapCritical: string | null = null;
+      if (swap?.unswapped) {
+        const cca = (finalChecks as Record<string, { status?: string; note?: string }>).creative_alignment ?? {};
+        const src = `"${swap.sourceName || swap.sourceAdId}"${swap.sourceAdsetName ? ` (ad set "${swap.sourceAdsetName}")` : ""}`;
+        const tag = swap.byMonth
+          ? `Creative was never swapped: every image/video on this ad is identical to the previous-cycle ad it was duplicated from, ${src} (computed).`
+          : `Creative is identical to the older ad it was duplicated from, ${src}. Verify the WO wants the same creative again (computed).`;
+        (finalChecks as Record<string, { status?: string; note?: string }>).creative_alignment = {
+          ...cca,
+          status: swap.byMonth ? "fail" : cca.status === "fail" ? "fail" : "warning",
+          note: cca.note ? `${tag} ${cca.note}` : tag,
+        };
+        if (swap.byMonth) swapCritical = `${unitContents[repIdx].name || "Unnamed"}: creative not swapped, still identical to ${swap.sourceName || "the previous-cycle ad"}`;
+      }
+
       // Make URL matching authoritative: escalate url_cta to the code-computed
       // verdict so a real destination mismatch can't be hidden by the model. We
       // only ever escalate (never downgrade), so the model still owns the CTA
@@ -1938,9 +1995,13 @@ export async function POST(request: Request) {
         // Surfaced so the UI can distinguish "reviewed, with warnings" from
         // "never reviewed" (and, later, offer a retry of just these).
         ...(qaError ? { qaError } : {}),
+        ...(swapCritical ? { swapCritical } : {}),
       };
     });
-    const allCritical = batchResults.flatMap((r) => r.critical_issues);
+    const allCritical = [
+      ...(allUnits as { swapCritical?: string }[]).map((u) => u.swapCritical).filter((c): c is string => !!c),
+      ...batchResults.flatMap((r) => r.critical_issues),
+    ];
     const allNotes = "";
 
     const statusPriority = (s: string) => (s === "fail" ? 2 : s === "warning" ? 1 : 0);

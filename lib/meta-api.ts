@@ -674,6 +674,9 @@ export type FetchResult = {
   creativeImageUrls: string[]; // image/thumbnail URLs for visual QA
   creativeImageContext: CreativeImageContext[]; // per-image placement/date tags
   manualCheckItems: string[]; // checklist items that cannot be read from the API — must be verified in Ads Manager
+  // Every creative asset id on the ad (image hashes + video ids, pool
+  // included). Used by the creative-swap check (FIX #35).
+  assetIds?: string[];
 };
 
 /**
@@ -724,15 +727,27 @@ async function fetchBatchImageDimensions(
   const result = new Map<string, ImageMeta>();
   if (hashes.length === 0) return result;
   try {
+    // FIX #31: Graph pages this endpoint (default page ~25). Large carousels
+    // (10 cards x per-placement sizes + pool leftovers) went past page 1, and
+    // every hash after it silently lost its dims AND its viewable URL, so
+    // configured cards vanished from visual QA. Ask for a big page and follow
+    // the cursor (bounded).
     const hashParam = encodeURIComponent(JSON.stringify(hashes));
-    const url = `${GRAPH_API}/act_${accountId}/adimages?hashes=${hashParam}&fields=width,height,hash,url,permalink_url&access_token=${accessToken}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000), cache: "no-store" });
-    const data = await res.json();
-    if (data.error || !data.data?.length) return result;
-    for (const img of data.data as Array<{ hash?: string; width?: number; height?: number; url?: string; permalink_url?: string }>) {
-      if (img.hash && img.width && img.height) {
-        result.set(img.hash, { width: img.width, height: img.height, url: img.url ?? img.permalink_url });
+    let url: string | null = `${GRAPH_API}/act_${accountId}/adimages?hashes=${hashParam}&fields=width,height,hash,url,permalink_url&limit=100&access_token=${accessToken}`;
+    for (let page = 0; url && page < 5; page++) {
+      const res: Response = await fetch(url, { signal: AbortSignal.timeout(10000), cache: "no-store" });
+      const data: {
+        data?: Array<{ hash?: string; width?: number; height?: number; url?: string; permalink_url?: string }>;
+        paging?: { next?: string };
+        error?: unknown;
+      } = await res.json();
+      if (data.error || !data.data?.length) break;
+      for (const img of data.data) {
+        if (img.hash && img.width && img.height) {
+          result.set(img.hash, { width: img.width, height: img.height, url: img.url ?? img.permalink_url });
+        }
       }
+      url = data.paging?.next ?? null;
     }
   } catch {
     // ignore — dimensions just won't be available
@@ -944,7 +959,7 @@ export async function fetchAdContent(
     // Permission, and because Graph fails the whole request on a single forbidden field, that
     // one field would fail the entire ad read. Music status is fetched separately in
     // fetchMusicStatus() so it degrades to "unknown" instead of nuking the creative read.
-    "creative{body,title,call_to_action_type,link_url,name,image_hash,effective_object_story_id,image_url,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments{name,description,link,call_to_action,image_hash,picture}},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text,adlabels{name}},descriptions{text},call_to_action_types,link_urls{website_url},images{hash,url,adlabels{name}},videos{video_id,thumbnail_url},ad_formats,optimization_type,asset_customization_rules{image_label{name},customization_spec,priority}},degrees_of_freedom_spec}",
+    "creative{body,title,call_to_action_type,link_url,name,image_hash,effective_object_story_id,image_url,object_story_spec{link_data{message,name,description,link,caption,image_hash,call_to_action,child_attachments{name,description,link,call_to_action,image_hash,picture,video_id}},video_data{message,title,video_id,call_to_action}},asset_feed_spec{bodies{text},titles{text,adlabels{name}},descriptions{text},call_to_action_types,link_urls{website_url},images{hash,url,adlabels{name}},videos{video_id,thumbnail_url},ad_formats,optimization_type,asset_customization_rules{image_label{name},customization_spec,priority}},degrees_of_freedom_spec}",
   ].join(",");
 
   const url = `${GRAPH_API}/${adId}?fields=${encodeURIComponent(fields)}&access_token=${accessToken}`;
@@ -1087,10 +1102,29 @@ export async function fetchAdContent(
     const key = `${d.width}x${d.height}`;
     if (!seenSizes.has(key)) { seenSizes.add(key); creativeDimensions.push(d); }
   }
+  // FIX #30: a VIDEO card's image_hash is only its cover frame. Before
+  // child_attachments requested video_id, every card looked like an image
+  // card, so FIX #4's video-card exclusion never actually fired.
+  const videoCardHashes = new Set(
+    (data.creative?.object_story_spec?.link_data?.child_attachments ?? [])
+      .filter((c) => c.video_id && c.image_hash)
+      .map((c) => c.image_hash as string)
+  );
   for (const hash of dimensionHashes) addDim(dimMap.get(hash));
   // Image-only snapshot BEFORE video dims are mixed in — consistency checks
-  // must not compare image sizes against video renditions.
-  const imageDimensions: ImageDimensions[] = [...creativeDimensions];
+  // must not compare image sizes against video renditions (or video-card
+  // cover frames).
+  const imageDimensions: ImageDimensions[] = [];
+  {
+    const seenImg = new Set<string>();
+    for (const hash of dimensionHashes) {
+      if (videoCardHashes.has(hash)) continue;
+      const d = dimMap.get(hash);
+      if (!d?.width || !d?.height) continue;
+      const key = `${d.width}x${d.height}`;
+      if (!seenImg.has(key)) { seenImg.add(key); imageDimensions.push({ width: d.width, height: d.height }); }
+    }
+  }
   // FIX #23 (mirrors FIX #8 for images): a stale, no-longer-served video's
   // dimensions must not feed the format checks or satisfy a size expectation
   // it no longer serves. Indeterminate liveness keeps everything.
@@ -1155,11 +1189,27 @@ export async function fetchAdContent(
   // Hash-based single-image ads (object_story_spec / top-level image_hash) carry no URL
   // in the creative spec — pull the viewable URL resolved from the AdImages endpoint so
   // these statics still get a visual check.
-  for (const hash of allHashes) {
+  // FIX #30: iterate ONLY the configured hashes (carousel cards + the
+  // published single image). This loop used to walk allHashes, which includes
+  // every asset_feed_spec pool hash, so pool images the rules filter above
+  // had just skipped as stale were re-added here, defeating FIX #8 for
+  // visual QA and for the completeness inventory.
+  const configuredHashes = Array.from(new Set([...cardHashes, ...(singleHash ? [singleHash] : [])]));
+  for (const hash of configuredHashes) {
     const dims = dimMap.get(hash);
     if (dims?.url && !feedImageCandidates.some((c) => c.hash === hash)) {
       feedImageCandidates.push({ url: dims.url, hash, width: dims.width, height: dims.height });
     }
+  }
+  // Card fallback: a configured card whose hash didn't resolve (no dims/URL
+  // from AdImages) still has Meta's `picture` URL. Without this the card
+  // silently dropped out of visual QA. Dims stay unknown (never asserted).
+  for (const card of data.creative?.object_story_spec?.link_data?.child_attachments ?? []) {
+    if (!card.picture) continue;
+    const covered = card.image_hash
+      ? feedImageCandidates.some((c) => c.hash === card.image_hash)
+      : feedImageCandidates.some((c) => c.url === card.picture);
+    if (!covered) feedImageCandidates.push({ url: card.picture, hash: card.image_hash });
   }
 
   const publishedHash = singleHash; // the concrete published image, when the ad has one
@@ -1353,6 +1403,10 @@ export async function fetchAdContent(
   // not the creative itself. Without this
   // label the QA model treats the frame as a static and flags text present in
   // other parts of the video as "missing" (or vice versa) — phantom mismatches.
+  // FIX #30: a video card's image is its cover frame, not a static.
+  for (const c of feedImageCandidates) {
+    if (c.hash && videoCardHashes.has(c.hash)) videoThumbUrls.add(c.url);
+  }
   for (const url of creativeImageUrls) {
     if (!videoThumbUrls.has(url)) continue;
     const existing = creativeImageContext.find((c) => c.url === url);
@@ -1408,6 +1462,7 @@ export async function fetchAdContent(
   }
 
   return {
+    assetIds: Array.from(new Set([...allHashes, ...allVideoIds])),
     content: formatted,
     error: formatted ? null : "Meta returned the ad but no readable creative fields were present.",
     aiEnhancements,
@@ -1548,4 +1603,124 @@ function formatCreative(data: AdResponse): string | null {
   }
 
   return lines.join("\n").trim() || null;
+}
+
+
+// ─── Creative-swap check (FIX #35, Round 8) ─────────────────────────────────
+// Workflow: last cycle's ad sets are DUPLICATED and each copy's creative is
+// swapped. Meta records the ad each copy came from (source_ad_id), and
+// duplication keeps image hashes / video ids byte-for-byte. So when EVERY
+// asset on the ad already existed on a previous-cycle ancestor, the creative
+// was provably never swapped. This is evidence-based (hash equality), unlike
+// the removed time-window "unedited copy" heuristic.
+//
+// Same-cycle hops are skipped: "September Lookalike" duplicated from an
+// already-swapped "September Interest" legitimately shares its creative, so
+// the walk continues to that ad's own source until it reaches a previous-cycle
+// ad (max 3 hops). Anything unreadable → null (couldn't verify, no finding).
+
+export type SwapAdInfo = {
+  name: string;
+  adsetName: string;
+  createdTime: string;
+  assetIds: string[];
+  sourceAdId: string | null;
+};
+
+const SWAP_CYCLE_GAP_DAYS = 20;
+
+// true = the source belongs to a previous promo cycle, false = same cycle,
+// null = can't tell. Ad-set months first (the level the team always renames),
+// then ad-name months, then a created-time gap.
+export function isPriorCycle(
+  cur: Pick<SwapAdInfo, "name" | "adsetName" | "createdTime">,
+  src: Pick<SwapAdInfo, "name" | "adsetName" | "createdTime">,
+  monthsOf: (s: string) => Set<number>
+): boolean | null {
+  const overlap = (a: Set<number>, b: Set<number>) => Array.from(a).some((m) => b.has(m));
+  const ca = monthsOf(cur.adsetName), sa = monthsOf(src.adsetName);
+  if (ca.size && sa.size) return !overlap(ca, sa);
+  const cn = monthsOf(cur.name), sn = monthsOf(src.name);
+  if (cn.size && sn.size) return !overlap(cn, sn);
+  const c = Date.parse(cur.createdTime), p = Date.parse(src.createdTime);
+  if (Number.isNaN(c) || Number.isNaN(p)) return null;
+  return c - p >= SWAP_CYCLE_GAP_DAYS * 24 * 60 * 60 * 1000;
+}
+
+// Pure decision over the current ad + its prior-cycle ancestor.
+export function creativeUnswapped(currentAssets: string[], sourceAssets: string[]): boolean {
+  if (!currentAssets.length || !sourceAssets.length) return false;
+  const src = new Set(sourceAssets);
+  return currentAssets.every((a) => src.has(a));
+}
+
+async function fetchSwapAdInfo(adId: string, accessToken: string): Promise<SwapAdInfo | null> {
+  try {
+    const fields = encodeURIComponent(
+      "name,created_time,source_ad_id,adset{name},creative{image_hash,object_story_spec{link_data{image_hash,child_attachments{image_hash,video_id}},video_data{video_id}},asset_feed_spec{images{hash},videos{video_id}}}"
+    );
+    const res = await fetch(`${GRAPH_API}/${adId}?fields=${fields}&access_token=${accessToken}`, {
+      signal: AbortSignal.timeout(8000),
+      cache: "no-store",
+    });
+    const d = await res.json();
+    if (d.error) return null;
+    const c = d.creative ?? {};
+    const ld = c.object_story_spec?.link_data ?? {};
+    const ids = [
+      c.image_hash,
+      ld.image_hash,
+      ...((ld.child_attachments ?? []) as Array<{ image_hash?: string; video_id?: string }>).flatMap((x) => [x.image_hash, x.video_id]),
+      c.object_story_spec?.video_data?.video_id,
+      ...((c.asset_feed_spec?.images ?? []) as Array<{ hash?: string }>).map((x) => x.hash),
+      ...((c.asset_feed_spec?.videos ?? []) as Array<{ video_id?: string }>).map((x) => x.video_id),
+    ].filter(Boolean).map(String);
+    return {
+      name: d.name ?? "",
+      adsetName: d.adset?.name ?? "",
+      createdTime: d.created_time ?? "",
+      assetIds: Array.from(new Set(ids)),
+      sourceAdId: d.source_ad_id ? String(d.source_ad_id) : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// byMonth: the cycle split came from month names (ad set / ad). When it came
+// only from a created-time gap (no months anywhere) the reuse MAY be an
+// intentional evergreen creative, so the route reports it as a warning.
+export type SwapCheck = { unswapped: boolean; sourceAdId: string; sourceName: string; sourceAdsetName: string; byMonth: boolean };
+
+export async function checkCreativeSwap(
+  adId: string,
+  currentAssets: string[],
+  accessToken: string,
+  monthsOf: (s: string) => Set<number>
+): Promise<SwapCheck | null> {
+  if (!currentAssets.length) return null;
+  const cur = await fetchSwapAdInfo(adId, accessToken);
+  if (!cur?.sourceAdId) return null;
+  let nextId: string | null = cur.sourceAdId;
+  const seen = new Set<string>([adId]);
+  for (let hop = 0; nextId && hop < 3 && !seen.has(nextId); hop++) {
+    seen.add(nextId);
+    const src = await fetchSwapAdInfo(nextId, accessToken);
+    if (!src) return null;
+    const prior = isPriorCycle(cur, src, monthsOf);
+    if (prior === null) return null;
+    if (prior) {
+      return {
+        unswapped: creativeUnswapped(currentAssets, src.assetIds),
+        sourceAdId: nextId,
+        sourceName: src.name,
+        sourceAdsetName: src.adsetName,
+        byMonth:
+          (monthsOf(cur.adsetName).size > 0 && monthsOf(src.adsetName).size > 0) ||
+          (monthsOf(cur.name).size > 0 && monthsOf(src.name).size > 0),
+      };
+    }
+    nextId = src.sourceAdId;
+  }
+  return null;
 }
