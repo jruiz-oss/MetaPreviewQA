@@ -1479,21 +1479,22 @@ export default function QAPage() {
           <span className="hidden sm:inline text-xs text-gray-500">
             Use your personal Commit email →
           </span>
-          {/* Opens in a new tab so a running check is never interrupted. */}
-          <a
-            href="/help"
-            target="_blank"
-            rel="noopener"
-            className="text-sm text-gray-500 hover:text-gray-900 transition-colors"
-          >
-            Help
-          </a>
           <a
             href="/api/google/connect"
             className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
             title="Re-authorize Google Drive access — sign in with your personal Commit email (fixes 'invalid_grant' errors)"
           >
             Reconnect Google
+          </a>
+          {/* Opens in a new tab so a running check is never interrupted. */}
+          <a
+            href="/help"
+            target="_blank"
+            rel="noopener"
+            className="text-sm text-gray-500 hover:text-gray-900 transition-colors"
+            title="Open the Vera help doc"
+          >
+            📖 Help
           </a>
         </div>
       </header>
