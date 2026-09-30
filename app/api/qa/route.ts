@@ -10,6 +10,9 @@ import { computeUrlComparisonLine, computeUrlMatchStatus } from "@/lib/url-compa
 import { tokenize, computeFormatSizeCheck, type ComputedCheck } from "@/lib/format-check";
 import { monthsInProse, expectedMonthsForUnit, filterRefsByExpectedMonths } from "@/lib/month-match";
 import { isAuthedRequest } from "@/lib/auth";
+import { spellCheckImages, applySpellFindings, readImagesWords } from "@/lib/onimage-spellcheck";
+import { buildTranscript, compareTranscripts, applyTextRecovery } from "@/lib/card-text-compare";
+import { fingerprint, analyzeCardCoverage, applyCoverage } from "@/lib/image-similarity";
 
 // Allow up to 5 minutes — needed for multi-batch QA runs with image processing.
 export const maxDuration = 300;
@@ -1151,7 +1154,10 @@ export async function POST(request: Request) {
     // routed to this unit. When > 0 but batchDriveImages is empty, every matched
     // file failed to DOWNLOAD — a different truth than "nothing matched", and
     // the prompt must say so instead of blaming the matcher.
-    matchedRefCount = 0
+    matchedRefCount = 0,
+    // Set on the one automatic re-run triggered when the model skipped text
+    // extraction (see "Text-extraction recovery" below). Never retried twice.
+    extractionRetry = false
   ): Promise<{ units: unknown[]; critical_issues: string[]; notes: string }> {
     const messageContent: ContentBlock[] = [];
 
@@ -1414,6 +1420,82 @@ export async function POST(request: Request) {
       }
     }
 
+    // --- Text-extraction recovery (2026-09-29) -------------------------------
+    // Big batches (carousels: 8 approved + 8 live images in one call) sometimes
+    // come back with a creative_alignment "pass" but null text_in_approved /
+    // text_in_live — the model skipped STEP 1 and its "text matches" claim was
+    // never checked (Altura carousel). The guard below correctly refuses that
+    // pass, but the ad then never gets its text checked at all. Recover first:
+    //  1. Re-run this batch ONCE (QA_EXTRACT_RETRY=off disables).
+    //  2. If still skipped, read every approved and live image ALONE and diff the
+    //     per-card transcripts in a text-only call (QA_PERCARD_READ=off disables).
+    // Anything that fails leaves the unit untouched, so the guard still
+    // downgrades it to "couldn't verify" — never a guessed defect.
+    const hasText = (v: unknown) => typeof v === "string" && v.trim().length > 0;
+    const liveImgsFor = (idx: number) =>
+      ((batchUnits[idx] ?? batchUnits[0]) as { creativeImages?: FetchedImage[] } | undefined)?.creativeImages ?? [];
+    const skippedExtraction = (idx: number) => {
+      const cca = (parsedUnits[idx]?.checks as Record<string, Record<string, unknown>> | undefined)?.creative_alignment;
+      if (!cca || cca.status !== "pass") return false;
+      return (
+        (batchDriveImages.length > 0 && !hasText(cca.text_in_approved)) ||
+        (liveImgsFor(idx).length > 0 && !hasText(cca.text_in_live))
+      );
+    };
+    const needsRecovery = parsedUnits.map((_, i) => i).filter(skippedExtraction);
+    if (needsRecovery.length > 0 && !extractionRetry && process.env.QA_EXTRACT_RETRY !== "off") {
+      dbg(
+        `[qa][recover] "${needsRecovery.map((i) => String(parsedUnits[i]?.name)).join(", ")}" returned no extracted text — re-running batch once`
+      );
+      try {
+        return await runBatch(batchUnits, batchDriveImages, crossFormat, confidentMatch, matchedRefCount, true);
+      } catch (err) {
+        dbg(`[qa][recover] re-run failed (${err instanceof Error ? err.message : String(err)}) — trying card-by-card read`);
+      }
+    }
+    // Shared by the recovery read and the spelling pass below so a live image is
+    // only read once per run.
+    const imageReadCache = new Map<string, Promise<{ ok: boolean; words: unknown[] }>>();
+    const readModel = process.env.QA_SPELL_MODEL || QA_MODEL;
+    if (needsRecovery.length > 0 && process.env.QA_PERCARD_READ !== "off") {
+      for (const idx of needsRecovery) {
+        if (!skippedExtraction(idx)) continue; // the re-run path already handled it
+        const u = parsedUnits[idx];
+        const liveImgs = liveImgsFor(idx);
+        const [aReads, lReads] = await Promise.all([
+          batchDriveImages.length
+            ? readImagesWords(client, readModel, batchDriveImages, dbg, { maxImages: 16, cache: imageReadCache, tag: "read:approved" })
+            : Promise.resolve([]),
+          liveImgs.length
+            ? readImagesWords(client, readModel, liveImgs, dbg, { maxImages: 16, cache: imageReadCache, tag: "read:live" })
+            : Promise.resolve([]),
+        ]);
+        if ([...aReads, ...lReads].some((r) => !r.ok)) {
+          dbg(`[qa][recover] "${String(u.name)}" card-by-card read incomplete — leaving for guard`);
+          continue;
+        }
+        const aText = aReads.length ? buildTranscript(aReads) : "";
+        const lText = lReads.length ? buildTranscript(lReads) : "";
+        if (!aText || !lText) continue; // one side has no images: guard's own reasons apply
+        const cmp = await compareTranscripts(client, QA_MODEL, aText, lText, dbg, { crossFormat });
+        if (!cmp) continue;
+        const checks = u.checks as Record<string, Record<string, unknown>>;
+        checks.creative_alignment = applyTextRecovery(checks.creative_alignment, aText, lText, cmp);
+        if (cmp.status === "fail") {
+          u.status = "fail";
+          parsedCritical.push(
+            `On-image text differs from approved creative${cmp.mismatches[0] ? `: ${cmp.mismatches[0]}` : ""}`.slice(0, 220)
+          );
+        } else if (cmp.status === "warning" && u.status === "pass") {
+          u.status = "warning";
+        }
+        dbg(
+          `[qa][recover] "${String(u.name)}" card-by-card text → ${cmp.status}: ${cmp.note}` +
+            (cmp.mismatches.length ? ` | ${cmp.mismatches.join(" | ")}` : "")
+        );
+      }
+    }
+
     // --- GUARDS: creative_alignment can't be green without a real comparison ---
     // The prompt tells the model "if only one source is present, check what you
     // can", which lets it PASS a creative it never actually compared. Enforce
@@ -1471,6 +1553,79 @@ export async function POST(request: Request) {
         `[qa][guard] "${String(u.name)}" creative_alignment pass→warning — ${reason}`
       );
     });
+
+    // --- Dedicated on-image spelling pass (2026-09-29) ---------------------
+    // The main call above summarizes 10-16 images at once and silently
+    // autocorrects small typos, so a misspelled word inside a live image could
+    // pass. Each live image is re-read ALONE here with a letter-by-letter
+    // method, and any misspelling is folded into grammar_typos as a "fail".
+    // Failures in this pass are logged and skipped — never a fabricated defect.
+    // Set QA_SPELLCHECK=off to disable. Uses QA_SPELL_MODEL (default QA_MODEL).
+    if (process.env.QA_SPELLCHECK !== "off") {
+      const spellModel = process.env.QA_SPELL_MODEL || QA_MODEL;
+      for (let idx = 0; idx < parsedUnits.length; idx++) {
+        const u = parsedUnits[idx];
+        const liveImgs =
+          ((batchUnits[idx] ?? batchUnits[0]) as { creativeImages?: FetchedImage[] } | undefined)
+            ?.creativeImages ?? [];
+        if (liveImgs.length === 0) continue;
+        const findings = await spellCheckImages(client, spellModel, liveImgs, dbg, { cache: imageReadCache });
+        if (findings.length === 0) continue;
+        const checks = (u?.checks ?? {}) as Record<string, Record<string, unknown>>;
+        checks.grammar_typos = applySpellFindings(checks.grammar_typos, findings) as Record<string, unknown>;
+        u.checks = checks;
+        u.status = "fail";
+        const w = findings[0];
+        parsedCritical.push(
+          `Misspelled word in live image: "${w.written}"${w.expected ? ` (should be "${w.expected}")` : ""}${findings.length > 1 ? ` +${findings.length - 1} more` : ""}`
+        );
+        dbg(`[qa][guard] "${String(u.name)}" grammar_typos → fail from on-image spelling pass (${findings.length} finding(s))`);
+      }
+    }
+
+    // --- Carousel card-uniqueness check (2026-09-29) ------------------------
+    // Nothing used to count DISTINCT cards: a carousel with the same card twice
+    // (a swapped card's predecessor or a duplicate) while the approved Drive set
+    // has N different cards passed. Live images and the approved Drive images are
+    // fingerprinted in code (perceptual hash, per aspect-ratio set); near-identical
+    // live images plus an approved card nobody resembles is a fail. The match radius
+    // is derived from how far apart the approved cards are, so templated cards can't
+    // be merged into a false duplicate. Skipped on fallback-matched/cross-format
+    // Drive files and whenever a fingerprint can't be read (never a guessed defect).
+    // Set QA_CARD_UNIQUENESS=off to disable.
+    if (process.env.QA_CARD_UNIQUENESS !== "off" && confidentMatch && !crossFormat) {
+      for (let idx = 0; idx < parsedUnits.length; idx++) {
+        const u = parsedUnits[idx];
+        const bu = (batchUnits[idx] ?? batchUnits[0]) as
+          | { creativeImages?: FetchedImage[]; formatInfo?: FormatInfo | null }
+          | undefined;
+        if (!bu?.formatInfo?.creativeInventory?.isCarousel) continue;
+        const liveImgs = bu.creativeImages ?? [];
+        const driveImgs = batchDriveImages.filter((d) => !d.name.includes("(Drive thumbnail frame)"));
+        if (liveImgs.length < 2 || driveImgs.length < 2) continue;
+        const short = (n: string) => (n.length > 48 ? `…${n.slice(-46)}` : n);
+        const [liveFps, driveFps] = await Promise.all([
+          Promise.all(liveImgs.map((im, i) => fingerprint(im.data, `#${i + 1} ${short(im.name)}`))),
+          Promise.all(driveImgs.map((im) => fingerprint(im.data, short(im.name.split("/").pop() ?? im.name)))),
+        ]);
+        const res = analyzeCardCoverage(
+          liveFps.filter((f): f is NonNullable<typeof f> => !!f),
+          driveFps.filter((f): f is NonNullable<typeof f> => !!f)
+        );
+        res.debug.forEach((d) => dbg(`[qa][cards] "${String(u.name)}" ${d}`));
+        if (!res.severity) continue;
+        const checks = (u?.checks ?? {}) as Record<string, Record<string, unknown>>;
+        checks.creative_alignment = applyCoverage(checks.creative_alignment, res) as Record<string, unknown>;
+        u.checks = checks;
+        if (res.severity === "fail") {
+          u.status = "fail";
+          parsedCritical.push(`Carousel cards not unique: ${res.notes[0]}`.slice(0, 220));
+        } else if (u.status === "pass") {
+          u.status = "warning";
+        }
+        dbg(`[qa][guard] "${String(u.name)}" creative_alignment → ${res.severity} from card-uniqueness check: ${res.notes.join(" | ")}`);
+      }
+    }
 
     // Attach the resolved ad ID to each result unit so the report can show a
     // copy/paste-able ID. The model output isn't trusted to echo it — we map by
