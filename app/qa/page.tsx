@@ -1146,7 +1146,7 @@ export default function QAPage() {
   // `onlyUnits` = retry mode: re-run just these ads and splice their fresh
   // results into the existing report (used by "Retry not-reviewed ads"). Without
   // it, this is a full run over every loaded unit.
-  async function runQA(onlyUnits?: AdUnit[]) {
+  async function runQA(onlyUnits?: AdUnit[], docsOverride?: typeof detectedDocs) {
     if (!wo.trim()) return;
     const filledUnits = (onlyUnits ?? units).filter((u) => u.link.trim());
     if (filledUnits.length === 0) return;
@@ -1203,7 +1203,8 @@ export default function QAPage() {
     setOutOfCredits(false);
     setProgress({ done: 0, total: groups.length });
 
-    const labeledDocs = detectedDocs
+    const docsForRun = docsOverride ?? detectedDocs;
+    const labeledDocs = docsForRun
       .filter((d) => d.content)
       .map((d) => ({ label: d.woLabel, content: d.content }));
 
@@ -1212,8 +1213,8 @@ export default function QAPage() {
     // contains the entire campaign (copy, every concept, approvals, incoming) —
     // pulling images from that dumps dozens of irrelevant assets onto every ad.
     // If no creative-labeled link exists, fall back to all detected images.
-    const creativeDocs = detectedDocs.filter((d) => /creativ/i.test(d.woLabel));
-    const imageSourceDocs = creativeDocs.length > 0 ? creativeDocs : detectedDocs;
+    const creativeDocs = docsForRun.filter((d) => /creativ/i.test(d.woLabel));
+    const imageSourceDocs = creativeDocs.length > 0 ? creativeDocs : docsForRun;
     const driveImages = imageSourceDocs.flatMap((d) => d.images ?? []);
 
     const errors: string[] = [];
@@ -1404,6 +1405,32 @@ export default function QAPage() {
     style.remove();
     if (resultsRef.current) resultsRef.current.id = "";
     setDownloadingPdf(false);
+  }
+
+  // Re-run the whole check with the same inputs. Re-pulls each work order /
+  // Drive doc first so edits made since the last run are picked up (a failed
+  // refetch falls back to the copy already loaded). Ad data itself is read
+  // live from Meta on every run, and nothing from the previous run is sent.
+  async function rerun() {
+    if (loading) return;
+    const fresh = await Promise.all(
+      detectedDocs.map(async (d) => {
+        try {
+          const res = await fetch("/api/fetch-doc", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: d.url }),
+          });
+          const data = await res.json();
+          if (!res.ok || typeof data.content !== "string") return d;
+          return { ...d, loading: false, error: null, errorKind: null, content: data.content as string, images: (data.images ?? []) as DriveImage[] };
+        } catch {
+          return d;
+        }
+      })
+    );
+    setDetectedDocs(fresh);
+    await runQA(undefined, fresh);
   }
 
   function reset() {
@@ -2054,6 +2081,19 @@ export default function QAPage() {
               <p className="text-xs font-medium tracking-widest text-gray-400 uppercase">
                 QA results
               </p>
+              <div className="flex items-center gap-2">
+              <button
+                onClick={rerun}
+                disabled={loading || downloadingPdf}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-gray-300 bg-white text-gray-900 text-sm font-medium hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Re-run the check with the same inputs. Re-reads the work order docs and the live ads."
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="23 4 23 10 17 10" />
+                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                </svg>
+                Rerun
+              </button>
               <button
                 onClick={downloadPdf}
                 disabled={downloadingPdf || loading}
@@ -2076,6 +2116,7 @@ export default function QAPage() {
                   </>
                 )}
               </button>
+              </div>
             </div>
 
             {/* Ads whose QA call failed. Their cards below are placeholder
