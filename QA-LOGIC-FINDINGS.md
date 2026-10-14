@@ -517,3 +517,9 @@ Review of d79b136..fd4190e for bugs/dead code (Jorge asked: no optimizing).
 - README rewritten for the Campaign ID workflow; env table drops the dead
   QA_THINKING_BUDGET and documents QA_EFFORT, QA_SPELL_MODEL, QA_SPELLCHECK,
   QA_EXTRACT_RETRY, QA_PERCARD_READ, QA_CARD_UNIQUENESS.
+
+## 36. Minor-placement slots graded as the live creative ✅ fixed (2026-10-14)
+
+HROK-00046 1-in-4 Doubler, duplicated ad set: all three statics failed because the 9:16 Vera compared was the old Spooky Slot image sitting in the **Messenger Stories** customization slot. The pool had 8 images across 9 rules (one per placement group); IG Search/Explore/Profile Reels, Audience Network and the default slot also still held older creative. Every image was rule-referenced, so the stale filter kept all 8, and the WxH bucket picked by label date. Label dates are slot creation dates (they survive swaps and duplication), and the new Stories/Reels label had none, so Messenger won.
+
+Fix (Jorge's call): `lib/primary-placements.ts`. Only images on primary placements count: FB feed / right_hand_column / search / story / facebook_reels, IG stream / story / reels. Every other slot is ignored entirely, no finding. The default rule is ignored when another rule covers Feeds; when none does it IS the feed image and is kept. Returns null (old behavior) when no primary rule matches, so the set never empties. Stale-age notes now measure against kept images only. Test: `lib/__tests__/primary-placements.test.ts` (real rule shape from the run).

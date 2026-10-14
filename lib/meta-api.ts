@@ -1,3 +1,5 @@
+import { primaryPlacementHashes } from "./primary-placements";
+
 // Meta Graph API base. Bump this comment to trigger a fresh deploy when needed.
 const GRAPH_API = "https://graph.facebook.com/v23.0";
 
@@ -1077,6 +1079,16 @@ export async function fetchAdContent(
       if (img.hash && imgLabelNames(img).some((n) => liveLabels.has(n))) liveImageHashes.add(img.hash);
     }
   }
+  // Primary placements only (Feeds + FB right column/search, FB/IG Stories +
+  // Reels). Images on every other slot are ignored entirely: duplicated ad
+  // sets leave old creative there (see lib/primary-placements.ts). null =
+  // no usable primary rule, so keep the rule-referenced set above.
+  const primaryHashes = liveImageHashes.size > 0
+    ? primaryPlacementHashes(customizationRules, rawFeedImages)
+    : null;
+  if (primaryHashes) {
+    for (const h of Array.from(liveImageHashes)) if (!primaryHashes.has(h)) liveImageHashes.delete(h);
+  }
   // Only apply the filter when it confidently identifies ≥1 live image — never
   // narrow to empty (that would drop the whole comparison).
   const rulesFilterActive = liveImageHashes.size > 0;
@@ -1288,7 +1300,7 @@ export async function fetchAdContent(
     `[meta-api][stale-dbg] ad=${adId} ` +
       `rules=${customizationRules.length} ` +
       `labeled_images=${rawFeedImages.filter((i) => imgLabelNames(i).length).length}/${rawFeedImages.length} ` +
-      `live_hashes=${liveImageHashes.size} rules_filter_active=${rulesFilterActive}`
+      `live_hashes=${liveImageHashes.size} primary_only=${!!primaryHashes} rules_filter_active=${rulesFilterActive}`
   );
   // Raw pool + rule map so a "stale asset survived the rules filter" report
   // can be diagnosed from logs alone (Meta token lives only in Vercel env).
@@ -1398,8 +1410,12 @@ export async function fetchAdContent(
     for (const c of feedImageCandidates) if (c.hash) urlToHash.set(c.url, c.hash);
 
     // Newest asset date in this ad — the reference point for "stale".
+    // Only over images that passed the rules/primary filter: an ignored
+    // minor-placement slot (e.g. Messenger Stories) must not make the kept
+    // Feed/Story images look "older than the newest asset".
     let newestMs = -Infinity;
-    for (const { dateMs } of Array.from(hashContext.values())) {
+    for (const [h, { dateMs }] of Array.from(hashContext.entries())) {
+      if (rulesFilterActive && !liveImageHashes.has(h)) continue;
       if (dateMs && dateMs > newestMs) newestMs = dateMs;
     }
     const gapMs = STALE_ASSET_AGE_GAP_DAYS * 24 * 60 * 60 * 1000;
