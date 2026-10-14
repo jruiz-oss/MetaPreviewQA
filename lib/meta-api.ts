@@ -1290,6 +1290,26 @@ export async function fetchAdContent(
       `labeled_images=${rawFeedImages.filter((i) => imgLabelNames(i).length).length}/${rawFeedImages.length} ` +
       `live_hashes=${liveImageHashes.size} rules_filter_active=${rulesFilterActive}`
   );
+  // Raw pool + rule map so a "stale asset survived the rules filter" report
+  // can be diagnosed from logs alone (Meta token lives only in Vercel env).
+  dbg(
+    `[meta-api][rules-dump] ad=${adId} images=` +
+      rawFeedImages
+        .map((img) => {
+          const d = img.hash ? dimMap.get(img.hash) : undefined;
+          const labels = imgLabelNames(img).join("+") || "-";
+          return `${(img.hash ?? "?").slice(0, 8)}@${d?.width ?? "?"}x${d?.height ?? "?"}[${labels}]`;
+        })
+        .join(", ") +
+      ` | rules=` +
+      customizationRules
+        .map((r) => {
+          const label = (r.image_label as { name?: string } | undefined)?.name ?? "-";
+          const place = describePlacement(r.customization_spec as Record<string, unknown> | undefined);
+          return `p${r.priority ?? "?"}:${label}→${place}`;
+        })
+        .join(", ")
+  );
 
   // Plan which live images to send and record the authoritative inventory.
   // Carousels legitimately carry many assets (cards × per-placement sizes); the
