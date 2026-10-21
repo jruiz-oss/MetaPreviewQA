@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { filterAdsByKeyword } from "@/lib/campaign-filter";
+import FeedbackBox from "./FeedbackBox";
 
 
 type AdUnit = {
@@ -539,6 +540,8 @@ export default function QAPage() {
   const [woDestinationUrl, setWoDestinationUrl] = useState<string | null>(null);
   const [units, setUnits] = useState<AdUnit[]>([]);
   const [loading, setLoading] = useState(false);
+  // Bumped on every fresh full run so the feedback box starts blank each time.
+  const [runCount, setRunCount] = useState(0);
   const [result, setResult] = useState<QAResult | null>(null);
   const [error, setError] = useState("");
   // Set when any /api/qa call comes back with errorKind: "credits" — the
@@ -1197,6 +1200,7 @@ export default function QAPage() {
         return { ...base, units: base.units.filter((u) => !covers(u)) };
       });
     } else {
+      setRunCount((n) => n + 1);
       setResult({ overall_status: "pass", units: [], critical_issues: [], notes: "" });
     }
     setError("");
@@ -2388,6 +2392,31 @@ export default function QAPage() {
               </div>
             ))}
             </div>
+
+            {/* Feedback on the output. Outside the PDF wrapper on purpose. */}
+            {!loading && result.units.length > 0 && (
+              <FeedbackBox
+                key={runCount}
+                buildSnapshot={() => ({
+                  overall_status: result.overall_status,
+                  adCount: result.units.length,
+                  woLabels: detectedDocs.map((d) => d.woLabel).filter(Boolean),
+                  units: result.units.map((u) => {
+                    const keys = Object.entries(u.checks ?? {}).map(
+                      ([k, c]) => [k, displayCheckResult(k, c).status] as const
+                    );
+                    return {
+                      name: u.name,
+                      adId: u.adId ?? null,
+                      status: u.status,
+                      failing: keys.filter(([, st]) => st === "fail").map(([k]) => CHECK_LABELS[k] ?? k),
+                      warning: keys.filter(([, st]) => st === "warning").map(([k]) => CHECK_LABELS[k] ?? k),
+                    };
+                  }),
+                  critical: consolidateCriticalIssues(result.units),
+                })}
+              />
+            )}
           </div>
         )}
       </main>
